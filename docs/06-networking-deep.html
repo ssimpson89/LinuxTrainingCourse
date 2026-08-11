@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 - Networking Deep | Linux Training Course</title>
+<link rel="stylesheet" href="style.css"></head>
+<body><div class="layout">
+<nav class="sidebar"><a href="index.html"><strong>Linux Training Course</strong></a><hr>
+<a href="00-track-overview.html" data-page="00-track-overview.html">00 - Track Overview</a>
+<a href="01-permissions-and-access-control.html" data-page="01-permissions-and-access-control.html">01 - Permissions and Access Control</a>
+<a href="02-users-authentication-and-pam.html" data-page="02-users-authentication-and-pam.html">02 - Users, Authentication and PAM</a>
+<a href="03-processes-scheduling-and-signals.html" data-page="03-processes-scheduling-and-signals.html">03 - Processes, Scheduling and Signals</a>
+<a href="04-filesystems-and-the-vfs.html" data-page="04-filesystems-and-the-vfs.html">04 - Filesystems and the VFS</a>
+<a href="05-storage-and-lvm.html" data-page="05-storage-and-lvm.html">05 - Storage and LVM</a>
+<a href="06-networking-deep.html" data-page="06-networking-deep.html" class="current">06 - Networking Deep</a>
+<a href="07-systemd.html" data-page="07-systemd.html">07 - systemd</a>
+<a href="08-boot-and-init.html" data-page="08-boot-and-init.html">08 - Boot and Init</a>
+<a href="09-the-kernel.html" data-page="09-the-kernel.html">09 - The Kernel</a>
+<a href="10-namespaces-and-cgroups-v2.html" data-page="10-namespaces-and-cgroups-v2.html">10 - Namespaces and cgroups v2</a>
+<a href="11-observability-and-tracing-with-ebpf.html" data-page="11-observability-and-tracing-with-ebpf.html">11 - Observability and Tracing with eBPF</a>
+<a href="12-selinux-and-hardening.html" data-page="12-selinux-and-hardening.html">12 - SELinux and Hardening</a>
+<a href="13-samba-and-smb.html" data-page="13-samba-and-smb.html">13 - Samba and SMB</a>
+<a href="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html" data-page="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html">14 - Early Userspace - dracut Hooks, udev and the initqueue</a></nav>
+<main><h1 id="networking-deep">06 - Networking Deep</h1>
+<p>Backlink: <a href="00-track-overview.html">00 - Track
+Overview</a></p>
+<blockquote>
+<p>Scope: the kernel network datapath end to end (RX and TX), netfilter
+hooks and nftables (with the iptables mental-model mapping), routing and
+policy routing, network namespaces + veth + bridges, tc/qdisc traffic
+control, socket internals, connection tracking, and an intro to XDP/eBPF
+on the datapath. The through-line is <strong>container networking from
+first principles</strong>: by the end you should be able to reconstruct,
+with <code>ip</code>, <code>nft</code>, and <code>tc</code>, everything
+Docker/Podman/CNI does for you, and know which counter is lying when it
+silently drops your packets.</p>
+</blockquote>
+<hr />
+<h2 id="concept-deep-dive">Concept deep-dive</h2>
+<p>The kernel network stack is not one thing. It is a pipeline of
+subsystems that hand a packet buffer (<code>struct sk_buff</code>,
+universally “skb”) from the NIC’s DMA ring up through softirq context,
+protocol handlers, netfilter hooks, routing, and finally a socket
+receive queue, then back down on transmit. Every one of those handoffs
+is a place where a packet can be dropped, and each drop increments a
+<em>different</em> counter. Staff-level networking debugging is largely
+the discipline of knowing which counter corresponds to which
+handoff.</p>
+<h3 id="the-map-where-a-packet-lives-in-the-kernel">0. The map: where a
+packet lives in the kernel</h3>
+<pre><code>                RX (ingress)                          TX (egress)
+                ============                          ===========
+   NIC RX ring (DMA) ----------.              socket send() / sendmsg()
+        | hardirq              |                     |
+   napi_schedule()             |              tcp_sendmsg -&gt; tcp_write_xmit
+        | NET_RX_SOFTIRQ        |                     | (build skb, TSO/GSO)
+   net_rx_action()             |              ip_queue_xmit / ip_output
+        | driver -&gt;poll()      |                     | nf INET_LOCAL_OUT
+   napi_gro_receive()  &lt;-- GRO |              nf INET_POST_ROUTING (SNAT)
+        | XDP hook (native)    |                     |
+   __netif_receive_skb_core    |              dev_queue_xmit()
+        | tc ingress (clsact)  |                     | tc egress (clsact)
+        | nf INGRESS (netdev)  |                     | qdisc enqueue/dequeue
+   ip_rcv -&gt; nf PRE_ROUTING    |              nf netdev EGRESS (&gt;=5.16)
+        | conntrack, DNAT      |                     |
+   fib_lookup (routing)        |              ndo_start_xmit -&gt; NIC TX ring
+        |                      |                     |
+   local? --------------------&#39;              (DMA out, TX completion IRQ)
+     |  yes                  no -&gt; forward
+   nf INPUT                        nf FORWARD -&gt; nf POST_ROUTING
+     |                                    (SNAT/masquerade)
+   L4 (tcp_v4_rcv / udp_rcv)
+     | demux by 4-tuple
+   sk-&gt;sk_receive_queue -&gt; wake up -&gt; recv()</code></pre>
+<p>Keep this map open while reading. Everything below is a zoom into one
+of these boxes.</p>
+<h3 id="the-receive-path-in-detail">1. The receive path in detail</h3>
+<p><strong>Ring buffer and DMA.</strong> The NIC and driver pre-allocate
+a <em>ring</em> of RX descriptors, each pointing at a DMA-mapped buffer
+in RAM. When a frame arrives, the NIC DMA-copies it into the next buffer
+and advances the ring. The CPU never touches the wire; it touches memory
+the NIC wrote. Ring size is visible and tunable with
+<code>ethtool -g eth0</code> (<code>RX/TX</code> current vs max). A
+too-small ring under bursty load overflows before softirq drains it:
+that shows up as <code>rx_no_buffer</code> /
+<code>rx_missed_errors</code> / <code>rx_fifo_errors</code> in
+<code>ethtool -S eth0</code>, <strong>not</strong> in any
+<code>ip -s link</code> counter. This is the first “lying dashboard”
+trap: your <code>ifconfig</code> drops are zero, the NIC is dropping in
+silicon.</p>
+<p><strong>Hard IRQ, then NAPI.</strong> Interrupt-per-packet melts a
+CPU at high pps, so Linux uses NAPI (New API). The driver’s hardirq
+handler does almost nothing: it calls <code>napi_schedule()</code>,
+which sets <code>NAPI_STATE_SCHED</code>, masks further RX interrupts on
+that queue, and raises <code>NET_RX_SOFTIRQ</code>. Real work happens in
+softirq context in <code>net_rx_action()</code>
+(<code>net/core/dev.c</code>). This is <em>interrupt mitigation</em>:
+while packets keep arriving, the NIC stays in polled mode and interrupts
+stay masked. Source of truth: <code>struct napi_struct</code>,
+<code>napi_poll()</code>, and the driver’s <code>-&gt;poll</code>
+callback.</p>
+<p><strong>net_rx_action and the budget.</strong>
+<code>net_rx_action()</code> walks the per-CPU <code>poll_list</code> of
+scheduled NAPI instances and calls each driver’s
+<code>-&gt;poll(napi, budget)</code>. Two limits stop softirq from
+monopolizing the CPU: a per-poll <code>budget</code> (default 64, global
+<code>net.core.netdev_budget</code> default 300 across all NAPIs) and a
+time limit (<code>net.core.netdev_budget_usecs</code>, default 2000).
+When either is exhausted, softirq reschedules itself; if softirqs keep
+saturating, the work is pushed to the per-CPU <code>ksoftirqd/N</code>
+kernel thread, which is why you see <code>ksoftirqd</code> burning a
+core under heavy RX. The counter for “budget exhausted, had to defer” is
+column 3 (time_squeeze) in <code>/proc/net/softnet_stat</code> (one line
+per CPU, hex). Column 2 is packets <em>dropped</em> because the per-CPU
+backlog queue (<code>netdev_max_backlog</code>) was full. Learn to read
+softnet_stat; it is the single most under-used RX diagnostic.</p>
+<p><strong>skb construction and GRO.</strong> The driver
+<code>-&gt;poll</code> builds an <code>sk_buff</code> around each
+received frame (<code>napi_build_skb</code> / <code>build_skb</code>)
+and calls <code>napi_gro_receive()</code>. GRO (Generic Receive Offload)
+coalesces consecutive segments of the same flow into one large skb
+<em>before</em> it climbs the stack, amortizing per-packet overhead
+across the TCP/IP code. GRO is why <code>tcpdump</code> on a busy 10G
+link shows you 64KB “packets” that never existed on the wire. Toggle
+with <code>ethtool -K eth0 gro off</code> when you need to see
+reality.</p>
+<p><strong>RSS, RPS, RFS: spreading the load.</strong> A single RX queue
+pins all softirq work to one CPU, capping you at whatever one core can
+do (often the real limit long before line rate). Three mechanisms spread
+it: - <strong>RSS</strong> (Receive Side Scaling): hardware hashes the
+4-tuple and steers flows to multiple hardware RX queues, each with its
+own IRQ. Check <code>ls   /sys/class/net/eth0/queues/</code> and
+<code>ethtool -l eth0</code>. IRQ-to-CPU affinity lives in
+<code>/proc/irq/*/smp_affinity</code>. - <strong>RPS</strong> (Receive
+Packet Steering): software equivalent when the NIC has one queue; hashes
+and enqueues to a remote CPU’s backlog.
+<code>/sys/class/net/eth0/queues/rx-*/rps_cpus</code>. -
+<strong>RFS</strong> (Receive Flow Steering): steers a flow to the CPU
+where the consuming application runs, improving cache locality.
+<code>net.core.rps_sock_flow_entries</code>.</p>
+<p>At scale, mis-tuned IRQ affinity (all queues’ IRQs pinned to CPU0) is
+a classic throughput cliff that no application-level metric reveals.</p>
+<p><strong>Up the stack.</strong>
+<code>__netif_receive_skb_core()</code> runs the tc ingress (clsact)
+hook, the netfilter netdev-ingress hook, then dispatches by
+<code>skb-&gt;protocol</code> to the registered <code>packet_type</code>
+handler (<code>ip_rcv</code> for IPv4). From there: netfilter
+PREROUTING, conntrack, routing decision (<code>ip_rcv_finish</code>
+-&gt; <code>fib_lookup</code>), then either the local delivery path
+(<code>ip_local_deliver</code> -&gt; netfilter INPUT -&gt;
+<code>tcp_v4_rcv</code>) or forwarding (netfilter FORWARD -&gt;
+POSTROUTING -&gt; <code>dev_queue_xmit</code>).</p>
+<p><strong>L4 demux and the socket queue.</strong>
+<code>tcp_v4_rcv()</code> looks up the owning socket by the 4-tuple in a
+hash table (<code>ehash</code> for established, <code>lhash</code> for
+listeners). For an established connection the data is appended to
+<code>sk-&gt;sk_receive_queue</code> and the socket’s
+<code>sk_data_ready</code> callback wakes any thread blocked in
+<code>recv()</code>/<code>epoll_wait()</code>. For a SYN to a listener,
+the two-queue handshake machinery kicks in (see §7).</p>
+<h3 id="the-transmit-path-in-detail">2. The transmit path in detail</h3>
+<p><code>send()</code> copies user data into skbs in the socket send
+buffer (<code>sk_wmem</code>), TCP decides what to send
+(<code>tcp_write_xmit</code>, honoring cwnd/rwnd), GSO defers
+segmentation so a big skb travels most of the stack as one unit
+(segmented late, ideally offloaded to the NIC as TSO).
+<code>ip_queue_xmit</code> adds the IP header, netfilter LOCAL_OUT and
+POSTROUTING run, and <code>dev_queue_xmit()</code> hands the skb to the
+interface’s <strong>qdisc</strong> (§6). The qdisc enqueues, then
+dequeues into the driver’s <code>ndo_start_xmit</code>, which places it
+on the TX ring for DMA. A TX-completion interrupt later frees the skb.
+Backpressure: if the qdisc is full, <code>dev_queue_xmit</code> returns
+<code>NET_XMIT_DROP</code> and TCP treats it as congestion. BQL (Byte
+Queue Limits,
+<code>/sys/class/net/eth0/queues/tx-*/byte_queue_limits/</code>) bounds
+how many bytes sit in the ring to fight bufferbloat at the driver
+layer.</p>
+<h3 id="sk_buff-the-packets-home">3. sk_buff: the packet’s home</h3>
+<p><code>struct sk_buff</code> (<code>include/linux/skbuff.h</code>) is
+one of the most important structures in the kernel. Mental model:</p>
+<pre><code> sk_buff (metadata)                     linear data buffer (skb-&gt;head .. skb-&gt;end)
+ +-----------------+                    +----+--------+---------+---------+--------+
+ | head, data,     |----- head -------&gt;|head| room   | headers | payload | tail   |
+ | tail, end       |                    |room|(push)  |  L2/L3  |  L4     | room   |
+ | len, data_len   |                    +----+--------+---------+---------+--------+
+ | mac/network/    |                             ^data      ^tail   ^end
+ |   transport hdr |                    skb_reserve/push/pull/put move these pointers
+ | dev, sk         |                    Non-linear payload lives in skb_shared_info
+ | cb[48] (per-    |                    (page frags + frag_list) at skb-&gt;end
+ |   layer scratch)|
+ +-----------------+</code></pre>
+<p>Key mechanisms a senior knows: - <strong>Header pointers, not
+copies.</strong> <code>skb_pull</code>/<code>skb_push</code> just move
+<code>skb-&gt;data</code>. Layers don’t copy the packet as it climbs;
+they slide a pointer. This is why zero-copy matters and why an
+out-of-bounds header parse is a real risk (the verifier enforces bounds
+checks in eBPF for exactly this reason, §9). - <strong>Non-linear
+skbs.</strong> Large/GRO’d packets keep payload in page fragments
+referenced by <code>skb_shared_info</code>, not the linear buffer.
+<code>skb_headlen()</code> vs <code>skb-&gt;data_len</code>.
+<code>skb_linearize()</code> collapses them (expensive) when a consumer
+needs contiguous bytes. - <strong>Cloning vs copying.</strong>
+<code>skb_clone()</code> shares the data buffer (bumps a refcount) and
+copies only metadata; tcpdump/AF_PACKET taps clone.
+<code>pskb_copy</code>/<code>skb_copy</code> deep-copy. Writing to a
+cloned skb triggers copy-on-write (<code>skb_cow</code>). -
+<strong><code>skb-&gt;cb[48]</code></strong> is per-layer scratch (TCP
+stores control block state here). - <strong>Truesize</strong>
+(<code>skb-&gt;truesize</code>) is the real memory footprint and is what
+socket memory accounting charges against
+<code>sk_rmem</code>/<code>sk_wmem</code>, not <code>skb-&gt;len</code>.
+A flood of tiny packets can exhaust socket memory while
+<code>len</code>-based accounting looks fine.</p>
+<h3 id="netfilter-hooks-and-nftables">4. Netfilter hooks and
+nftables</h3>
+<p>Netfilter is five hook points in the IPv4/IPv6 path plus the newer
+netdev hooks. Every firewall, NAT, and conntrack decision happens at one
+of these:</p>
+<pre><code>                         PREROUTING          FORWARD          POSTROUTING
+   NIC --[netdev        [conntrack,         (filter)         [SNAT/       --&gt; NIC
+        ingress]---------&gt; DNAT] --- routing decision --------&gt; masquerade]
+                              |                                    ^
+                          local dest                               |
+                              v                                    |
+                           INPUT ---&gt; local socket ---&gt; OUTPUT ----&#39;</code></pre>
+<p><strong>Hook priorities (this is the exam question).</strong>
+Multiple chains can attach to the same hook; they run in ascending
+integer priority. The canonical values (from
+<code>uapi/linux/netfilter_ipv4.h</code>, exposed as nft names) explain
+<em>why</em> things happen in the order they do:</p>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Name</th>
+<th>What lives here</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>-400</td>
+<td>CONNTRACK_DEFRAG</td>
+<td>IP defragmentation</td>
+</tr>
+<tr>
+<td>-300</td>
+<td>RAW</td>
+<td><code>raw</code> table (e.g. <code>NOTRACK</code>), runs before
+conntrack</td>
+</tr>
+<tr>
+<td>-225</td>
+<td>SELINUX_FIRST</td>
+<td>SELinux</td>
+</tr>
+<tr>
+<td>-200</td>
+<td>CONNTRACK</td>
+<td>connection tracking creates/looks up the tuple</td>
+</tr>
+<tr>
+<td>-150</td>
+<td>MANGLE</td>
+<td>packet mangling</td>
+</tr>
+<tr>
+<td>-100</td>
+<td>NAT_DST (DSTNAT)</td>
+<td>DNAT (prerouting)</td>
+</tr>
+<tr>
+<td>0</td>
+<td>FILTER</td>
+<td>the default <code>filter</code> table / accept-drop decisions</td>
+</tr>
+<tr>
+<td>50</td>
+<td>SECURITY</td>
+<td>SELinux secmark table</td>
+</tr>
+<tr>
+<td>100</td>
+<td>NAT_SRC (SRCNAT)</td>
+<td>SNAT/masquerade (postrouting)</td>
+</tr>
+<tr>
+<td>300</td>
+<td>CONNTRACK_HELPER</td>
+<td>ALG helpers (ftp, sip)</td>
+</tr>
+</tbody>
+</table>
+<p>Consequences you must internalize: conntrack runs at
+<strong>-200</strong> in prerouting, so DNAT at -100 happens
+<em>after</em> the tuple is created but conntrack records the pre-DNAT
+tuple and rewrites reply packets accordingly. NAT only actually rewrites
+on the <em>first</em> packet of a flow; subsequent packets are handled
+by conntrack’s stored NAT transformation, which is why a
+<code>nat</code>-type chain must not be flushed mid-flow. Also why you
+can’t put a filter chain at priority &lt; -200 and expect conntrack
+state (<code>ct state established</code>) to be populated: it hasn’t run
+yet.</p>
+<p><strong>Netdev hooks.</strong> <code>ingress</code> (since 4.2) sees
+the frame right after the driver, before <code>prerouting</code>, in the
+same place as tc ingress and before conntrack: ideal for early drop/DDoS
+filtering without conntrack cost. <code>egress</code> (nft support since
+Linux 5.16) mirrors it on the way out, positioned right before tc
+egress, so a mark set here is visible to tc.</p>
+<p><strong>The nftables VM.</strong> nft is not “iptables with new
+syntax.” Under the hood it is a tiny bytecode VM (<code>nf_tables</code>
+core) that evaluates <em>expressions</em> against the packet and
+executes <em>statements</em>. A rule is a list of expressions; matching
+loads a packet field (payload, meta, ct) into a register and compares.
+The power comes from first-class data structures the kernel evaluates in
+one shot: - <strong>sets</strong> (<code>ip saddr @blocklist</code>)
+backed by a hashtable or, for ranges, an interval tree (rbtree) —
+O(1)/O(log n) instead of a linear chain of rules; - <strong>maps and
+verdict maps</strong> (<code>ip daddr map { ... }</code>,
+<code>vmap</code>) — data-driven dispatch; -
+<strong>concatenations</strong> — match tuples like
+<code>. ip saddr . tcp dport .</code> in one set.</p>
+<p>This is why nftables scales where iptables’ linear rule traversal
+collapses: a 100k-entry iptables ipset-less ruleset is 100k comparisons
+per packet; the nft set is one lookup.</p>
+<p><strong>iptables mental-model mapping.</strong> iptables
+<em>tables</em> were an artifact of separate kernel modules; nft has no
+fixed tables, you create chains at whatever hook+priority you want. The
+mapping:</p>
+<table>
+<thead>
+<tr>
+<th>iptables table</th>
+<th>nft base-chain hook + priority</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>raw</td>
+<td>prerouting/output @ raw (-300)</td>
+</tr>
+<tr>
+<td>mangle</td>
+<td>any hook @ mangle (-150)</td>
+</tr>
+<tr>
+<td>nat</td>
+<td>prerouting @ dstnat (-100) / postrouting @ srcnat (100)</td>
+</tr>
+<tr>
+<td>filter</td>
+<td>input/forward/output @ filter (0)</td>
+</tr>
+</tbody>
+</table>
+<p>On RHEL/Rocky 8+ the <code>iptables</code> command is by default
+<code>iptables-nft</code> — a translation shim that programs nft under
+the hood. <code>nft list ruleset</code> shows you the reality; the
+legacy <code>iptables -L</code> output is a compatibility fiction.
+Mixing native nft rules and iptables-nft rules on overlapping hooks is a
+real production footgun (ordering surprises).</p>
+<h3 id="routing-fib-and-policy-routing">5. Routing, FIB, and policy
+routing</h3>
+<p>The routing decision is a longest-prefix-match lookup in the FIB
+(Forwarding Information Base), implemented as an LPC-trie
+(<code>fib_trie</code>, <code>net/ipv4/fib_trie.c</code>). But before
+the main table is consulted, the kernel walks the <strong>routing policy
+database</strong> (<code>ip rule</code>), a priority-ordered list of
+rules (<code>fib_rules</code>). Each rule has a selector (source,
+<code>fwmark</code>, <code>iif</code>, <code>tos</code>, uid range) and
+an action, normally “look up table N.” First match wins. Default
+rules:</p>
+<pre><code>0:      from all lookup local     # kernel-owned; local/broadcast addresses
+32766:  from all lookup main      # your normal routes
+32767:  from all lookup default</code></pre>
+<p>Policy routing = insert rules before 32766 that send matched traffic
+to a custom table. The canonical use is multi-homing and mark-based
+routing: mark packets with nft/iptables (<code>meta mark set</code> /
+<code>-j MARK</code>), then
+<code>ip rule add fwmark 0x1 table 100</code>. Named tables live in
+<code>/etc/iproute2/rt_tables</code>. This is exactly the mechanism
+VPNs, WireGuard’s <code>Table=</code>, Kubernetes egress gateways, and
+multi-ISP failover use. <code>ip route get &lt;dst&gt;</code> tells you
+the actual decision including which table and rule fired — always use it
+instead of eyeballing <code>ip route show</code>.</p>
+<p>Scale/failure notes: the FIB trie is fast but route churn (BGP full
+tables, ~1M routes) stresses memory and update latency;
+<code>ip -s route</code> and <code>/proc/net/fib_trie</code> expose it.
+Reverse-path filtering (<code>net.ipv4.conf.*.rp_filter</code>) silently
+drops asymmetrically-routed packets — the single most common “policy
+routing works one way only” bug.</p>
+<h3 id="tc-qdiscs-classes-filters">6. tc: qdiscs, classes, filters</h3>
+<p>Every TX interface has a <strong>qdisc</strong> (queueing discipline)
+that decides the order and timing of dequeue. The default on modern
+kernels is <code>fq_codel</code> (fair-queue + CoDel AQM) on
+single-queue devices, or <code>mq</code> (a root that delegates to one
+child qdisc per hardware TX queue) on multiqueue NICs — an important
+detail: on a multiqueue NIC, replacing “the” qdisc means replacing each
+per-queue child, and a naive <code>tc qdisc replace dev eth0 root</code>
+may not do what you think.</p>
+<p>Taxonomy: - <strong>Classless</strong> qdiscs shape/schedule a single
+stream: <code>pfifo_fast</code> (legacy 3-band priority FIFO),
+<code>fq_codel</code>/<code>cake</code> (modern AQM that fights
+bufferbloat by dropping/ECN-marking when standing queue latency exceeds
+a target), <code>netem</code> (deliberately inject latency/loss/reorder
+— indispensable for testing), <code>tbf</code> (token bucket rate
+limit). - <strong>Classful</strong> qdiscs build a tree:
+<code>htb</code> (Hierarchical Token Bucket) is the workhorse for
+guaranteed/ceiling bandwidth per class; <code>hfsc</code> for
+latency+rate decoupling. Leaf classes get their own child qdisc (usually
+fq_codel).</p>
+<p>A packet’s path through a classful qdisc: <strong>filters</strong>
+(tc filters: u32, flower, or a bpf classifier) classify the skb into a
+<strong>class</strong>; the class’s qdisc enqueues it; the root’s
+dequeue algorithm decides who transmits next.</p>
+<pre><code>        root htb 1:
+        /     |     \
+     1:10   1:20   1:30      &lt;- classes with rate/ceil
+      |       |      |
+   fq_codel fq_codel netem   &lt;- leaf qdiscs
+      ^ filters (flower/u32/bpf) sort skbs into classes</code></pre>
+<p><strong>clsact</strong> is the modern ingress+egress hook qdisc for
+attaching eBPF (<code>tc filter ... bpf da</code>) — this is where
+Cilium does most of its dataplane work. Direct-action (<code>da</code>)
+lets the eBPF program return the verdict itself.</p>
+<p>CAKE deserves a callout: it rolls shaping, per-flow and per-host
+fairness, and DiffServ handling into one qdisc and is the current best
+answer for last-mile bufferbloat.</p>
+<p>Failure mode at scale: a single deep FIFO qdisc (or a driver with a
+huge TX ring and no BQL) creates bufferbloat — RTT balloons under load
+even though throughput looks fine. The tell is high <code>ping</code>
+latency <em>only when the link is saturated</em>, invisible to bandwidth
+graphs. <code>tc -s qdisc show dev eth0</code> (backlog, drops,
+overlimits) plus <code>fq_codel</code>’s per-flow stats diagnose it.</p>
+<h3 id="socket-internals-and-the-two-queue-accept-model">7. Socket
+internals and the two-queue accept model</h3>
+<p><code>struct sock</code> (<code>include/net/sock.h</code>) is the
+protocol-agnostic socket; <code>tcp_sock</code> embeds it. Key fields:
+<code>sk_receive_queue</code>, <code>sk_write_queue</code>,
+<code>sk_rmem_alloc</code>/<code>sk_wmem_alloc</code> (memory accounting
+vs <code>sk_rcvbuf</code>/<code>sk_sndbuf</code> limits),
+<code>sk_backlog</code> (packets that arrive while the socket is locked
+by a syscall), and the callbacks <code>sk_data_ready</code>,
+<code>sk_write_space</code>, <code>sk_state_change</code>.</p>
+<p><strong>The listen handshake uses two queues</strong>, and confusing
+them is the top TCP-scaling bug: - <strong>SYN queue</strong> (a.k.a.
+request-sock queue): connections in <code>SYN_RECV</code> — SYN
+received, SYN-ACK sent, final ACK not yet arrived. Bounded by
+<code>net.ipv4.tcp_max_syn_backlog</code>. - <strong>Accept
+queue</strong> (completed queue): fully-established connections waiting
+for the app to call <code>accept()</code>. Bounded by
+<code>min(backlog, net.core.somaxconn)</code> where <code>backlog</code>
+is the second arg to <code>listen(2)</code>. <code>somaxconn</code>
+default rose to 4096 in recent kernels (was 128 for decades — a famous
+silent bottleneck).</p>
+<pre><code> SYN --&gt; [ SYN queue ]  --final ACK--&gt;  [ accept queue ] --accept()--&gt; fd
+         (SYN_RECV)                     (ESTABLISHED)
+   overflow: SYN drop or               overflow: drop ACK, resend SYN-ACK,
+   syncookies                          or reset if tcp_abort_on_overflow=1</code></pre>
+<ul>
+<li><strong>Accept-queue overflow</strong> happens when the application
+is too slow to <code>accept()</code>. The kernel drops the client’s
+final ACK (default) and the connection silently retries; the counter is
+<code>ListenOverflows</code> and <code>ListenDrops</code> in
+<code>nstat -a</code> / <code>netstat -s</code>. This is the “our
+service intermittently hangs on connect under load” bug — the app, not
+the network.</li>
+<li><strong>SYN-queue overflow / SYN flood.</strong>
+<code>net.ipv4.tcp_syncookies=1</code> lets the server encode the
+connection state into the SYN-ACK sequence number (a cryptographic
+cookie) and discard SYN-queue state entirely, so it can complete
+handshakes without holding per-embryo memory. Cost: TCP options (window
+scaling, SACK, timestamps) are reconstructed with reduced fidelity, so
+syncookies are a survival mechanism, not a free lunch.</li>
+</ul>
+<p><strong>SO_REUSEPORT</strong> lets N sockets bind the same ip:port;
+the kernel hashes each incoming connection to one of the group’s
+listeners (<code>sk_reuseport_cb</code>, an array that starts at 128
+sockets and doubles). This gives per-thread accept queues and kills the
+accept-lock contention and thundering-herd of one shared listener. A
+<code>BPF_PROG_TYPE_SK_REUSEPORT</code> program can override the hash
+for custom steering. Pre-5.14 there was a real defect: closing a
+listener dropped in-flight handshakes and queued children even though a
+sibling could have taken them — relevant for zero-downtime restarts.</p>
+<p><strong>epoll scalability.</strong> <code>EPOLLEXCLUSIVE</code>
+(4.5+) wakes one waiter per event instead of the whole herd; level- vs
+edge-triggered semantics and the classic “epoll is broken for accept
+load balancing” articles are required reading (see resources).
+<code>SO_INCOMING_CPU</code> and RFS align the wakeup CPU with the
+softirq CPU for cache locality.</p>
+<h3 id="connection-tracking-conntrack">8. Connection tracking
+(conntrack)</h3>
+<p>Conntrack (<code>nf_conntrack</code>) is the stateful core under NAT
+and <code>ct state</code> matching. On the first packet of a flow it
+creates a <code>struct nf_conn</code> recording both directions’ tuples
+(<code>IP_CT_DIR_ORIGINAL</code> / <code>IP_CT_DIR_REPLY</code>) in a
+hashtable, and every subsequent packet is matched to it. NAT is layered
+on top: the translation is stored in the conn and applied automatically
+to the whole flow, which is why you NAT the first packet and conntrack
+handles the rest.</p>
+<p>State machine (for TCP):
+<code>NEW -&gt; ESTABLISHED -&gt; ...</code>, with <code>RELATED</code>
+for helper-spawned flows (FTP data channel) and <code>INVALID</code> for
+packets that don’t fit. <code>ct state</code> in nft matches these.</p>
+<p><strong>The failure mode that pages you:</strong>
+<code>nf_conntrack: table full, dropping packet</code>. This is
+<em>not</em> CPU or memory exhaustion; it’s slot exhaustion. Two knobs:
+- <code>net.netfilter.nf_conntrack_max</code> — max tracked flows
+(default often 65536, way too low for a busy LB/NAT box or a Kubernetes
+node). - <code>net.netfilter.nf_conntrack_buckets</code> (via
+<code>nf_conntrack_hashsize</code>) — hashtable buckets. Rule of thumb:
+<code>max ~= 4 * buckets</code>. If buckets is too small, each bucket
+becomes a long linked list and <em>lookups</em> degrade (per-packet
+cost), a subtler killer than outright drops.</p>
+<p>Diagnostics: <code>conntrack -L</code> (live table),
+<code>conntrack -S</code> (per-CPU stats: <code>insert_failed</code>,
+<code>drop</code>, <code>early_drop</code>),
+<code>cat /proc/sys/net/netfilter/nf_conntrack_count</code>. Mitigations
+beyond raising limits: shorten timeouts for short-lived flows
+(<code>nf_conntrack_tcp_timeout_time_wait</code>), or exempt
+high-volume/stateless traffic with a <code>notrack</code> rule in the
+raw/-300 chain so it never consumes a slot. On Kubernetes nodes,
+conntrack exhaustion from kube-proxy iptables/ipvs NAT is a canonical
+incident; it’s why Cilium’s eBPF datapath can bypass conntrack for some
+paths entirely.</p>
+<p>Conntrack is also a <em>correctness</em> landmine: it defrags (at
+-400) and holds flow state, so asymmetric routing (reply takes a
+different box) breaks NAT, and flushing conntrack mid-flow breaks
+established connections. The <code>flowtable</code> fast path
+(<code>docs.kernel.org/networking/nf_flowtable.html</code>) offloads
+established flows past the full netfilter traversal (and even to
+hardware), another modern scaling lever.</p>
+<h3 id="xdp-and-ebpf-on-the-datapath">9. XDP and eBPF on the
+datapath</h3>
+<p><strong>XDP (eXpress Data Path)</strong> runs an eBPF program at the
+<em>earliest possible</em> point — in the driver’s RX poll, on the raw
+DMA buffer, <strong>before any skb is allocated</strong>. That “no skb”
+property is the whole point: skb allocation is expensive, so
+dropping/redirecting before it is what enables tens of millions of pps
+on one box (DDoS scrubbing, L4 load balancing like Meta’s Katran,
+Cloudflare’s L4Drop).</p>
+<p>Return codes (the verdict): <code>XDP_DROP</code> (free the buffer,
+~free DDoS mitigation), <code>XDP_PASS</code> (continue up the normal
+stack, allocating the skb), <code>XDP_TX</code> (bounce back out the
+same NIC — needs driver support), <code>XDP_REDIRECT</code> (send to
+another NIC or into an AF_XDP socket), <code>XDP_ABORTED</code> (drop +
+tracepoint, signals a bug).</p>
+<p>Three attach modes, and knowing the difference is a senior tell: -
+<strong>Native/driver</strong> — the driver implements the XDP hook;
+full performance. Requires driver support (ixgbe, i40e, mlx5,
+virtio-net, veth, etc.). - <strong>Offloaded</strong> — the program runs
+on the NIC (SmartNIC, e.g. Netronome). Rare. -
+<strong>Generic/SKB</strong> — kernel fallback for any device, runs
+<em>after</em> skb allocation in <code>__netif_receive_skb</code>. Works
+everywhere, but loses XDP’s performance premise. If your XDP program
+“works but isn’t fast,” you’re silently in generic mode.</p>
+<p><strong>tc/BPF (clsact)</strong> is the other datapath hook: it runs
+later (skb exists, so you have full metadata and can see egress), and is
+where policy/observability that needs skb context lives. XDP is for
+speed on ingress; tc-bpf is for richer skb-aware processing both
+directions. Cilium uses both.</p>
+<p><strong>The eBPF machine model</strong> (why the constraints exist):
+a restricted 64-bit RISC VM, JIT-compiled to native. The
+<strong>verifier</strong> is the gatekeeper — it does static analysis to
+prove the program terminates and is memory-safe <em>before</em> load: no
+unbounded loops (bounded loops allowed since 5.3), every pointer
+dereference must be provably in-bounds (hence the endless
+<code>if (data + sizeof(hdr) &gt; data_end) return XDP_DROP;</code> in
+packet parsers), and a complexity ceiling (~1M instructions analyzed).
+Programs communicate with userspace and hold state via
+<strong>maps</strong> (hash, array, LRU, per-CPU, LPM-trie for
+longest-prefix, ringbuf for events). <strong>CO-RE + BTF</strong>
+(Compile Once, Run Everywhere) is the modern portability mechanism: the
+program carries relocations resolved against the running kernel’s BTF
+type info, so one binary runs across kernel versions without recompiling
+against each kernel’s headers. This is what made bpftrace/bcc tooling
+practical to ship.</p>
+<h3
+id="network-namespaces-veth-bridges-container-networking-from-first-principles">10.
+Network namespaces, veth, bridges: container networking from first
+principles</h3>
+<p><strong>Namespaces</strong> virtualize kernel resources per-process;
+the <strong>network namespace</strong> (<code>CLONE_NEWNET</code>) gives
+a process its own interfaces, routing tables, netfilter rules, conntrack
+table, <code>/proc/net</code>, and port space. A namespace is created by
+<code>clone(CLONE_NEWNET)</code>/<code>unshare(CLONE_NEWNET)</code>/<code>setns()</code>;
+<code>ip netns add</code> does it and bind-mounts the nsfs handle under
+<code>/var/run/netns/</code> so it persists without a process. Every
+process has an entry in <code>/proc/PID/ns/net</code> — two processes in
+the same namespace share the inode number there. This <em>is</em> what a
+container’s network isolation is, at the syscall level; Docker just
+automates it.</p>
+<p><strong>veth</strong> is a virtual Ethernet cable: a pair of
+interfaces where a frame written to one end pops out the other. It is
+the wire that connects a namespace to the outside. You put one end in
+the container namespace and the other in the host (or a bridge).</p>
+<p><strong>bridge</strong> is a software L2 switch
+(<code>brctl</code>/<code>ip link add type bridge</code>): it learns
+MACs and forwards frames between enslaved ports. Docker’s
+<code>docker0</code> is exactly this. The full container-networking
+recipe, which you’ll build by hand in Lab 2:</p>
+<pre><code> host netns                                    container netns (ns1)
+ +------------------------------+              +-----------------------+
+ |            br0 (bridge)      |              |                       |
+ |         10.10.0.1/24         |              |   veth1 (eth0)        |
+ |        /        \            |              |   10.10.0.2/24        |
+ |   veth0-h     [uplink NAT    |    &quot;cable&quot;   |   default via         |
+ |     |          via nft       |&lt;====veth====&gt;|      10.10.0.1        |
+ |     &#39;-- enslaved to br0]     |              |                       |
+ +------------------------------+              +-----------------------+
+   + ip_forward=1
+   + nft masquerade oifname eth0   (SNAT container subnet to host IP)</code></pre>
+<p>That is the entire Docker bridge-network model: namespace + veth +
+bridge + <code>net.ipv4.ip_forward</code> + a masquerade rule + (for
+published ports) a DNAT rule. CNI plugins (bridge, ipvlan, macvlan) and
+Kubernetes are elaborations on these primitives.</p>
+<p><strong>Mount-namespace-adjacent detail that bites
+containers:</strong> veth and bridge live in the network namespace, but
+the <em>rules</em> (nft, conntrack, sysctls like
+<code>ip_forward</code>, <code>rp_filter</code>) are also per-netns. A
+container has its own empty conntrack table and its own
+<code>net.ipv4.*</code> — a sysctl you set on the host does not apply
+inside. This per-namespace independence is why “it works on the host but
+not in the container” is so common.</p>
+<p><code>macvlan</code>/<code>ipvlan</code> are alternatives to the
+veth+bridge pair: they hang virtual interfaces directly off a physical
+NIC with distinct MACs (macvlan) or shared MAC and distinct IPs (ipvlan
+L3), avoiding the bridge and its forwarding overhead — used when you
+want containers to appear as first-class hosts on the physical LAN.</p>
+<hr />
+<h2 id="hands-on-labs">Hands-on labs</h2>
+<blockquote>
+<p>All labs assume a throwaway Linux VM (any distro with a &gt;=5.15
+kernel; examples tested on Rocky 9 / Debian 12 / Ubuntu 22.04+). Run as
+root or via <code>sudo</code>. Nothing here touches persistent config
+outside the lab unless stated; namespaces and veths vanish on reboot.
+Install once, distro-agnostic:</p>
+<pre class="bash"><code># Debian/Ubuntu
+apt-get install -y iproute2 nftables tcpdump conntrack bpftrace ethtool netcat-openbsd
+# RHEL/Rocky/Fedora
+dnf install -y iproute nftables tcpdump conntrack-tools bpftrace ethtool nmap-ncat</code></pre>
+</blockquote>
+<h3
+id="lab-1-make-the-rx-path-visible-softnet-backlog-and-the-queues-that-lie">Lab
+1 — Make the RX path visible: softnet, backlog, and the queues that
+lie</h3>
+<p><strong>Objective.</strong> See, with real counters, that “no drops”
+at the interface level can hide drops at the NIC ring, the per-CPU
+backlog, and the socket accept queue. Build the reflex of reading
+<code>/proc/net/softnet_stat</code> and <code>nstat</code>.</p>
+<p><strong>Setup.</strong></p>
+<pre class="bash"><code># a loopback-only lab needs no NIC; we&#39;ll use a veth pair to have a real driver path
+ip link add veth-a type veth peer name veth-b
+ip addr add 10.0.0.1/24 dev veth-a
+ip addr add 10.0.0.2/24 dev veth-b
+ip link set veth-a up
+ip link set veth-b up</code></pre>
+<p><strong>Steps.</strong> 1. Snapshot the softnet stats and understand
+the columns. Column 1 = packets processed, column 2 = dropped (backlog
+full), column 3 = time_squeeze (budget exhausted), one row per CPU, all
+hex: <code>bash    cat /proc/net/softnet_stat</code> 2. Watch per-CPU
+softirq work live while you generate load. In one terminal:
+<code>bash    # flood small UDP packets across the veth    timeout 20 bash -c 'yes | tr "\n" "x" | head -c 100000000 | \      while read -r _; do :; done' &amp;  # cpu noise    ping -f -s 1400 10.0.0.2 &amp;        # flood ping over the veth    watch -n1 'grep . /proc/net/softnet_stat; echo; \      grep -E "RX|TX" /proc/net/dev | head'</code>
+3. Shrink the backlog to <em>force</em> a column-2 drop and prove you
+can create the failure:
+<code>bash    sysctl -w net.core.netdev_max_backlog=1     # absurdly small, lab only    # hammer it    ping -f -s 1400 -c 100000 10.0.0.2 &gt;/dev/null</code>
+4. Now the accept-queue lie. Start a listener with a tiny backlog and
+never accept:
+<code>bash    # backlog of 1, then stall; use python for explicit listen() backlog control    python3 - &lt;&lt;'EOF' &amp;    import socket,time    s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)    s.bind(("10.0.0.1",9999)); s.listen(1)   # backlog=1    time.sleep(60)                            # never accept()    EOF    sleep 1    # fire many connections that complete the handshake but never get accepted    for i in $(seq 1 50); do (exec 3&lt;&gt;/dev/tcp/10.0.0.1/9999) 2&gt;/dev/null &amp; done</code>
+5. Read the overflow counter:
+<code>bash    nstat -az | grep -Ei 'ListenOverflow|ListenDrop|SyncookiesSent'    ss -ltn 'sport = :9999'      # Recv-Q = current accept queue depth, Send-Q = max</code></p>
+<p><strong>Prove it.</strong> The accept-queue overflow is visible and
+non-zero even though <code>ip -s link</code> shows zero interface
+drops:</p>
+<pre class="bash"><code>nstat -az TcpExtListenOverflows TcpExtListenDrops
+# TcpExtListenOverflows  &lt;nonzero&gt;  0.0</code></pre>
+<p>If <code>ListenOverflows</code> is non-zero while
+<code>ip -s link show veth-a</code> reports zero RX/TX drops, you have
+proven the core lesson: the interface counter and the socket counter
+measure different handoffs. Reset when done:
+<code>sysctl -w net.core.netdev_max_backlog=1000</code>.</p>
+<p><strong>Teardown.</strong> <code>ip link del veth-a</code> (deletes
+the pair); <code>kill %1 %2 2&gt;/dev/null</code>.</p>
+<hr />
+<h3
+id="lab-2-build-container-networking-from-scratch-netns-veth-bridge-nat">Lab
+2 — Build container networking from scratch (netns + veth + bridge +
+NAT)</h3>
+<p><strong>Objective.</strong> Reconstruct, by hand, exactly what
+Docker’s default bridge network does: isolated namespaces, a veth to
+each, a bridge tying them together, <code>ip_forward</code>, and an
+nftables masquerade so containers reach the internet. Then publish a
+port with DNAT.</p>
+<p><strong>Setup.</strong> A VM with one uplink interface that has
+internet access. Find it:</p>
+<pre class="bash"><code>UPLINK=$(ip route show default | awk &#39;{print $5; exit}&#39;)
+echo &quot;uplink is $UPLINK&quot;</code></pre>
+<p><strong>Steps.</strong> 1. Create two “container” namespaces:
+<code>bash    ip netns add c1    ip netns add c2    # prove isolation: c1 has only loopback, down    ip netns exec c1 ip link</code>
+2. Build the bridge in the host namespace and give it the gateway IP:
+<code>bash    ip link add br0 type bridge    ip addr add 10.10.0.1/24 dev br0    ip link set br0 up</code>
+3. Wire each namespace to the bridge with a veth pair:
+<code>bash    for c in c1 c2; do      ip link add "veth-$c" type veth peer name "in-$c"      ip link set "veth-$c" master br0        # host end -&gt; bridge port      ip link set "veth-$c" up      ip link set "in-$c" netns "$c"          # other end -&gt; container ns    done    # inside each namespace, configure the container end    ip netns exec c1 ip addr add 10.10.0.11/24 dev in-c1    ip netns exec c1 ip link set in-c1 up    ip netns exec c1 ip link set lo up    ip netns exec c1 ip route add default via 10.10.0.1    ip netns exec c2 ip addr add 10.10.0.12/24 dev in-c2    ip netns exec c2 ip link set in-c2 up    ip netns exec c2 ip link set lo up    ip netns exec c2 ip route add default via 10.10.0.1</code>
+4. Container-to-container should already work over the bridge (pure L2).
+Confirm: <code>bash    ip netns exec c1 ping -c2 10.10.0.12</code> 5.
+Now reach the outside. Enable forwarding and add the masquerade rule
+with nft:
+<code>bash    sysctl -w net.ipv4.ip_forward=1    nft add table ip nat    nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; }'    nft add rule ip nat postrouting ip saddr 10.10.0.0/24 oifname "$UPLINK" masquerade    ip netns exec c1 ping -c2 1.1.1.1</code>
+6. Publish a port: run a listener in c1 and DNAT host port 8080 to it.
+<code>bash    ip netns exec c1 python3 -m http.server 80 --bind 10.10.0.11 &amp;    nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; }'    nft add rule ip nat prerouting tcp dport 8080 dnat to 10.10.0.11:80    # from the host:    curl -s http://127.0.0.1:8080/ &gt;/dev/null &amp;&amp; echo "DNAT works"  # may need hairpin; test from another host if not</code></p>
+<p><strong>Prove it.</strong> Watch conntrack record the NAT translation
+for the container’s flow — this is the proof that stateful NAT is doing
+the work, and it shows both tuples:</p>
+<pre class="bash"><code>ip netns exec c1 ping -c1 1.1.1.1 &amp;
+conntrack -L 2&gt;/dev/null | grep &#39;10.10.0.11&#39;
+# icmp ... src=10.10.0.11 dst=1.1.1.1 ... src=1.1.1.1 dst=&lt;HOST_UPLINK_IP&gt; ...</code></pre>
+<p>Seeing the reply tuple’s <code>dst=</code> rewritten to the host’s
+uplink IP proves masquerade + conntrack are translating the flow. Bonus
+understanding: <code>ip netns exec c1 conntrack -L</code> shows an
+<em>empty</em> table — conntrack is per-namespace, the translation lives
+in the host ns.</p>
+<p><strong>Teardown.</strong></p>
+<pre class="bash"><code>ip netns del c1; ip netns del c2
+ip link del br0
+nft delete table ip nat
+sysctl -w net.ipv4.ip_forward=0</code></pre>
+<hr />
+<h3
+id="lab-3-netfilter-hook-ordering-and-conntrack-exhaustion-observed">Lab
+3 — Netfilter hook ordering and conntrack exhaustion, observed</h3>
+<p><strong>Objective.</strong> Prove the hook-priority ordering with
+<code>nft monitor trace</code>, watch a packet traverse prerouting -&gt;
+conntrack -&gt; filter, and then deliberately exhaust the conntrack
+table to reproduce the <code>table full</code> incident and see which
+counter fires.</p>
+<p><strong>Setup.</strong> Reuse the c1 namespace + bridge from Lab 2,
+or a fresh veth pair. We’ll trace traffic to a local listener.</p>
+<pre class="bash"><code>nft add table inet t
+nft add chain inet t input &#39;{ type filter hook input priority filter; policy accept; }&#39;</code></pre>
+<p><strong>Steps.</strong> 1. Turn on tracing for ICMP to see the hook
+journey. Add a trace-marking rule at prerouting and start the monitor:
+<code>bash    nft add chain inet t pre '{ type filter hook prerouting priority raw; }'    nft add rule inet t pre icmp type echo-request meta nftrace set 1    nft monitor trace &amp;    ping -c1 10.10.0.11    # or your veth peer    sleep 1; kill %1</code>
+Read the trace output: each line shows the chain, hook, and the
+<code>ct state</code> at that point. Note that <code>ct state</code> is
+<code>new</code> by the time you reach <code>filter</code> (priority 0)
+but the conntrack lookup itself happened at priority -200,
+<em>after</em> your raw-priority prerouting chain at -300. That ordering
+is the whole lesson. 2. Inspect current conntrack sizing:
+<code>bash    sysctl net.netfilter.nf_conntrack_max    cat /proc/sys/net/netfilter/nf_conntrack_count    conntrack -S | head   # per-cpu: found, insert, insert_failed, drop, early_drop</code>
+3. Shrink the table to make exhaustion trivial to hit (lab only), then
+flood new flows:
+<code>bash    sysctl -w net.netfilter.nf_conntrack_max=128    # generate many distinct short-lived flows (each unique src port = new conntrack entry)    for p in $(seq 1 2000); do      timeout 0.05 bash -c "exec 3&lt;&gt;/dev/udp/10.10.0.11/$((20000+p))" 2&gt;/dev/null &amp;    done; wait 2&gt;/dev/null</code>
+4. Watch for the drop:
+<code>bash    dmesg | tail -5                       # look for "nf_conntrack: table full"    conntrack -S | awk '{for(i=1;i&lt;=NF;i++) if($i ~ /drop|insert_failed/) print $i}'</code></p>
+<p><strong>Prove it.</strong> A non-zero <code>insert_failed</code> or
+<code>drop</code> in <code>conntrack -S</code>, and/or the kernel log
+line, with <code>nf_conntrack_count</code> pinned at the max you
+set:</p>
+<pre class="bash"><code>conntrack -S | grep -o &#39;insert_failed=[1-9][0-9]*&#39; | head -1
+# insert_failed=&lt;nonzero&gt;</code></pre>
+<p>Now fix it the right way and re-run to show the drop stops:</p>
+<pre class="bash"><code>sysctl -w net.netfilter.nf_conntrack_max=262144</code></pre>
+<p>Understand: raising <code>nf_conntrack_max</code> alone without
+raising <code>nf_conntrack_buckets</code>
+(<code>echo 65536 &gt; /sys/module/nf_conntrack/parameters/hashsize</code>)
+leaves long hash chains and degrades per-packet lookup. Keep
+<code>max ~= 4 * buckets</code>.</p>
+<p><strong>Teardown.</strong></p>
+<pre class="bash"><code>nft delete table inet t
+sysctl -w net.netfilter.nf_conntrack_max=262144   # or your original value</code></pre>
+<hr />
+<h3 id="lab-4-xdp_drop-tc-netem-the-datapath-at-the-edges">Lab 4 —
+XDP_DROP + tc netem: the datapath at the edges</h3>
+<p><strong>Objective.</strong> Attach a minimal XDP program that drops a
+chosen packet type at the driver hook (before an skb exists), confirm it
+via bpftrace on the XDP tracepoint, and then use tc/netem to inject
+latency and see bufferbloat vs fq_codel behavior. This makes the two
+ends of the datapath (earliest ingress hook, egress qdisc) tangible.</p>
+<p><strong>Setup.</strong> veth supports native XDP, so no special NIC
+needed.</p>
+<pre class="bash"><code>ip link add xa type veth peer name xb
+ip addr add 192.168.9.1/24 dev xa
+ip addr add 192.168.9.2/24 dev xb
+ip link set xa up; ip link set xb up</code></pre>
+<p><strong>Steps (XDP drop).</strong> 1. Write a tiny XDP program that
+drops ICMP echo requests. Save as <code>xdp_drop.c</code>: ```c #include
+&lt;linux/bpf.h&gt; #include &lt;linux/if_ether.h&gt; #include
+&lt;linux/ip.h&gt; #include &lt;bpf/bpf_helpers.h&gt;</p>
+<p>SEC(“xdp”) int drop_icmp(struct xdp_md <em>ctx) { void </em>data =
+(void <em>)(long)ctx-&gt;data; void </em>data_end = (void
+<em>)(long)ctx-&gt;data_end; struct ethhdr </em>eth = data; if ((void
+*)(eth + 1) &gt; data_end) return XDP_PASS; // bounds check (verifier)
+if (eth-&gt;h_proto != __builtin_bswap16(ETH_P_IP)) return XDP_PASS;
+struct iphdr <em>ip = (void </em>)(eth + 1); if ((void *)(ip + 1) &gt;
+data_end) return XDP_PASS; // bounds check if (ip-&gt;protocol ==
+IPPROTO_ICMP) return XDP_DROP; // drop pings, pre-skb return XDP_PASS; }
+char _license[] SEC(“license”) = “GPL”;
+<code>Build and load (needs clang + libbpf-devel/ libbpf-dev):</code>bash
+clang -O2 -g -target bpf -c xdp_drop.c -o xdp_drop.o ip link set dev xb
+xdp obj xdp_drop.o sec xdp # native XDP on the xb end
+<code>2. Confirm the mode. `xdp` (not `xdpgeneric`) in the link output means you're in native    driver mode, the whole point:</code>bash
+ip -details link show xb | grep -i xdp
+<code>3. Prove the drop happens and that it's counted at XDP, not in the IP stack:</code>bash
+# this should now fail/time out because pings to xb are dropped at the
+driver hook ping -c3 -W1 192.168.9.2 # watch XDP action counts
+(RHEL/modern iproute exposes them; else use bpftool) bpftool prog show #
+find the loaded prog id
+<code>Trace the action live with bpftrace on the xdp tracepoint:</code>bash
+bpftrace -e ‘tracepoint:xdp:xdp_exception { @[args-&gt;act] = count();
+}’ &amp; ping -c3 -W1 192.168.9.2; sleep 1; kill %1 ```</p>
+<p><strong>Steps (netem bufferbloat vs fq_codel).</strong> 4. Remove
+XDP, then add 100ms latency + a huge dumb FIFO on egress and measure RTT
+under load:
+<code>bash    ip link set dev xb xdp off    tc qdisc replace dev xa root netem delay 100ms limit 100000    ping -c3 192.168.9.2        # ~100ms baseline    # saturate the link while pinging: watch RTT balloon (bufferbloat)    (timeout 10 dd if=/dev/zero bs=64k | nc -q0 192.168.9.2 9  2&gt;/dev/null) &amp;    ping -c10 192.168.9.2</code>
+5. Swap the dumb queue for fq_codel and repeat — RTT under load should
+stay controlled:
+<code>bash    tc qdisc replace dev xa root fq_codel    tc -s qdisc show dev xa      # watch 'maxpacket', 'drop_overlimit', 'new_flows_len'</code></p>
+<p><strong>Prove it.</strong> For XDP: <code>ping</code> to
+<code>xb</code> times out while the interface is <em>up and
+healthy</em>, and the <code>xdp</code> keyword (not
+<code>xdpgeneric</code>) appears in
+<code>ip -details link show xb</code> — proving a native-mode drop
+before skb allocation. For tc: <code>tc -s qdisc show dev xa</code>
+under fq_codel shows non-zero drops/ECN marks keeping queue latency
+bounded, versus netem’s FIFO where ping RTT under load climbs far above
+the 100ms base.</p>
+<p><strong>Teardown.</strong></p>
+<pre class="bash"><code>ip link set dev xb xdp off 2&gt;/dev/null
+ip link del xa</code></pre>
+<hr />
+<h2 id="curated-resources">Curated resources</h2>
+<p>Primary kernel docs and man pages first (when a blog and a man page
+disagree, the man page wins), then the landmark explainers, then the
+hands-on repos.</p>
+<p><strong>Primary references (ABI / kernel source of truth)</strong> -
+<strong>Netfilter hooks — nftables wiki</strong>,
+https://wiki.nftables.org/wiki-nftables/index.php/Netfilter_hooks — the
+authoritative map of the five IP hooks plus netdev ingress/egress, and
+the exact priority constants. This is the mental model behind
+<em>where</em> every firewall/NAT/conntrack decision happens; memorize
+the priority table. - <strong>nftables wiki — main + “Configuring
+chains” + “Quick reference in 10 minutes”</strong>,
+https://wiki.nftables.org/wiki-nftables/index.php/Main_Page — the
+definitive nft docs: the expression/statement VM,
+sets/maps/verdict-maps/concatenations (the data structures that make nft
+scale past iptables), and base-chain hook+priority syntax. RHEL/Rocky 8+
+default, so current production knowledge. - <strong>man7: namespaces(7),
+network_namespaces(7), veth(4), clone(2), unshare(2), setns(2)</strong>,
+https://man7.org/linux/man-pages/man7/network_namespaces.7.html —
+Kerrisk’s overview pages are dense conceptual essays, not lookups.
+<code>network_namespaces(7)</code> is the definitive statement of what a
+netns owns; <code>veth(4)</code> explains the pair semantics. -
+<strong>man7: tcp(7), socket(7), ip(7), unix(7)</strong>,
+https://man7.org/linux/man-pages/man7/tcp.7.html — the authoritative
+behavior of the socket layer, including the accept/SYN backlog knobs,
+<code>SO_REUSEPORT</code>, and every <code>net.ipv4.tcp_*</code>
+sysctl’s precise meaning. - <strong>Netfilter’s flowtable infrastructure
+— kernel.org</strong>,
+https://docs.kernel.org/networking/nf_flowtable.html — the
+established-flow fast path that bypasses the full netfilter traversal
+(and can offload to hardware). The modern scaling lever for
+NAT/forwarding boxes. - <strong>BPF and XDP Reference Guide —
+Cilium</strong>, https://docs.cilium.io/en/stable/bpf/ — the best single
+reference on the eBPF machine model: instruction set, the verifier (why
+unbounded loops and unchecked pointer arithmetic are rejected, the
+complexity limit), map types and their tradeoffs, tail calls, and tc vs
+XDP hook placement. Read this to understand <em>why</em> the verifier
+constrains you. - <strong>ip-rule(8) / ip-route(8) man pages</strong>,
+https://man7.org/linux/man-pages/man8/ip-rule.8.html — the policy
+routing database semantics: rule priority order, selectors
+(from/fwmark/iif/uidrange), and why <code>ip route get</code> is the
+only honest way to see a routing decision. - <strong>tc(8) +
+tc-fq_codel(8) + tc-cake(8) + tc-htb(8) + tc-netem(8)</strong>,
+https://man7.org/linux/man-pages/man8/tc.8.html — the qdisc/class/filter
+model and each qdisc’s knobs. Pair <code>tc-cake(8)</code> and
+<code>tc-fq_codel(8)</code> for the modern AQM story. -
+<strong>rockyman.org</strong>, https://rockyman.org/ — authoritative
+Rocky Linux man-page index, versioned 8/9/10; verify exact flags/config
+keys here. When a lab command (<code>nft</code>, <code>tc</code>,
+<code>conntrack</code>, <code>ip</code>, <code>ss</code>,
+<code>nstat</code>, <code>ethtool</code>) needs confirming against the
+distro the customer actually runs, this is the source of truth for
+Rocky.</p>
+<p><strong>Landmark explainers</strong> - <strong>LWN “Namespaces in
+operation” (Kerrisk, 7-part series)</strong>,
+https://lwn.net/Articles/531114/ — the definitive from-scratch build-up
+of every namespace type: how
+<code>clone(CLONE_NEW*)</code>/<code>unshare</code>/<code>setns</code>
+manipulate the per-process nsproxy, why user namespaces enabled
+unprivileged containers, PID/mount/net semantics. The conceptual
+backbone under Docker/Podman/nspawn. - <strong>Illustrated Guide to
+Monitoring and Tuning the Linux Networking Stack: Receiving Data
+(Packagecloud)</strong>,
+https://blog.packagecloud.io/illustrated-guide-monitoring-tuning-linux-networking-stack-receiving-data/
+— the single best line-by-line walk of the RX path: NIC ring -&gt;
+hardirq -&gt; NAPI -&gt; <code>net_rx_action</code> -&gt; softnet -&gt;
+protocol stack, mapping each stage to its
+<code>/proc</code>/<code>ethtool</code>/sysctl counter and tunable. Its
+TX companion post is equally good. - <strong>Thermalcircle: “nftables —
+packet flow and Netfilter hooks in detail”</strong>,
+https://thermalcircle.de/doku.php?id=blog:linux:nftables_packet_flow_netfilter_hooks_detail
+— meticulous diagrams of exactly where each hook sits relative to
+routing, conntrack, and tc, on both ingress and egress. The clearest
+treatment of the netdev egress-vs-tc ordering. - <strong>“How Container
+Networking Works: Building a Bridge Network From Scratch” (iximiuz
+Labs)</strong>,
+https://labs.iximiuz.com/tutorials/container-networking-from-scratch —
+an interactive, correct rebuild of the netns+veth+bridge+NAT stack; the
+perfect companion to Lab 2, and iximiuz’s XDP tutorial pairs with Lab 4.
+- <strong>“Epoll is fundamentally broken” (idea.popcount.org, 2
+parts)</strong>,
+https://idea.popcount.org/2017-02-20-epoll-is-fundamentally-broken-12/ —
+the definitive treatment of epoll’s accept-load-balancing and
+thundering-herd pathologies, <code>EPOLLEXCLUSIVE</code>, and why
+<code>SO_REUSEPORT</code> is usually the better answer. Required reading
+before you tune a high-connection server. - <strong>“The SYN and Accept
+queues” / Cloudflare’s “SYN packet handling in the wild”</strong>,
+https://blog.cloudflare.com/syn-packet-handling-in-the-wild/ — the
+canonical deep dive on the two-queue handshake, <code>somaxconn</code>
+vs <code>tcp_max_syn_backlog</code>, syncookies, and the exact counters
+(<code>ListenOverflows</code>, <code>ListenDrops</code>) that reveal
+accept-queue overflow.</p>
+<p><strong>Hands-on repos and books</strong> -
+<strong>xdp-project/xdp-tutorial</strong>,
+https://github.com/xdp-project/xdp-tutorial — the canonical progressive
+path into XDP maintained by the XDP maintainers: XDP_PASS, libbpf
+loaders, header parsing against the verifier, maps, XDP_REDIRECT, AF_XDP
+zero-copy. Where you learn native vs generic/SKB mode and the XDP_TX
+driver-support caveat first-hand. Do every lab. - <strong>bpftrace
+one-liner tutorial + reference</strong>,
+https://github.com/bpftrace/bpftrace/blob/master/man/adoc/bpftrace.adoc
+— escalating one-liners covering kprobe/kretprobe, tracepoints, uprobes,
+histograms, and stack aggregation. The fastest route from “I know perf
+top” to answering arbitrary questions about live kernel network behavior
+with no restart (used in Lab 4). - <strong>BPF Performance Tools —
+Brendan Gregg (book + repo)</strong>,
+https://www.brendangregg.com/bpf-performance-tools-book.html — the
+networking chapter’s ready-to-run tools (tcplife, tcpretrans,
+tcpconnect, so-timeouts) plus the methodology for <em>when</em> to reach
+for each. The observability endgame for the network stack. -
+<strong>Systems Performance, 2nd ed — Brendan Gregg</strong>,
+https://www.brendangregg.com/systems-performance-2nd-edition-book.html —
+the networking chapter connects NIC ring buffers -&gt; softirq -&gt; TCP
+with the USE method, and is the reference for turning “the network feels
+slow” into a systematic drill-down. - <strong>The Linux Programming
+Interface (TLPI) — Kerrisk</strong>, https://man7.org/tlpi/ — the
+sockets chapters (56-61) are the definitive treatment of the sockets API
+and its kernel-boundary semantics: the listen backlog,
+<code>SO_REUSEADDR</code>/<code>SO_REUSEPORT</code>, UNIX vs INET
+sockets, and out-of-band data. Written by the man-pages maintainer. -
+<strong>Linux Advanced Routing &amp; Traffic Control HOWTO
+(LARTC)</strong>, https://lartc.org/howto/ — dated in spots but still
+the best conceptual explanation of policy routing (multiple tables +
+<code>ip rule</code>) and the classful tc hierarchy (HTB
+enqueue/dequeue, shaping, bufferbloat). Pair the qdisc material with the
+modern fq_codel/CAKE man pages. - <strong>Cilium docs — “Life of a
+Packet” / eBPF datapath</strong>,
+https://docs.cilium.io/en/stable/network/ebpf/ — how a production eBPF
+dataplane stitches tc-bpf, XDP, and maps into a full container/K8s
+network, including conntrack bypass. The best “here’s what all these
+primitives become in anger” resource.</p>
+<hr />
+<h2 id="senior-signal">Senior signal</h2>
+<ul>
+<li><strong>Knows which counter measures which handoff, and distrusts
+the friendly one.</strong> A mid-level reads <code>ip -s link</code>
+sees zero drops and declares the network healthy. A senior checks
+<code>ethtool -S</code> (NIC ring / silicon drops),
+<code>/proc/net/softnet_stat</code> column 2 &amp; 3 (backlog drops,
+budget squeeze), and <code>nstat</code>/<code>netstat -s</code> for
+<code>ListenOverflows</code>, <code>PruneCalled</code>,
+<code>TCPBacklogDrop</code> — because the drop is almost never at the
+interface layer everyone looks at first.</li>
+<li><strong>Diagnoses accept-queue overflow as an application problem,
+not a network problem.</strong> Recognizes that intermittent connect
+hangs under load with rising <code>ListenOverflows</code> and a pinned
+<code>ss -ltn</code> Recv-Q means the app isn’t calling
+<code>accept()</code> fast enough, and knows <code>somaxconn</code> +
+<code>SO_REUSEPORT</code> + per-thread accept queues is the fix, not
+more bandwidth.</li>
+<li><strong>Reasons about netfilter by hook priority, not by table
+name.</strong> Can explain why DNAT (-100) sees a conntrack tuple
+already created at -200, why a <code>ct state established</code> match
+is impossible before conntrack runs, and why iptables-nft and native nft
+rules on the same hook produce ordering surprises. Reaches for
+<code>nft monitor trace</code> to see the actual traversal instead of
+guessing.</li>
+<li><strong>Treats conntrack table exhaustion as slot exhaustion, sizes
+buckets with max, and knows the <code>notrack</code> escape
+hatch.</strong> Understands that <code>nf_conntrack: table full</code>
+is neither CPU nor memory pressure, that raising
+<code>nf_conntrack_max</code> without <code>nf_conntrack_buckets</code>
+just trades drops for slow lookups, and that stateless high-volume
+traffic should skip conntrack entirely via a raw/-300
+<code>notrack</code> rule.</li>
+<li><strong>Can rebuild container networking from <code>ip</code>,
+<code>nft</code>, and <code>tc</code> primitives and therefore debug any
+CNI.</strong> Sees “Docker networking” as netns + veth + bridge +
+<code>ip_forward</code> + masquerade + DNAT, knows conntrack and sysctls
+are per-namespace (so host-side fixes don’t apply inside), and can pick
+macvlan/ipvlan vs veth+bridge based on the L2/L3 requirement.</li>
+<li><strong>Distinguishes XDP native vs generic mode on sight and knows
+the skb boundary.</strong> Understands that XDP’s value is
+dropping/redirecting <em>before</em> skb allocation, that “XDP but slow”
+means you silently fell back to generic/SKB mode, and that tc-bpf
+(clsact) is the right hook when you need skb context or egress. Knows
+why the verifier forces the <code>data + hdr &gt; data_end</code> bounds
+check on every parse.</li>
+<li><strong>Owns bufferbloat as a latency problem invisible to
+throughput graphs.</strong> Recognizes RTT that balloons <em>only under
+saturation</em> as a queueing problem, reaches for
+<code>tc -s qdisc</code> and fq_codel/CAKE + BQL rather than “the
+network is congested,” and can reason about where the standing queue
+lives (driver ring vs qdisc vs downstream device).</li>
+<li><strong>Uses policy routing and <code>fwmark</code> fluently, and
+checks <code>rp_filter</code> first.</strong> Reaches for
+<code>ip rule</code> + mark-based tables for
+multi-homing/VPN/egress-gateway routing, always confirms with
+<code>ip route get</code>, and knows that asymmetric routing silently
+dies to reverse-path filtering — the first thing to check when “traffic
+works one direction only.”</li>
+<li><strong>Reads the stack as coupled subsystems.</strong> Can trace a
+single symptom (a stalled flow) across NIC ring -&gt; softirq/RPS CPU
+steering -&gt; conntrack state -&gt; qdisc backpressure -&gt; socket
+buffer limits, rather than treating each as a black box, and picks the
+one tool (<code>bpftrace</code>, <code>ss</code>,
+<code>conntrack -S</code>, <code>tc -s</code>, <code>nstat</code>) that
+proves or falsifies a specific hypothesis about which boundary is
+failing.</li>
+</ul>
+<hr />
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="10-namespaces-and-cgroups-v2.html">10 - Namespaces and
+cgroups v2</a> — the network namespace built by hand in Lab 2 is one
+member of the namespace family covered there; that module generalizes
+<code>CLONE_NEWNET</code>/<code>unshare</code>/<code>setns</code> to the
+mount, pid, user, and other namespaces and adds the cgroups v2
+resource-control side that pairs with per-netns isolation.</li>
+<li><a href="11-observability-and-tracing-with-ebpf.html">11 -
+Observability and Tracing with eBPF</a> — the XDP/tc-bpf datapath and
+the verifier/maps/CO-RE machine model from §9 are the networking slice
+of the broader eBPF tracing toolkit; that module goes deep on bpftrace,
+kprobes/tracepoints, and the observability workflow used in Lab 1 and
+Lab 4.</li>
+<li>05 - Kubernetes Networking and Workloads — CNI plugins, kube-proxy,
+and Service/pod networking are elaborations of the netns + veth + bridge
++ conntrack + NAT primitives you build by hand in Lab 2.</li>
+<li>04 - VPC Networking Deep — cloud VPC routing, security groups, and
+NAT gateways map onto the FIB/policy-routing, netfilter, and masquerade
+mechanisms here, just enforced in the provider’s fabric.</li>
+<li>08 - High-Performance Networking (InfiniBand and RDMA) —
+RDMA/InfiniBand deliberately bypasses this kernel datapath
+(kernel-bypass, no skb, no conntrack); understanding the stack here is
+what makes the bypass motivation concrete.</li>
+<li>06 - Kubernetes Security (CKS-level) — NetworkPolicy enforcement is
+nftables/eBPF at the pod boundary, built on the hooks and conntrack
+state covered in §4 and §8.</li>
+</ul>
+</main>
+</div></body></html>

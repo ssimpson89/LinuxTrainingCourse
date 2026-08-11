@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10 - Namespaces and cgroups v2 | Linux Training Course</title>
+<link rel="stylesheet" href="style.css"></head>
+<body><div class="layout">
+<nav class="sidebar"><a href="index.html"><strong>Linux Training Course</strong></a><hr>
+<a href="00-track-overview.html" data-page="00-track-overview.html">00 - Track Overview</a>
+<a href="01-permissions-and-access-control.html" data-page="01-permissions-and-access-control.html">01 - Permissions and Access Control</a>
+<a href="02-users-authentication-and-pam.html" data-page="02-users-authentication-and-pam.html">02 - Users, Authentication and PAM</a>
+<a href="03-processes-scheduling-and-signals.html" data-page="03-processes-scheduling-and-signals.html">03 - Processes, Scheduling and Signals</a>
+<a href="04-filesystems-and-the-vfs.html" data-page="04-filesystems-and-the-vfs.html">04 - Filesystems and the VFS</a>
+<a href="05-storage-and-lvm.html" data-page="05-storage-and-lvm.html">05 - Storage and LVM</a>
+<a href="06-networking-deep.html" data-page="06-networking-deep.html">06 - Networking Deep</a>
+<a href="07-systemd.html" data-page="07-systemd.html">07 - systemd</a>
+<a href="08-boot-and-init.html" data-page="08-boot-and-init.html">08 - Boot and Init</a>
+<a href="09-the-kernel.html" data-page="09-the-kernel.html">09 - The Kernel</a>
+<a href="10-namespaces-and-cgroups-v2.html" data-page="10-namespaces-and-cgroups-v2.html" class="current">10 - Namespaces and cgroups v2</a>
+<a href="11-observability-and-tracing-with-ebpf.html" data-page="11-observability-and-tracing-with-ebpf.html">11 - Observability and Tracing with eBPF</a>
+<a href="12-selinux-and-hardening.html" data-page="12-selinux-and-hardening.html">12 - SELinux and Hardening</a>
+<a href="13-samba-and-smb.html" data-page="13-samba-and-smb.html">13 - Samba and SMB</a>
+<a href="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html" data-page="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html">14 - Early Userspace - dracut Hooks, udev and the initqueue</a></nav>
+<main><h1 id="namespaces-and-cgroups-v2">10 — Namespaces and cgroups v2</h1>
+<p>Backlink: <a href="00-track-overview.html">00 - Track
+Overview</a></p>
+<p>A container is not a kernel object. There is no
+<code>struct container</code> anywhere in the tree. A container is an
+<em>emergent</em> property of a process that happens to (a) live in a
+private set of namespaces, (b) be accounted and constrained by a cgroup
+subtree, (c) have a restricted capability/seccomp/LSM profile, and (d)
+have had its root filesystem replaced. This module is about the first
+two, which are the load-bearing halves. Understand namespaces + cgroups
+v2 at the syscall and kernel-structure level and you can build, break,
+and debug any container runtime, because
+runc/crun/containerd/systemd-nspawn are all just orchestrators of the
+same handful of syscalls you’ll call by hand in the capstone.</p>
+<p>The senior tell here is that you stop reciting “namespaces isolate,
+cgroups limit” and start reasoning about the <em>coupling</em>: which
+namespace a resource lives in, who owns a cgroup, why a delegation
+boundary exists, and what exactly breaks when you get uid mapping or
+mount propagation wrong. Namespaces isolate <em>what you can see and
+name</em>; cgroups control <em>how much you can consume</em>. They are
+orthogonal and independently composable, and every real bug lives in the
+seams between them.</p>
+<hr />
+<h2 id="concept-deep-dive">Concept deep-dive</h2>
+<h3 id="the-two-mechanisms-precisely">The two mechanisms, precisely</h3>
+<p><strong>Namespaces</strong> partition kernel-global identifier spaces
+so that processes in different namespaces see different sets of the same
+<em>kind</em> of resource. Before namespaces, there was exactly one PID
+space, one mount table, one hostname, one network stack. A namespace
+wraps one of those global tables and lets you have many. The set of
+namespaces a task belongs to is reached through
+<code>task_struct-&gt;nsproxy</code> (a <code>struct nsproxy</code> in
+<code>include/linux/nsproxy.h</code>), which holds pointers to the
+mount, UTS, IPC, net, PID, cgroup, and time namespaces. The user
+namespace is <em>not</em> in nsproxy; it hangs off the credentials
+(<code>task_struct-&gt;cred-&gt;user_ns</code>) because it governs
+privilege, not resource visibility.</p>
+<pre><code>task_struct
+  ├── cred ──────────► struct cred
+  │                      └── user_ns ──► struct user_namespace   (privilege / uid-gid mapping)
+  └── nsproxy ───────► struct nsproxy
+                         ├── mnt_ns    ► struct mnt_namespace    (mount table)
+                         ├── uts_ns    ► struct uts_namespace    (hostname, domainname)
+                         ├── ipc_ns    ► struct ipc_namespace    (SysV IPC, POSIX mqueues)
+                         ├── net_ns    ► struct net              (interfaces, routes, sockets, conntrack)
+                         ├── pid_ns... ► struct pid_namespace    (PID→task allocation)
+                         ├── cgroup_ns ► struct cgroup_namespace (root-relative cgroup view)
+                         └── time_ns   ► struct time_namespace   (CLOCK_MONOTONIC/BOOTTIME offsets)</code></pre>
+<p><code>nsproxy</code> is reference-counted and <em>shared</em> between
+tasks that share all their namespaces (the common case: every thread and
+most processes point at the same nsproxy). The moment you
+<code>unshare()</code> one namespace, the kernel copies the nsproxy for
+that task and swaps in a fresh namespace object. This copy-on-unshare is
+why unshare is cheap until you actually diverge.</p>
+<p>Namespaces are exposed as inodes under
+<code>/proc/&lt;pid&gt;/ns/</code>. Each is a magic symlink like
+<code>net:[4026531840]</code> — the number is the namespace’s inode
+number, and it is the <em>identity</em> of the namespace. Two processes
+are in the same net namespace iff <code>readlink /proc/PID/ns/net</code>
+returns the same inode. Holding an open fd to one of those files keeps
+the namespace alive even with no member processes (this is exactly how
+<code>ip netns add</code> persists a namespace: it bind-mounts
+<code>/proc/self/ns/net</code> onto <code>/run/netns/NAME</code>).</p>
+<p><strong>cgroups v2</strong> is the resource <em>accounting and
+control</em> mechanism: a single unified hierarchy where each node is a
+cgroup (a <code>struct cgroup</code>), processes are attached to leaf
+cgroups, and <em>controllers</em> (cpu, memory, io, pids, …) walk the
+tree to enforce limits and aggregate usage. Where v1 had a separate
+hierarchy per controller (a process could be in
+<code>/sys/fs/cgroup/cpu/A</code> and
+<code>/sys/fs/cgroup/memory/B</code> simultaneously, an incoherent mess
+that made joint cpu+memory decisions impossible), v2 has <em>one</em>
+tree and a process sits at exactly one node in it.</p>
+<h3 id="the-three-syscalls">The three syscalls</h3>
+<p>Everything namespace-related is three syscalls plus
+<code>clone3</code>:</p>
+<ul>
+<li><strong><code>clone(2)</code> / <code>clone3(2)</code></strong> —
+create a new process, and with <code>CLONE_NEW*</code> flags, create
+<em>and enter</em> new namespaces in the child atomically. This is what
+runtimes use: the child is born already isolated.</li>
+<li><strong><code>unshare(2)</code></strong> — move the <em>calling</em>
+process into new namespaces without forking.
+<code>unshare(CLONE_NEWNS)</code> gives the caller a private mount
+namespace right now. Caveat: <code>unshare(CLONE_NEWPID)</code> does
+<em>not</em> move the caller into the new PID namespace — it can’t,
+because a process’s PID can’t change. Instead the caller’s <em>next
+fork</em> becomes PID 1 of the new namespace. Same pattern for
+<code>CLONE_NEWTIME</code>.</li>
+<li><strong><code>setns(2)</code></strong> — join an <em>existing</em>
+namespace referenced by an fd (either <code>/proc/PID/ns/*</code> or a
+pinned/bind-mounted ns file, or a pidfd). This is <code>nsenter</code>’s
+mechanism and how a runtime “execs into” a running container.</li>
+</ul>
+<p>The flags (<code>CLONE_NEWNS</code>, <code>CLONE_NEWUTS</code>,
+<code>CLONE_NEWIPC</code>, <code>CLONE_NEWPID</code>,
+<code>CLONE_NEWNET</code>, <code>CLONE_NEWUSER</code>,
+<code>CLONE_NEWCGROUP</code>, <code>CLONE_NEWTIME</code>) are shared
+across all three calls. <code>CLONE_NEWNS</code> is the odd historical
+name — it predates the word “namespace” being generalized, so “NEWNS”
+means the <em>mount</em> namespace specifically.</p>
+<h3 id="the-eight-namespace-types">The eight namespace types</h3>
+<p><strong>Mount (<code>CLONE_NEWNS</code>, 2.4.19).</strong> Owns the
+mount table — the set of <code>(source, mountpoint, fs, options)</code>
+tuples. The subtle and heavily-tested part is <strong>mount
+propagation</strong> (the shared-subtree model, kernel 2.6.15). Every
+mount has a propagation type:</p>
+<ul>
+<li><strong>shared</strong> (<code>MS_SHARED</code>): member of a peer
+group; mount/unmount events propagate to all peers in both
+directions.</li>
+<li><strong>private</strong> (<code>MS_PRIVATE</code>): isolated; no
+events in or out.</li>
+<li><strong>slave</strong> (<code>MS_SLAVE</code>): receives events from
+its master peer group but sends none back. One-way mirror.</li>
+<li><strong>unbindable</strong> (<code>MS_UNBINDABLE</code>): private
+<em>and</em> cannot be a bind-mount source. Used to stop recursive bind
+explosions.</li>
+</ul>
+<p>Why this matters: when you <code>unshare(CLONE_NEWNS)</code>, the new
+namespace starts as a <em>copy</em> of the parent’s mount table, and by
+default the copies are shared peers. So a mount you make inside can leak
+out and vice versa — unless propagation is set to private/slave. This is
+precisely why <code>systemd</code> remounts <code>/</code> as
+<code>MS_SHARED</code> at boot but container runtimes remount the
+container root as <code>MS_SLAVE</code> or <code>MS_PRIVATE</code>: they
+want host mounts (e.g. a new USB disk) to appear inside, but container
+mounts to <em>not</em> pollute the host. Get this wrong and either your
+bind mounts vanish or you leak mounts the host can never unmount (the
+classic “device or resource busy” on shutdown). <code>MS_REC</code>
+applies the change recursively to the whole subtree.</p>
+<p><strong>UTS (<code>CLONE_NEWUTS</code>).</strong> The trivial one.
+Owns <code>nodename</code> and <code>domainname</code> (UTS = UNIX
+Time-sharing System, from the <code>struct utsname</code> that
+<code>uname(2)</code> fills). This is why <code>hostname</code> inside a
+container differs from the host. That’s the entire namespace.</p>
+<p><strong>IPC (<code>CLONE_NEWIPC</code>).</strong> Owns System V IPC
+objects (message queues, semaphore sets, shared memory segments — the
+<code>ipcs</code> stuff) and POSIX message queues
+(<code>/dev/mqueue</code>). Keys and IDs are namespace-local, so two
+containers can each <code>shmget</code> the same key without collision.
+Also isolates <code>/proc/sys/kernel/shmmax</code> and friends.</p>
+<p><strong>PID (<code>CLONE_NEWPID</code>, 2.6.24).</strong> The one
+with the richest semantics. It virtualizes PID allocation and creates a
+<em>hierarchy</em> — a PID namespace has a parent, and a task has a
+<em>different PID in each ancestor namespace</em> (its own, its
+parent’s, up to the root). So a container’s PID 1 might be PID 30451 on
+the host. Two rules that trip people up:</p>
+<ol type="1">
+<li><strong>init semantics.</strong> The first process in a new PID
+namespace is PID 1 and inherits init duties: it reaps orphaned zombies
+(children whose parents died get reparented to it, not to host PID 1),
+and signals behave specially — the kernel only delivers signals to PID 1
+for which it has installed a handler (so a naive PID 1 with no
+<code>SIGTERM</code> handler <em>ignores</em> <code>SIGTERM</code>,
+which is why <code>docker stop</code> on a shell-as-PID-1 hangs 10s then
+<code>SIGKILL</code>s). If PID 1 dies, the kernel <code>SIGKILL</code>s
+the entire namespace and tears it down.</li>
+<li><strong><code>unshare</code> timing.</strong> As noted,
+<code>unshare(CLONE_NEWPID)</code> doesn’t move you; your next child is
+PID 1. And <code>/proc</code> still shows the <em>old</em> namespace
+until you also give the new init a private mount namespace and mount a
+fresh <code>procfs</code> (procfs renders PIDs relative to the
+<em>reader’s</em> PID namespace, but the mount is pinned to the pid-ns
+of whoever mounted it).</li>
+</ol>
+<p><strong>Network (<code>CLONE_NEWNET</code>).</strong> The
+heavyweight. A full independent network stack: its own loopback, network
+interfaces, IP addresses, routing tables, ARP/neighbor tables, firewall
+(netfilter/nftables) rules, conntrack table, port number space, and
+<code>/proc/net</code>, <code>/sys/class/net</code>. A fresh net
+namespace has <em>only</em> a down <code>lo</code>. Connectivity is
+built by moving one end of a <code>veth</code> pair into the namespace
+(<code>ip link set veth1 netns &lt;pid&gt;</code>) — veth is a virtual
+patch cable; a packet into one end comes out the other. This is the
+substrate under every CNI plugin, Docker bridge, and pod network.
+Creating a net namespace is expensive (the kernel allocates
+per-namespace copies of a lot of network state), which is why net-ns
+creation is a measurable cost at container-startup scale.</p>
+<p><strong>User (<code>CLONE_NEWUSER</code>, 3.8, the
+keystone).</strong> Virtualizes UID/GID <em>and capability</em> space.
+Inside a user namespace, a process can hold full capabilities (be
+“root”) over resources owned by that namespace, while on the host it
+maps to an unprivileged UID with zero host capabilities. This is what
+makes <strong>rootless containers</strong> possible: an ordinary user
+creates a user namespace, becomes uid 0 inside it, and <em>then</em>
+creates the other namespaces (which normally need
+<code>CAP_SYS_ADMIN</code>) because they’re now owned by a user
+namespace where the user has that capability.</p>
+<p>The mapping lives in <code>/proc/PID/uid_map</code> and
+<code>gid_map</code>, each line
+<code>&lt;inside_id&gt; &lt;outside_id&gt; &lt;count&gt;</code>. Rules
+that bite people: - You must write the map <em>before</em> the process
+does much, and each file is <strong>write-once</strong>. - An
+<strong>unprivileged</strong> writer (no <code>CAP_SETUID</code> on the
+host) can only create a <em>single</em> mapping of <em>their own</em>
+uid: <code>0 &lt;myuid&gt; 1</code>. That’s one uid inside. To map a
+<em>range</em> (needed for any real container, which uses many uids),
+you need the setuid helpers
+<strong><code>newuidmap</code>/<code>newgidmap</code></strong>
+(<code>cap_setuid+ep</code> / <code>cap_setgid+ep</code>), which
+validate the requested ranges against
+<strong><code>/etc/subuid</code></strong> and
+<strong><code>/etc/subgid</code></strong> — the sub-range delegated to
+your user by the admin (e.g. <code>ssimpson:100000:65536</code>). This
+is the entire mechanism behind rootless Podman. - Before writing
+<code>gid_map</code> as an unprivileged user, you must first write
+<code>"deny"</code> to
+<strong><code>/proc/PID/setgroups</code></strong>. Otherwise you could
+use <code>setgroups(2)</code> to <em>drop</em> a group that was
+restricting your access to a file (a real CVE-class privilege
+escalation, CVE-2014-8989). The <code>setgroups=deny</code> is the
+fix.</p>
+<p>Capabilities are namespaced: a capability is now a triple
+(capability, target namespace). You can be all-powerful in your userns
+and powerless outside it. Nested user namespaces (up to 32 deep) form a
+tree, and a capability in a parent userns implies it in children.</p>
+<p><strong>Cgroup (<code>CLONE_NEWCGROUP</code>, 4.6).</strong>
+Virtualizes the <em>view</em> of the cgroup hierarchy in
+<code>/proc/PID/cgroup</code> and <code>/proc/PID/mountinfo</code>. When
+you unshare it, your current cgroup becomes the apparent root, so
+processes inside see paths relative to it (<code>/</code> instead of
+<code>/machine.slice/…/container-abc</code>). Without this, a container
+could read its full host cgroup path and learn about the host layout,
+and cgroupfs mounted inside would expose the whole host tree. It changes
+<em>naming/visibility only</em> — it does not move you to a different
+cgroup or change your limits.</p>
+<p><strong>Time (<code>CLONE_NEWTIME</code>, 5.6, the newest).</strong>
+Virtualizes offsets for <code>CLOCK_MONOTONIC</code> and
+<code>CLOCK_BOOTTIME</code> <em>only</em> (not
+<code>CLOCK_REALTIME</code> — wall-clock is deliberately not
+virtualized). Offsets are written to
+<code>/proc/PID/timens_offsets</code> as
+<code>&lt;clockid&gt; &lt;secs&gt; &lt;nanosecs&gt;</code>, write-once
+after the first process enters, requires <code>CAP_SYS_TIME</code> in
+the owning userns. The <em>sole</em> motivation is checkpoint/restore
+(CRIU): when you freeze a container and thaw it an hour later on another
+host, <code>CLOCK_MONOTONIC</code> and uptime would jump by an hour and
+break anything that computed durations; the time namespace applies a
+compensating offset so the container sees continuity. Implemented partly
+in the VDSO so <code>clock_gettime</code> stays fast
+(<code>kernel/time/namespace.c</code>).</p>
+<h3 id="cgroups-v2-the-unified-hierarchy">cgroups v2: the unified
+hierarchy</h3>
+<p>Mounted once at <code>/sys/fs/cgroup</code> (filesystem type
+<code>cgroup2</code>, magic <code>0x63677270</code>). Every directory is
+a cgroup; you create one with <code>mkdir</code>. Key interface files
+and the rules that govern them:</p>
+<ul>
+<li><strong><code>cgroup.procs</code></strong> — the PIDs in this
+cgroup. Write a PID to move it (moving a PID moves all its threads).
+Read to enumerate.</li>
+<li><strong><code>cgroup.controllers</code></strong> — which controllers
+are <em>available</em> here (were enabled by the parent).</li>
+<li><strong><code>cgroup.subtree_control</code></strong> — which
+controllers this cgroup <em>hands down to its children</em>. You
+enable/disable with <code>+cpu</code>/<code>-memory</code> etc. A
+controller is only usable in a child if the parent listed it here.</li>
+</ul>
+<p><strong>The “no internal processes” rule</strong> is the single most
+important structural constraint and the thing people fight. A cgroup
+that has controllers enabled in <code>subtree_control</code> may
+<strong>not</strong> simultaneously contain processes <em>and</em>
+enabled child controllers — put differently, once a cgroup distributes a
+resource to children, only leaf cgroups may hold processes. The root is
+exempt. This is why systemd builds <code>.slice</code> (branch) and
+<code>.scope</code>/<code>.service</code> (leaf) nodes: processes live
+in leaves, resource distribution happens at branches.</p>
+<pre><code>/sys/fs/cgroup/                      (root — exempt from the rule)
+├── cgroup.subtree_control: cpu memory io pids
+├── system.slice/                    (branch: no procs, subtree_control=cpu memory)
+│   ├── sshd.service/                (leaf: has cgroup.procs, cpu.max, memory.max)
+│   └── nginx.service/
+├── user.slice/
+│   └── user-1000.slice/
+│       └── user@1000.service/       (the per-user systemd, delegated subtree below here)
+└── machine.slice/                   (containers / VMs)
+    └── libpod-&lt;id&gt;.scope/</code></pre>
+<p><strong>The controllers (mechanism):</strong></p>
+<ul>
+<li><p><strong>cpu</strong> — <code>cpu.weight</code> (1–10000, default
+100) is <em>proportional</em> share under contention (this is the
+EEVDF/CFS weight). <code>cpu.max</code> is the <em>absolute</em> cap:
+<code>"&lt;quota&gt; &lt;period&gt;"</code> in microseconds,
+e.g. <code>50000 100000</code> = 50ms of CPU every 100ms = half a core.
+The killer diagnostic: <code>cpu.stat</code> reports
+<code>nr_periods</code>, <code>nr_throttled</code>, and
+<code>throttled_usec</code>. <strong>A process pinned at “50% CPU” on
+the dashboard can be catastrophically throttled</strong> if its work is
+bursty — it burns its quota in the first 20ms of each 100ms window and
+is then <em>frozen</em> for 80ms, adding up to 80ms of tail latency,
+while average utilization reads a comfortable 50%.
+<code>nr_throttled</code> climbing is the smoking gun that the metric is
+lying.</p></li>
+<li><p><strong>memory</strong> — three watermarks with distinct
+semantics that everyone conflates:</p>
+<ul>
+<li><code>memory.max</code> — the <strong>hard limit / OOM
+boundary</strong>. Exceed it and reclaim runs; if reclaim can’t free
+enough, the cgroup OOM killer fires <em>within this cgroup</em> (not the
+global OOM killer).</li>
+<li><code>memory.high</code> — the <strong>throttle-via-reclaim</strong>
+watermark. There’s <em>no OOM kill</em>; instead the kernel throttles
+the offending tasks and aggressively reclaims to push usage back down.
+Overshooting <code>high</code> makes you slow, not dead. This is the
+knob for graceful degradation.</li>
+<li><code>memory.low</code> / <code>memory.min</code> —
+<strong>protection</strong> (reclaim mostly/entirely skips this cgroup
+down to this size). <code>min</code> is a hard guarantee;
+<code>low</code> is best-effort.</li>
+<li><code>memory.current</code>, <code>memory.stat</code> (anon vs file
+vs slab vs sock breakdown), <code>memory.events</code> (counts of
+<code>high</code>/<code>max</code>/<code>oom</code>/<code>oom_kill</code>
+events — watch these).</li>
+</ul></li>
+<li><p><strong>io</strong> — <code>io.max</code> per-device throttling
+(<code>MAJ:MIN rbps=… wbps=… riops=… wiops=…</code>),
+<code>io.weight</code> for proportional bandwidth (works with the
+BFQ/blk-mq cost model), <code>io.latency</code> for latency-based
+protection (a target latency; cgroups exceeding it get others
+throttled), and <code>io.stat</code> for per-device accounting. Note io
+throttling is on the <em>block</em> layer, so it accounts buffered
+writeback correctly only with the memory controller co-enabled
+(writeback is attributed back to the cgroup that dirtied the
+page).</p></li>
+<li><p><strong>pids</strong> — <code>pids.max</code> caps the number of
+tasks; <code>pids.current</code> reads the count. The fork-bomb
+containment primitive.</p></li>
+</ul>
+<p><strong>Pressure Stall Information (PSI).</strong> Every cgroup
+exposes <code>cpu.pressure</code>, <code>memory.pressure</code>,
+<code>io.pressure</code>. Each reports <code>some</code> (fraction of
+wall time ≥1 task was stalled waiting for the resource) and, for
+memory/io, <code>full</code> (fraction of time <em>all</em> runnable
+tasks were stalled — pure lost work), averaged over 10s/60s/300s plus a
+running <code>total</code> microsecond counter. PSI is the correct
+signal for “is this cgroup starved?” because it measures <em>stall</em>,
+not utilization. 100% CPU utilization with zero
+<code>cpu.pressure</code> = healthy saturation; 60% utilization with
+rising <code>some</code> = contention hurting you. This is the modern
+replacement for guessing from load average.</p>
+<h3 id="delegation-and-the-systemd-relationship">Delegation and the
+systemd relationship</h3>
+<p><strong>Delegation</strong> hands an unprivileged user (or a
+container) ownership of a <em>subtree</em> so they can create and manage
+their own cgroups without root. You delegate by <code>chown</code>ing
+the subtree directory <em>and</em> the specific files
+<code>cgroup.procs</code>, <code>cgroup.subtree_control</code>,
+<code>cgroup.threads</code> to the target user. The delegatee can then
+build cgroups below, but the kernel enforces
+<strong>containment</strong>: they cannot move processes <em>into or out
+of</em> the delegated subtree (that would let them escape their limits),
+and the parent still caps everything.</p>
+<p>The <strong><code>nsdelegate</code></strong> mount option makes
+cgroup <em>namespaces</em> into automatic delegation boundaries: with it
+set, a process cannot move itself outside its cgroup-namespace root even
+if permissions would otherwise allow it. This is a system-wide option
+settable only from the init namespace.</p>
+<p>systemd is the practical owner of the cgroup tree on any modern
+distro. It runs as the sole writer at the root and expects everyone else
+to ask it (via the D-Bus API / transient units) rather than scribble on
+cgroupfs directly — the “single-writer rule.” Its resource-control
+directives map straight onto the controllers:
+<code>CPUWeight=</code>→<code>cpu.weight</code>,
+<code>CPUQuota=</code>→<code>cpu.max</code>,
+<code>MemoryHigh=</code>/<code>MemoryMax=</code>→<code>memory.high</code>/<code>memory.max</code>,
+<code>IOWeight=</code>→<code>io.weight</code>,
+<code>TasksMax=</code>→<code>pids.max</code>. For rootless containers,
+systemd delegates <code>user@UID.service</code> to the user, which is
+<em>why</em> rootless Podman can set cgroup limits at all.</p>
+<h3 id="failure-modes-and-scale-behavior">Failure modes and scale
+behavior</h3>
+<ul>
+<li><strong>Mount propagation leaks</strong>: forget to make the
+container root <code>MS_SLAVE</code>/<code>MS_PRIVATE</code> and
+container mounts pin host resources; unmounts fail with
+<code>EBUSY</code>, disks won’t detach, shutdown hangs.</li>
+<li><strong>PID 1 signal trap</strong>: shell or app as PID 1 with no
+signal handlers ignores <code>SIGTERM</code> → slow,
+<code>SIGKILL</code>-based shutdowns; zombies pile up if PID 1 doesn’t
+reap (why runtimes inject a tiny init like
+<code>tini</code>/<code>catatonit</code>).</li>
+<li><strong>uid_map / setgroups ordering</strong>: writing
+<code>gid_map</code> before <code>setgroups=deny</code> fails as
+unprivileged; getting the range wrong vs <code>/etc/subuid</code> makes
+<code>newuidmap</code> refuse and the container won’t start.</li>
+<li><strong>CFS throttling masquerading as healthy</strong>: covered
+above — the canonical “the metric is lying” case. Watch
+<code>cpu.stat throttled_usec</code>.</li>
+<li><strong>memory.high thrash</strong>: setting <code>high</code> too
+low sends a workload into permanent reclaim — it “runs” but at a
+fraction of speed with high <code>memory.pressure full</code>, looking
+alive but useless.</li>
+<li><strong>cgroup churn at scale</strong>: per-cgroup memory/PSI
+accounting has overhead; creating/destroying thousands of cgroups/sec
+(heavy container churn) shows up as kernel CPU in
+<code>css_free</code>/rstat flushing. cgroup v2’s rstat aggregation is
+lazy but reading <code>*.stat</code> forces a flush.</li>
+<li><strong>Net namespace creation cost</strong>: dominates cold-start
+container latency at scale; each is a full stack allocation.</li>
+<li><strong>PID exhaustion is namespace-global to the host</strong>:
+<code>pids.max</code> limits per cgroup, but total PIDs are a host
+resource; a runaway namespace without <code>pids.max</code> can still
+exhaust <code>kernel.pid_max</code> for everyone.</li>
+</ul>
+<hr />
+<h2 id="hands-on-labs">Hands-on labs</h2>
+<blockquote>
+<p>All labs assume a <strong>throwaway Linux VM</strong> (any distro
+with kernel ≥ 5.6 for the time-namespace lab; ≥ 5.2 otherwise).
+Everything is distro-agnostic. Install the tooling first:</p>
+<pre class="bash"><code># Debian/Ubuntu
+sudo apt-get update &amp;&amp; sudo apt-get install -y util-linux iproute2 uidmap strace stress-ng cgroup-tools
+# Fedora/Rocky/RHEL
+sudo dnf install -y util-linux iproute strace stress-ng libcgroup-tools shadow-utils</code></pre>
+<p>Confirm cgroup v2 is the active hierarchy (systemd unified mode):</p>
+<pre class="bash"><code>stat -fc %T /sys/fs/cgroup    # must print: cgroup2fs</code></pre>
+<p>If it prints <code>tmpfs</code>, you’re on hybrid/v1 — boot with
+<code>systemd.unified_cgroup_hierarchy=1</code> on the kernel cmdline
+and reboot.</p>
+</blockquote>
+<h3 id="lab-1-watch-namespaces-come-into-existence">Lab 1 — Watch
+namespaces come into existence</h3>
+<p><strong>Objective.</strong> Make the invisible visible: prove that
+namespaces are per-process kernel objects with inode identities, and
+that <code>unshare</code> swaps exactly one while leaving the rest
+shared.</p>
+<p><strong>Setup.</strong> Two terminals on the VM. Nothing else
+needed.</p>
+<p><strong>Steps.</strong></p>
+<ol type="1">
+<li><p>Baseline: record your shell’s namespace inodes.</p>
+<pre class="bash"><code>ls -l /proc/$$/ns/</code></pre>
+<p>Note the inode numbers in the <code>-&gt; net:[4026531840]</code>
+targets. Every process on the host shares these (the “initial”
+namespaces).</p></li>
+<li><p>In terminal A, unshare a UTS namespace and change the hostname
+only inside it:</p>
+<pre class="bash"><code>sudo unshare --uts bash
+hostname container-a
+hostname            # -&gt; container-a
+readlink /proc/$$/ns/uts   # a NEW inode number
+readlink /proc/$$/ns/net   # SAME as host — only uts changed</code></pre></li>
+<li><p>In terminal B (still on the host), check the host hostname and
+the shell’s uts inode:</p>
+<pre class="bash"><code>hostname                   # unchanged host name
+readlink /proc/$$/ns/uts   # the original inode</code></pre></li>
+<li><p>Now trace what <code>unshare</code> actually does at the syscall
+level:</p>
+<pre class="bash"><code>sudo strace -f -e trace=unshare,clone,clone3,setns unshare --uts --pid --fork --mount-proc bash -c &#39;echo pid1 is $$; ps -e&#39;</code></pre>
+<p>Read the trace: you’ll see one
+<code>unshare(CLONE_NEWUTS|CLONE_NEWPID|...)</code>, then a
+<code>clone</code>/<code>clone3</code> for the <code>--fork</code> child
+that becomes PID 1, and <code>ps</code> reporting a nearly empty process
+table because <code>--mount-proc</code> mounted a fresh procfs bound to
+the new PID namespace.</p></li>
+</ol>
+<p><strong>Prove it.</strong></p>
+<pre class="bash"><code># From the host, confirm the unshared shell has a different uts ns but same net ns:
+PID_A=$(pgrep -f &#39;unshare --uts bash&#39; | head -1)   # or note the bash pid in terminal A
+sudo readlink /proc/$PID_A/ns/uts        # differs from host
+sudo readlink /proc/$PID_A/ns/net        # equals: readlink /proc/1/ns/net</code></pre>
+<p>If uts differs and net matches, you’ve proven namespaces are
+independently swappable per-process objects.</p>
+<hr />
+<h3 id="lab-2-rootless-from-scratch-user-namespaces-and-uid-mapping">Lab
+2 — Rootless from scratch: user namespaces and UID mapping</h3>
+<p><strong>Objective.</strong> Become “root” with zero host privilege,
+and understand exactly why rootless containers work — including the
+<code>setgroups</code>/<code>gid_map</code> ordering trap and the
+<code>subuid</code> range mechanism.</p>
+<p><strong>Setup.</strong> An <strong>unprivileged</strong> login user
+(do <em>not</em> sudo). Ensure a subuid/subgid range exists:</p>
+<pre class="bash"><code>grep &quot;^$(id -un):&quot; /etc/subuid /etc/subgid || \
+  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 &quot;$(id -un)&quot;</code></pre>
+<p><strong>Steps.</strong></p>
+<ol type="1">
+<li><p>As the unprivileged user, create a user namespace and map
+<em>only yourself</em> to uid 0 (the single-mapping case, no
+helpers):</p>
+<pre class="bash"><code>unshare --user --map-root-user bash
+id                       # uid=0(root) gid=0(root) — inside the userns
+cat /proc/self/uid_map   #          0       &lt;youruid&gt;          1</code></pre>
+<p>You are root <em>inside</em>, but check what you can actually
+touch:</p>
+<pre class="bash"><code>cat /etc/shadow          # Permission denied — host root&#39;s files are owned by host uid 0, not you
+id -u                    # 0 inside; but on the host this process is still your uid</code></pre></li>
+<li><p>Prove the <code>setgroups</code> trap. Open a <em>second</em>
+userns manually and try to write <code>gid_map</code> first:</p>
+<pre class="bash"><code>unshare --user bash -c &#39;
+  echo &quot;0 $(id -u) 1&quot; &gt; /proc/self/uid_map
+  echo &quot;0 $(id -g) 1&quot; &gt; /proc/self/gid_map   # &lt;-- this FAILS: Operation not permitted
+&#39;</code></pre>
+<p>Now do it in the correct order (<code>setgroups=deny</code>
+first):</p>
+<pre class="bash"><code>unshare --user bash -c &#39;
+  echo deny &gt; /proc/self/setgroups
+  echo &quot;0 $(id -u) 1&quot; &gt; /proc/self/uid_map
+  echo &quot;0 $(id -g) 1&quot; &gt; /proc/self/gid_map
+  id
+&#39;</code></pre></li>
+<li><p>Now the <em>range</em> case using the setuid helpers (what real
+runtimes do). Rocky 9.7 ships util-linux 2.37.4, whose
+<code>unshare</code> has <strong>no</strong> one-shot range-mapping
+flags: <code>--map-users</code>/<code>--map-groups</code> were added
+upstream in util-linux 2.38, so they exist on Rocky 10 but <em>not</em>
+on Rocky 9. On Rocky 9 you drive the
+<code>newuidmap</code>/<code>newgidmap</code> setuid helpers against the
+unshared PID from a second shell, which is exactly what rootless Podman
+does under the hood.</p>
+<p>In terminal A, create the user namespace plus the nested namespaces
+(these normally need root) and leave the shell sitting at its prompt.
+Until the maps are written the process is still your uid (it shows up as
+<code>nobody</code>/overflow inside), so don’t run privileged ops
+yet:</p>
+<pre class="bash"><code># terminal A:
+unshare --user --mount --pid --fork --mount-proc --uts bash</code></pre>
+<p>In terminal B (still the unprivileged user), find that PID and apply
+the mapping. The rootless idiom maps inside-uid 0 to <em>your own</em>
+host uid (one id) and inside-uids 1..65535 to your delegated subuid
+range, validated against
+<code>/etc/subuid</code>/<code>/etc/subgid</code>:</p>
+<pre class="bash"><code># terminal B:
+UPID=$(pgrep -f &#39;unshare --user --mount&#39;)
+newuidmap &quot;$UPID&quot; 0 &quot;$(id -u)&quot; 1  1 100000 65535
+newgidmap &quot;$UPID&quot; 0 &quot;$(id -g)&quot; 1  1 100000 65535</code></pre>
+<p>Back in terminal A, the shell is now uid 0 inside the userns:</p>
+<pre class="bash"><code># terminal A:
+id                       # uid 0
+cat /proc/self/uid_map   #   0  &lt;youruid&gt;      1
+                         #   1     100000  65535   (a full range, via newuidmap)
+hostname rootless        # allowed: we hold CAP_SYS_ADMIN in THIS userns
+ps -e                    # tiny table: private PID namespace</code></pre></li>
+<li><p>From the host (another terminal), see the truth — that “root” is
+your unprivileged uid:</p>
+<pre class="bash"><code>ps -o pid,uid,cmd -C bash        # the rootless bash runs as YOUR host uid, not 0</code></pre></li>
+</ol>
+<p><strong>Prove it.</strong></p>
+<pre class="bash"><code># Inside the rootless namespace, you are uid 0 and can create nested namespaces;
+# on the host the same process is unprivileged. Show both truths at once:
+# (inside)
+grep Cap /proc/self/status        # CapEff shows a full-ish mask (effective in this userns)
+readlink /proc/self/ns/user       # a non-initial userns inode
+# (host)
+awk &#39;{print $1}&#39; /proc/$(pgrep -f &#39;bash&#39; | tail -1)/uid_map   # inside-id 0 maps to a host subuid</code></pre>
+<p>Full capabilities inside + unprivileged host uid = you understand
+rootless.</p>
+<p><strong>Teardown.</strong> Exit any rootless shells (their namespaces
+disappear with the last member process). If the setup step
+<em>added</em> the subuid/subgid range (it skips when one already
+exists, so only do this if <code>usermod</code> actually ran), remove it
+to leave <code>/etc/subuid</code> and <code>/etc/subgid</code> as you
+found them:</p>
+<pre class="bash"><code>pkill -u &quot;$(id -un)&quot; -f &#39;unshare --user&#39; 2&gt;/dev/null || true
+sudo usermod --del-subuids 100000-165535 --del-subgids 100000-165535 &quot;$(id -un)&quot;</code></pre>
+<hr />
+<h3
+id="lab-3-drive-the-cgroup-v2-controllers-by-hand-and-catch-the-throttling-lie">Lab
+3 — Drive the cgroup v2 controllers by hand and catch the throttling
+lie</h3>
+<p><strong>Objective.</strong> Create cgroups directly on cgroupfs,
+enable controllers through the subtree, and <em>observe CFS throttling
+while utilization looks moderate</em> — the canonical senior
+diagnostic.</p>
+<p><strong>Setup.</strong> Root on the VM (writing raw cgroupfs).
+<code>stress-ng</code> installed. Pick a scratch cgroup under a
+delegated-safe location. We’ll create our own branch under the root.</p>
+<p><strong>Steps.</strong></p>
+<ol type="1">
+<li><p>Create a cgroup and enable the cpu controller down to it. Respect
+the no-internal-processes rule: put the load in a <em>leaf</em>.</p>
+<pre class="bash"><code>cd /sys/fs/cgroup
+sudo mkdir -p demo.slice/work
+# enable cpu+memory+pids from root down to demo.slice, then down to the leaf:
+echo &#39;+cpu +memory +pids&#39; | sudo tee cgroup.subtree_control
+echo &#39;+cpu +memory +pids&#39; | sudo tee demo.slice/cgroup.subtree_control
+cat demo.slice/work/cgroup.controllers    # cpu memory pids now available in the leaf</code></pre></li>
+<li><p>Set a hard CPU cap of half a core and launch a CPU hog <em>inside
+the leaf</em>:</p>
+<pre class="bash"><code>echo &#39;50000 100000&#39; | sudo tee demo.slice/work/cpu.max      # 50ms per 100ms = 0.5 core
+# launch a one-core burner and drop it into the leaf:
+stress-ng --cpu 1 --timeout 60s &amp;
+HOG=$!
+echo $HOG | sudo tee demo.slice/work/cgroup.procs
+cat demo.slice/work/cgroup.procs           # confirm the pid is in the leaf</code></pre></li>
+<li><p>In another terminal, watch the <em>two contradictory views</em>
+simultaneously:</p>
+<pre class="bash"><code># View 1: top says ~50% of a core — looks like a healthy half-core workload
+top -p $HOG
+# View 2: the cgroup tells the truth — throttling is piling up
+watch -n1 &#39;cat /sys/fs/cgroup/demo.slice/work/cpu.stat; echo ---; \
+           cat /sys/fs/cgroup/demo.slice/work/cpu.pressure&#39;</code></pre>
+<p>Watch <code>nr_throttled</code> and <code>throttled_usec</code> climb
+every second, and <code>cpu.pressure some</code> rise. The task
+<em>wants</em> a full core; it’s frozen for half of every period.
+Utilization (50%) hides a workload that is being actively starved and
+would show tail-latency spikes in any real service.</p></li>
+<li><p>Now the memory controller. Show <code>high</code> (throttle) vs
+<code>max</code> (kill):</p>
+<pre class="bash"><code>sudo mkdir -p /sys/fs/cgroup/demo.slice/mem
+echo &#39;64M&#39; | sudo tee /sys/fs/cgroup/demo.slice/mem/memory.high    # throttle here
+echo &#39;96M&#39; | sudo tee /sys/fs/cgroup/demo.slice/mem/memory.max     # OOM here
+# allocate 200M inside the leaf and watch it get throttled then killed:
+( echo $BASHPID | sudo tee /sys/fs/cgroup/demo.slice/mem/cgroup.procs &gt;/dev/null
+  stress-ng --vm 1 --vm-bytes 200M --vm-keep --timeout 30s )
+# in another terminal:
+watch -n1 &#39;cd /sys/fs/cgroup/demo.slice/mem; \
+           echo current=$(cat memory.current); cat memory.events; echo ---; cat memory.pressure&#39;</code></pre>
+<p>You’ll see <code>memory.current</code> stall near <code>high</code>
+with <code>memory.pressure full</code> rising (throttle-via-reclaim),
+and if it pushes past <code>max</code>, <code>memory.events</code>
+<code>oom_kill</code> increments — the <em>cgroup</em> OOM killer, not
+the global one.</p></li>
+</ol>
+<p><strong>Prove it.</strong></p>
+<pre class="bash"><code># The proof that &quot;50% CPU&quot; was a lie: throttling was nonzero the whole time.
+cat /sys/fs/cgroup/demo.slice/work/cpu.stat | grep -E &#39;nr_throttled|throttled_usec&#39;
+# nr_throttled and throttled_usec should both be large and &gt; 0.
+
+# cleanup
+sudo bash -c &#39;kill &#39;&quot;$HOG&quot;&#39; 2&gt;/dev/null; \
+  rmdir /sys/fs/cgroup/demo.slice/work /sys/fs/cgroup/demo.slice/mem /sys/fs/cgroup/demo.slice 2&gt;/dev/null&#39;</code></pre>
+<p>Nonzero <code>nr_throttled</code> while <code>top</code> showed 50%
+is the whole lesson.</p>
+<hr />
+<h3 id="lab-4-capstone-build-a-container-from-scratch-no-runtime">Lab 4
+(Capstone) — Build a container from scratch, no runtime</h3>
+<p><strong>Objective.</strong> Assemble a working “container” — isolated
+pid/mount/uts/net + resource limits — using only <code>unshare</code>,
+<code>ip</code>, <code>pivot_root</code>, and cgroupfs. When you finish
+this, <code>docker run</code> holds no mysteries.</p>
+<p><strong>Setup.</strong> Root on the VM (this version uses full
+namespaces; a rootless variant is noted at the end). Build a minimal
+rootfs. If you have
+<code>debootstrap</code>/<code>dnf --installroot</code> use them;
+otherwise a busybox rootfs is enough and fast:</p>
+<pre class="bash"><code>sudo mkdir -p /tmp/rootfs/{bin,proc,sys,dev,oldroot}
+# Static busybox gives us a shell + coreutils in one binary:
+which busybox || sudo apt-get install -y busybox-static || sudo dnf install -y busybox
+cp &quot;$(command -v busybox)&quot; /tmp/rootfs/bin/busybox
+for a in sh ls ps mount hostname ip cat sleep; do sudo ln -sf busybox /tmp/rootfs/bin/$a; done</code></pre>
+<p><strong>Steps.</strong></p>
+<ol type="1">
+<li><p><strong>Create the cgroup that will bound the container</strong>
+(before launch, so PID 1 is born constrained):</p>
+<pre class="bash"><code>cd /sys/fs/cgroup
+echo &#39;+cpu +memory +pids&#39; | sudo tee cgroup.subtree_control &gt;/dev/null
+sudo mkdir -p scratch-container
+echo &#39;20000 100000&#39; | sudo tee scratch-container/cpu.max &gt;/dev/null   # 0.2 core
+echo &#39;128M&#39;         | sudo tee scratch-container/memory.max &gt;/dev/null
+echo &#39;64&#39;           | sudo tee scratch-container/pids.max &gt;/dev/null</code></pre></li>
+<li><p><strong>Launch the isolated process.</strong>
+<code>unshare</code> creates mount+uts+ipc+pid+net namespaces;
+<code>--fork</code> makes the child PID 1; we’ll finish the rootfs pivot
+and cgroup join inside:</p>
+<pre class="bash"><code>sudo unshare --mount --uts --ipc --pid --net --fork --mount-proc=/tmp/rootfs/proc \
+  /bin/bash -c &#39;
+    set -e
+    # join our cgroup as the very first thing (PID 1 of the new ns):
+    echo $$ &gt; /sys/fs/cgroup/scratch-container/cgroup.procs
+    hostname scratch-container
+
+    # make mount propagation private so nothing leaks back to the host:
+    mount --make-rprivate /
+
+    # bind the rootfs onto itself so it becomes a mount point (pivot_root needs this):
+    mount --bind /tmp/rootfs /tmp/rootfs
+    cd /tmp/rootfs
+
+    # pivot into the new root, tuck the old root under ./oldroot, then detach it:
+    pivot_root . oldroot
+    cd /
+    mount -t proc proc /proc
+    mount -t sysfs sys /sys 2&gt;/dev/null || true
+    umount -l /oldroot
+    rmdir /oldroot 2&gt;/dev/null || true
+
+    export PATH=/bin
+    echo &quot;=== inside container ===&quot;; hostname; echo &quot;PID of shell: $$&quot;
+    exec /bin/sh
+  &#39;</code></pre>
+<p>You’re now in a shell where <code>ps</code> (run
+<code>mount -t proc proc /proc</code> already done) shows only container
+processes, <code>hostname</code> is <code>scratch-container</code>, and
+the filesystem is the busybox rootfs. <code>$$</code> is 1 or close to
+it.</p></li>
+<li><p><strong>Prove the isolation from inside</strong> (in the
+container shell):</p>
+<pre class="bash"><code>ps                  # only your shell + ps — private PID namespace
+hostname            # scratch-container — private UTS
+ip link             # only &#39;lo&#39; (down) — private, empty net namespace
+ls /                # the busybox rootfs, not the host&#39;s /</code></pre></li>
+<li><p><strong>Wire up networking</strong> with a veth pair (from the
+<em>host</em>, in another terminal). Find the container PID and plumb a
+cable:</p>
+<pre class="bash"><code>CPID=$(pgrep -f &#39;unshare --mount --uts&#39; )   # the unshare; find the child pid1 via /proc
+# the actual namespaced init is the child of that unshare:
+CPID=$(pgrep -P &quot;$CPID&quot; | head -1)
+sudo ip link add veth-h type veth peer name veth-c
+sudo ip link set veth-c netns &quot;$CPID&quot;
+sudo ip addr add 10.77.0.1/24 dev veth-h
+sudo ip link set veth-h up
+# inside the container&#39;s netns, bring up its end:
+sudo nsenter -t &quot;$CPID&quot; -n ip addr add 10.77.0.2/24 dev veth-c
+sudo nsenter -t &quot;$CPID&quot; -n ip link set veth-c up
+sudo nsenter -t &quot;$CPID&quot; -n ip link set lo up</code></pre>
+<p>Back in the container shell: <code>ip addr</code> now shows
+<code>veth-c</code> with <code>10.77.0.2</code>, and
+<code>ping 10.77.0.1</code> reaches the host. You built container
+networking by hand.</p></li>
+<li><p><strong>Prove the resource cap holds.</strong> Inside the
+container, try to blow the pids limit and the memory limit:</p>
+<pre class="bash"><code># pids: this fork bomb hits the 64-task ceiling and fails to grow further, host unaffected
+:(){ : | : &amp; };:            # (ctrl-c after a moment; it cannot exceed pids.max=64)</code></pre></li>
+</ol>
+<p><strong>Prove it.</strong> From the host:</p>
+<pre class="bash"><code>CPID=$(pgrep -P &quot;$(pgrep -f &#39;unshare --mount --uts&#39;)&quot; | head -1)
+# 1. Distinct namespaces vs host:
+for n in pid net mnt uts; do
+  echo &quot;$n: host=$(sudo readlink /proc/1/ns/$n)  container=$(sudo readlink /proc/$CPID/ns/$n)&quot;
+done
+# 2. The process is inside our cgroup and pids.current respected the cap:
+cat /sys/fs/cgroup/scratch-container/cgroup.procs         # contains $CPID
+cat /sys/fs/cgroup/scratch-container/pids.current         # &lt;= 64
+cat /sys/fs/cgroup/scratch-container/cpu.stat | grep throttled   # throttling under load</code></pre>
+<p>All four namespace inodes differ from PID 1’s, the pid is accounted
+in your cgroup, and <code>pids.current</code> never exceeded 64. That is
+a container — no Docker involved.</p>
+<p><strong>Cleanup.</strong></p>
+<pre class="bash"><code># exit the container shell, then:
+sudo ip link del veth-h 2&gt;/dev/null
+sudo rmdir /sys/fs/cgroup/scratch-container 2&gt;/dev/null
+sudo rm -rf /tmp/rootfs</code></pre>
+<p><strong>Rootless variant (stretch).</strong> Redo step 2 wrapping
+everything in <code>unshare --user --map-root-user</code> <em>first</em>
+(and use <code>newuidmap</code> ranges as in Lab 2). You’ll find you can
+create the mount/pid/uts namespaces without host root — but the veth
+plumbing needs either a privileged helper or slirp4netns, which is
+exactly why rootless Podman ships
+<code>slirp4netns</code>/<code>pasta</code> for userspace networking.
+That gap is a real architectural lesson, not a lab failure.</p>
+<hr />
+<h2 id="curated-resources">Curated resources</h2>
+<p><strong>Primary references (the ABI is the source of
+truth):</strong></p>
+<ul>
+<li><strong><a
+href="https://man7.org/linux/man-pages/man7/namespaces.7.html">namespaces(7)</a></strong>
+— the overview page. Read it as an essay, then read the per-type pages.
+Each namespace type has its own dense man7 page:
+<ul>
+<li><strong><a
+href="https://man7.org/linux/man-pages/man7/user_namespaces.7.html">user_namespaces(7)</a></strong>
+— the keystone. The uid_map/gid_map algorithm, the setgroups rule,
+capability semantics across userns boundaries, nesting limits. Read this
+twice; it’s the highest-leverage single page in the module.</li>
+<li><strong><a
+href="https://man7.org/linux/man-pages/man7/mount_namespaces.7.html">mount_namespaces(7)</a></strong>
+— the propagation-type state machine (shared/slave/private/unbindable)
+that no blog gets fully right.</li>
+<li><strong><a
+href="https://man7.org/linux/man-pages/man7/pid_namespaces.7.html">pid_namespaces(7)</a></strong>
+— init/reaping/signal semantics and the unshare-doesn’t-move-you
+rule.</li>
+<li><strong><a
+href="https://man7.org/linux/man-pages/man7/cgroup_namespaces.7.html">cgroup_namespaces(7)</a></strong>
+and <strong><a
+href="https://man7.org/linux/man-pages/man7/time_namespaces.7.html">time_namespaces(7)</a></strong>
+— the two newest, view-virtualization and CLOCK offsets
+respectively.</li>
+</ul></li>
+<li><strong><a
+href="https://man7.org/linux/man-pages/man7/namespaces.7.html">clone(2)</a>,
+<a
+href="https://man7.org/linux/man-pages/man2/unshare.2.html">unshare(2)</a>,
+<a
+href="https://man7.org/linux/man-pages/man2/setns.2.html">setns(2)</a></strong>
+— the three syscalls. Note the flag caveats (unshare+PID timing,
+setns+userns rules).</li>
+<li><strong><a
+href="https://docs.kernel.org/admin-guide/cgroup-v2.html">Control Group
+v2 — kernel.org admin-guide</a></strong> — <em>the</em> spec. The
+no-internal-processes rule, the delegation model, per-controller
+interface files, and the crucial <code>memory.high</code> (throttle) vs
+<code>memory.max</code> (OOM) distinction plus PSI. When a blog
+disagrees with this page, this page wins.</li>
+<li><strong><a
+href="https://man7.org/linux/man-pages/man7/cgroups.7.html">cgroups(7)</a></strong>
+— the man7 companion; good on the v1↔︎v2 differences and why v2
+exists.</li>
+<li><strong><a
+href="https://man7.org/linux/man-pages/man7/capabilities.7.html">capabilities(7)</a></strong>
+— required background: capabilities are namespaced, and the file-cap
+transformation is what makes <code>newuidmap</code> and rootless
+work.</li>
+<li><strong>rockyman.org</strong> — https://rockyman.org/ —
+authoritative Rocky Linux man-page index, versioned 8/9/10; verify exact
+flags/config keys here. Relevant to this module because the
+<code>unshare</code>/<code>newuidmap</code>/<code>usermod</code> syntax
+drifts between Rocky 9 (util-linux 2.37.4, no
+<code>--map-users</code>/<code>--map-groups</code>) and Rocky 10
+(util-linux 2.38+).</li>
+</ul>
+<p><strong>Landmark long-form (the “why it works this
+way”):</strong></p>
+<ul>
+<li><strong><a href="https://lwn.net/Articles/531114/">LWN: “Namespaces
+in operation” (Kerrisk, 7-part series)</a></strong> — the definitive
+from-scratch build-up of every namespace type by the man-pages
+maintainer. Part 1 links the rest. This is the conceptual backbone; if
+you read one external thing, read this.</li>
+<li><strong><a href="https://lwn.net/Articles/689856/">LWN: “Mount
+namespaces and shared subtrees”</a></strong> and <strong><a
+href="https://lwn.net/Articles/690679/">“Mount namespaces, mount
+propagation, and unbindable mounts”</a></strong> — the two articles that
+finally make propagation types click, with the diagrams the man page
+lacks.</li>
+<li><strong><a href="https://systemd.io/CGROUP_DELEGATION/">Control
+Group APIs and Delegation — systemd.io</a></strong> — the single-writer
+rule, why you don’t scribble on cgroupfs behind systemd’s back, how
+delegation and <code>nsdelegate</code> actually work in practice, and
+the <code>.slice</code>/<code>.scope</code>/<code>.service</code> model.
+Essential for anything running under systemd (i.e. everything).</li>
+</ul>
+<p><strong>Rootless containers (the applied user-namespace
+endgame):</strong></p>
+<ul>
+<li><strong><a
+href="https://rootlesscontaine.rs/how-it-works/userns/">rootlesscontaine.rs
+— User Namespaces</a></strong> and the <strong><a
+href="https://rootlesscontaine.rs/getting-started/common/subuid/">subuid/subgid
+page</a></strong> — the clearest explanation of the
+<code>newuidmap</code>/<code>/etc/subuid</code> range mechanism and the
+single-mapping limitation, straight from the rootless-containers
+project.</li>
+</ul>
+<p><strong>Books:</strong></p>
+<ul>
+<li><strong>The Linux Programming Interface (Kerrisk), ch. on process
+creation, credentials, and the namespace chapters</strong> — <a
+href="https://man7.org/tlpi/">man7.org/tlpi</a>. The syscall-boundary
+grounding for clone/fork/exec and the full credential model that user
+namespaces virtualize.</li>
+<li><strong><a
+href="https://www.brendangregg.com/bpf-performance-tools-book.html">BPF
+Performance Tools (Gregg)</a></strong> — the observability endgame; use
+<code>bpftrace</code> to watch namespace/cgroup transitions live
+(<code>kprobe:cgroup_attach_task</code>, tracepoints on cgroup
+migration) when a runtime misbehaves.</li>
+</ul>
+<p><strong>Source (read alongside the tree open):</strong></p>
+<ul>
+<li><code>include/linux/nsproxy.h</code>, <code>kernel/nsproxy.c</code>
+— the <code>nsproxy</code> struct and copy-on-unshare logic.</li>
+<li><code>kernel/pid_namespace.c</code>,
+<code>kernel/user_namespace.c</code> — init/reaping and the uid-map
+validation you triggered in Lab 2.</li>
+<li><code>kernel/time/namespace.c</code> — VDSO offset application for
+the time namespace (<a
+href="https://github.com/torvalds/linux/blob/master/kernel/time/namespace.c">torvalds/linux</a>).</li>
+<li><code>kernel/cgroup/</code> — the whole cgroup core;
+<code>cgroup.c</code> for the hierarchy and the no-internal-processes
+enforcement, <code>rstat.c</code> for the lazy stat aggregation that
+shows up as CPU under churn.</li>
+</ul>
+<hr />
+<h2 id="senior-signal">Senior signal</h2>
+<ul>
+<li><strong>Can articulate what a container <em>is</em> in terms of
+syscalls</strong> — “a process born via
+<code>clone</code>/<code>unshare</code> with <code>CLONE_NEW*</code>,
+accounted by a cgroup subtree, with a pivoted root and dropped caps” —
+rather than “a lightweight VM.” They know there is no
+<code>struct container</code> and can build one by hand (Lab 4), so no
+runtime is a black box to them.</li>
+<li><strong>Reasons about the namespace/cgroup seam, not each in
+isolation.</strong> Knows namespaces live in <code>nsproxy</code>
+(visibility) while the user namespace lives in <code>cred</code>
+(privilege), and that cgroups are orthogonal to all of it. Can explain
+why a cgroup namespace changes the <em>view</em> but not the
+<em>limits</em>, and why the user namespace is the keystone that unlocks
+all the others for unprivileged users.</li>
+<li><strong>Distrusts the utilization metric and reaches for
+<code>cpu.stat</code>/PSI.</strong> Immediately checks
+<code>nr_throttled</code>/<code>throttled_usec</code> and
+<code>cpu.pressure</code> when a “50% CPU” service has latency spikes,
+because they know CFS quota throttling hides behind a healthy-looking
+average. Uses <code>memory.pressure full</code> to distinguish a
+throttling workload (alive but useless) from a healthy saturated
+one.</li>
+<li><strong>Knows <code>memory.high</code> vs <code>memory.max</code>
+cold</strong> — throttle-via-reclaim vs the cgroup-local OOM boundary —
+and uses <code>high</code> deliberately for graceful degradation instead
+of only setting a hard cap and getting surprise OOM kills. Reads
+<code>memory.events</code> for <code>oom_kill</code> counts rather than
+grepping <code>dmesg</code>.</li>
+<li><strong>Gets mount propagation right by default.</strong> Sets
+container roots <code>MS_SLAVE</code>/<code>MS_PRIVATE</code>
+deliberately and can diagnose the <code>EBUSY</code>-on-unmount /
+disk-won’t-detach / shutdown-hang class of bugs as a propagation leak,
+not a hardware problem.</li>
+<li><strong>Understands the uid-mapping mechanics that break rootless
+setups</strong> — the write-once maps, the single-mapping-vs-range
+distinction, <code>/etc/subuid</code> ranges via <code>newuidmap</code>,
+and the mandatory
+<code>setgroups=deny</code>-before-<code>gid_map</code> ordering (and
+the CVE that ordering fixes). Can debug “container won’t start as
+non-root” from first principles.</li>
+<li><strong>Respects the systemd single-writer rule and the delegation
+model.</strong> Sets limits via unit directives / transient units and
+delegates subtrees properly (chowning <code>cgroup.procs</code> +
+<code>cgroup.subtree_control</code>) rather than fighting systemd by
+writing raw cgroupfs, and understands <code>nsdelegate</code> and the
+no-internal-processes rule that shapes the whole tree.</li>
+<li><strong>Thinks about scale behavior</strong>: net-namespace creation
+cost dominating cold starts, rstat flush CPU under cgroup churn, and
+host-global PID exhaustion despite per-cgroup <code>pids.max</code>.
+Knows which costs are per-container and which are shared, which is the
+difference between a runtime that scales and one that melts at 10k
+containers.</li>
+</ul>
+<hr />
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="01-permissions-and-access-control.html">01 - Permissions
+and Access Control</a> — the user namespace virtualizes UID/GID and
+<em>capability</em> space; the caps, setuid-helper, and
+<code>/etc/subuid</code> mechanics that make rootless work build
+directly on the access-control model covered there.</li>
+<li><a href="03-processes-scheduling-and-signals.html">03 - Processes,
+Scheduling and Signals</a> — PID-namespace init semantics (reaping, PID
+1 signal handling) and the <code>cpu.weight</code>/<code>cpu.max</code>
+EEVDF/CFS throttling behavior are the process-and-scheduler concepts
+applied inside a cgroup.</li>
+<li><a href="06-networking-deep.html">06 - Networking Deep</a> — the
+network namespace, <code>veth</code> pairs, and per-namespace
+routing/netfilter state are the substrate under every container network;
+that module goes deep on the stack a fresh net-ns gives you.</li>
+<li><a href="07-systemd.html">07 - systemd</a> — systemd is the single
+writer of the cgroup v2 tree; its
+<code>.slice</code>/<code>.scope</code>/<code>.service</code> model,
+resource-control directives, and delegation of
+<code>user@UID.service</code> are what make the hand-rolled cgroups in
+these labs production-real.</li>
+<li>03 - Containers from the Ground Up — this module is the kernel
+substrate (“a container is not a kernel object”); that module builds
+runc/crun/containerd-style runtimes and OCI images on top of the exact
+<code>unshare</code>/<code>pivot_root</code>/cgroup calls in the
+capstone.</li>
+<li>04 - Kubernetes Control-Plane Internals — pods are orchestrated
+collections of these namespaces + cgroups; the kubelet and CRI drive the
+same syscalls, and the CFS-throttling-vs-utilization lie is the
+canonical K8s “slow pod, low CPU” incident.</li>
+<li>02 - GPUs in Containers — exposing a GPU to a container is
+device-cgroup allowlisting plus namespace/mount plumbing built directly
+on the controllers and mount-propagation rules here.</li>
+<li>06 - Apptainer for HPC Containers — Apptainer is rootless-first: the
+user-namespace + <code>/etc/subuid</code> + <code>newuidmap</code> +
+<code>setgroups=deny</code> mechanics from Lab 2 are exactly why it runs
+unprivileged on HPC login nodes.</li>
+<li>06 - Kubernetes Security (CKS-level) — namespace and cgroup
+isolation, user namespaces, and seccomp/caps are the pod security
+boundary; the seams-between-mechanisms failures here are the
+container-escape surface that module defends.</li>
+</ul>
+</main>
+</div></body></html>

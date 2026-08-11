@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 - Storage and LVM | Linux Training Course</title>
+<link rel="stylesheet" href="style.css"></head>
+<body><div class="layout">
+<nav class="sidebar"><a href="index.html"><strong>Linux Training Course</strong></a><hr>
+<a href="00-track-overview.html" data-page="00-track-overview.html">00 - Track Overview</a>
+<a href="01-permissions-and-access-control.html" data-page="01-permissions-and-access-control.html">01 - Permissions and Access Control</a>
+<a href="02-users-authentication-and-pam.html" data-page="02-users-authentication-and-pam.html">02 - Users, Authentication and PAM</a>
+<a href="03-processes-scheduling-and-signals.html" data-page="03-processes-scheduling-and-signals.html">03 - Processes, Scheduling and Signals</a>
+<a href="04-filesystems-and-the-vfs.html" data-page="04-filesystems-and-the-vfs.html">04 - Filesystems and the VFS</a>
+<a href="05-storage-and-lvm.html" data-page="05-storage-and-lvm.html" class="current">05 - Storage and LVM</a>
+<a href="06-networking-deep.html" data-page="06-networking-deep.html">06 - Networking Deep</a>
+<a href="07-systemd.html" data-page="07-systemd.html">07 - systemd</a>
+<a href="08-boot-and-init.html" data-page="08-boot-and-init.html">08 - Boot and Init</a>
+<a href="09-the-kernel.html" data-page="09-the-kernel.html">09 - The Kernel</a>
+<a href="10-namespaces-and-cgroups-v2.html" data-page="10-namespaces-and-cgroups-v2.html">10 - Namespaces and cgroups v2</a>
+<a href="11-observability-and-tracing-with-ebpf.html" data-page="11-observability-and-tracing-with-ebpf.html">11 - Observability and Tracing with eBPF</a>
+<a href="12-selinux-and-hardening.html" data-page="12-selinux-and-hardening.html">12 - SELinux and Hardening</a>
+<a href="13-samba-and-smb.html" data-page="13-samba-and-smb.html">13 - Samba and SMB</a>
+<a href="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html" data-page="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html">14 - Early Userspace - dracut Hooks, udev and the initqueue</a></nav>
+<main><h1 id="storage-and-lvm">05 - Storage and LVM</h1>
+<p>Backlink: <a href="00-track-overview.html">00 - Track
+Overview</a></p>
+<blockquote>
+<p>The storage stack is the deepest vertical slice in the kernel: a
+single <code>write()</code> traverses the VFS, the page cache, the
+filesystem, the block layer, one or more device-mapper targets, an I/O
+scheduler, a driver’s submission queue, and finally hardware. Every
+layer reorders, merges, caches, or defers. A staff engineer can name
+which layer is lying when <code>iostat</code> says the disk is 100% busy
+but the application is idle, or when <code>df</code> says there’s free
+space but every write returns <code>ENOSPC</code>. This module is about
+owning that vertical slice end to end.</p>
+</blockquote>
+<hr />
+<h2 id="concept-deep-dive">Concept deep-dive</h2>
+<h3 id="the-shape-of-the-stack">The shape of the stack</h3>
+<pre><code> write(2) / read(2) / fsync(2)
+        │
+   ┌────▼─────────────────────────────────────────────┐
+   │ VFS  (dentry, inode, file, address_space)         │
+   └────┬─────────────────────────────────────────────┘
+        │  page cache (dirty pages, writeback via pdflush/wb)
+   ┌────▼─────────────────────────────────────────────┐
+   │ Filesystem (ext4 / XFS): maps file offset → LBA   │
+   │  builds struct bio (segments = pages + offsets)   │
+   └────┬─────────────────────────────────────────────┘
+        │  submit_bio()
+   ┌────▼─────────────────────────────────────────────┐
+   │ Block layer (blk-mq)                              │
+   │  bio → request; per-CPU software queues (ctx)     │
+   │  optional I/O scheduler (mq-deadline/bfq/kyber)   │
+   │  hardware dispatch queues (hctx)                  │
+   └────┬─────────────────────────────────────────────┘
+        │  (device-mapper targets stack HERE as virtual bdevs)
+   ┌────▼─────────────────────────────────────────────┐
+   │ dm targets: linear│stripe│crypt│thin│snapshot│mpath│
+   │ md/RAID (separate personality layer)              │
+   └────┬─────────────────────────────────────────────┘
+   ┌────▼─────────────────────────────────────────────┐
+   │ Low-level driver (nvme, scsi/sd, virtio-blk)      │
+   │  SQ/CQ rings (NVMe), doorbells, MSI-X, IRQ/NAPI   │
+   └────┬─────────────────────────────────────────────┘
+        ▼  hardware (controller FTL, disk cache, platters/NAND)</code></pre>
+<p>Two things are worth internalizing before anything else:</p>
+<ol type="1">
+<li><strong>The block layer is asynchronous by design.</strong>
+<code>submit_bio()</code> returns almost immediately; completion happens
+later in an interrupt/softirq or a poll context. Latency you measure at
+the syscall boundary is queueing + service, and the two are separable
+(that’s the whole point of <code>blktrace</code> Q2D vs D2C,
+below).</li>
+<li><strong>device-mapper targets <em>are</em> block devices.</strong> A
+dm device consumes bios and re-emits (possibly remapped, split, or
+duplicated) bios to underlying block devices. This recursion is why you
+can stack <code>dm-crypt</code> on top of <code>dm-thin</code> on top of
+<code>md</code> on top of <code>nvme</code> and it just works: each
+layer speaks the same bio protocol.</li>
+</ol>
+<h3 id="the-block-layer-bio-request-and-blk-mq">The block layer: bio,
+request, and blk-mq</h3>
+<p>The fundamental I/O unit is <code>struct bio</code> (defined in
+<code>include/linux/blk_types.h</code>). A bio describes a contiguous
+<em>device</em> region (a starting sector + length,
+<code>bi_iter</code>) scattered across possibly-noncontiguous
+<em>memory</em> (a vector of <code>bio_vec</code>, each a
+<code>{page, offset, len}</code>). This scatter/gather is why zero-copy
+works: the DMA engine walks the bio_vec.</p>
+<p>A <code>struct request</code> (in
+<code>include/linux/blk-mq.h</code>) is a <em>collection of adjacent
+bios</em> plus driver bookkeeping. Merging adjacent bios into one
+request is one of the block layer’s main jobs; a single 1 MB request is
+far cheaper than 256 × 4 KB requests at the hardware doorbell.</p>
+<p><strong>blk-mq (multi-queue), the only block layer since kernel
+5.0</strong> (the legacy single-queue request layer was removed): it is
+built around two queue tiers.</p>
+<ul>
+<li><strong>Software queues</strong> (<code>struct blk_mq_ctx</code>),
+one per CPU. Submission from a CPU lands in that CPU’s ctx with no
+cross-CPU lock. This is the scalability fix: the old single request
+queue had one <code>queue_lock</code> that became the bottleneck on
+many-core boxes driving millions of IOPS.</li>
+<li><strong>Hardware queues</strong> (<code>struct blk_mq_hw_ctx</code>,
+“hctx”), mapping to what the device actually exposes. For NVMe, each
+hctx maps to one NVMe <strong>SQ/CQ pair</strong> with its own MSI-X
+interrupt vector, so completions are steered back to the submitting CPU.
+A cheap SATA disk has one hctx; a modern NVMe drive has one per
+CPU.</li>
+</ul>
+<p>The mapping ctx→hctx is in <code>/sys/block/&lt;dev&gt;/mq/</code>.
+Count the directories to see the hardware queue depth:</p>
+<pre><code>$ ls /sys/block/nvme0n1/mq/
+0  1  2  3  4  5  6  7
+$ cat /sys/block/nvme0n1/mq/0/nr_tags     # per-hctx queue depth
+1023</code></pre>
+<p><strong>Plugging</strong>
+(<code>blk_start_plug</code>/<code>blk_finish_plug</code>): the kernel
+batches submissions on a per-task “plug” list so it can merge and sort
+before flushing to the hctx. A process doing many small sequential
+writes gets them coalesced. When you see huge <code>rrqm/s</code> or
+<code>wrqm/s</code> (merges) in <code>iostat -x</code>, that’s plugging
++ the scheduler at work.</p>
+<p><strong>Failure/scale behavior:</strong> the visible queue depth
+ceiling is <code>nr_requests</code>
+(<code>/sys/block/&lt;dev&gt;/queue/nr_requests</code>). When it’s
+exhausted, submitters block in <code>blk_mq_get_tag()</code> waiting for
+a free tag, and that time shows up as elevated <code>await</code> in
+iostat that is <em>not</em> device latency. This is the classic “the
+disk isn’t slow, the queue is full” case.</p>
+<h3 id="io-schedulers-under-blk-mq">I/O schedulers under blk-mq</h3>
+<p>Schedulers are pluggable elevators sitting between the software
+queues and dispatch. Live in
+<code>/sys/block/&lt;dev&gt;/queue/scheduler</code> (brackets show the
+active one):</p>
+<pre><code>$ cat /sys/block/sda/queue/scheduler
+[mq-deadline] kyber bfq none</code></pre>
+<ul>
+<li><strong>none</strong> — FIFO passthrough, no reordering. Correct
+default for NVMe and fast SSDs: the device’s internal FTL reorders far
+better than the kernel can, and scheduler CPU overhead just steals IOPS.
+NVMe defaults to <code>none</code>.</li>
+<li><strong>mq-deadline</strong> — two sorted queues (read, write) plus
+deadline expiry (default 500 ms read, 5 s write). Prevents starvation by
+forcing an expired request out of sort order. Safe general-purpose
+default for SATA/SAS SSDs and rotational disks; the choice when you want
+bounded latency.</li>
+<li><strong>bfq</strong> (Budget Fair Queueing) — proportional-share,
+per-cgroup/per-process fairness with heuristics for interactive
+workloads. Expensive per-request; shines on rotational disks and
+desktops with contending processes. Rarely right for a database on
+NVMe.</li>
+<li><strong>kyber</strong> — latency-target scheduler for fast devices;
+throttles based on measured read/write latency targets. Niche.</li>
+</ul>
+<p>The senior read: <strong>scheduler choice is a
+latency-vs-throughput-vs-fairness tradeoff, and on NVMe the answer is
+almost always <code>none</code>.</strong> RHEL/Rocky set this per device
+class via udev rules
+(<code>/usr/lib/udev/rules.d/60-block-scheduler.rules</code>) keyed on
+the <code>queue/rotational</code> attribute.</p>
+<h3 id="device-mapper-the-virtualization-layer">device-mapper: the
+virtualization layer</h3>
+<p>device-mapper (dm) is a kernel framework
+(<code>drivers/md/dm*.c</code>) that builds virtual block devices from
+<em>targets</em>. Each dm device has a <strong>table</strong>: a list of
+<code>start length target-type target-args</code> rows mapping regions
+of the virtual device to targets. Inspect the live table with
+<code>dmsetup table</code>:</p>
+<pre><code>$ dmsetup table vg0-root
+0 41943040 linear 259:0 2048</code></pre>
+<p>That reads: sectors 0..41943040 of <code>vg0-root</code> are a
+<code>linear</code> remap onto major:minor <code>259:0</code> starting
+at sector 2048. <strong>LVM is a userspace metadata manager that
+programs dm tables.</strong> <code>lvs</code>/<code>vgs</code> read
+metadata; the actual I/O path is pure device-mapper. When
+<code>lvs</code> disagrees with reality, <code>dmsetup table</code> and
+<code>dmsetup status</code> are ground truth.</p>
+<p>Targets you must know (all documented under
+<code>Documentation/admin-guide/device-mapper/</code>):</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Target</th>
+<th>What it does</th>
+<th>The failure mode to know</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>linear</code></td>
+<td>1:1 remap (the building block of LVM LVs)</td>
+<td>none interesting</td>
+</tr>
+<tr>
+<td><code>striped</code></td>
+<td>RAID0 across devices</td>
+<td>one leg dies → whole LV dead</td>
+</tr>
+<tr>
+<td><code>snapshot</code> / <code>snapshot-origin</code></td>
+<td>COW exception store</td>
+<td>store fills → snapshot <strong>invalid</strong></td>
+</tr>
+<tr>
+<td><code>thin</code> / <code>thin-pool</code></td>
+<td>shared pool, allocate-on-write, B-tree metadata</td>
+<td>pool full → I/O errors or queue</td>
+</tr>
+<tr>
+<td><code>crypt</code></td>
+<td>dm-crypt transparent encryption</td>
+<td>wrong cipher/key → garbage, not error</td>
+</tr>
+<tr>
+<td><code>multipath</code></td>
+<td>path failover/grouping</td>
+<td>all paths down → queue or fail</td>
+</tr>
+<tr>
+<td><code>dm-cache</code> / <code>dm-writecache</code></td>
+<td>SSD cache in front of HDD</td>
+<td>writeback semantics</td>
+</tr>
+<tr>
+<td><code>dm-verity</code></td>
+<td>read-only Merkle-tree integrity</td>
+<td>hash mismatch → EIO (verified boot)</td>
+</tr>
+<tr>
+<td><code>dm-integrity</code></td>
+<td>per-sector checksums/journaling</td>
+<td>detects bit rot</td>
+</tr>
+</tbody>
+</table>
+<p><code>dmsetup status</code> gives per-target <em>runtime</em> state
+(e.g., thin-pool used blocks, snapshot store fullness, multipath path
+status). This is the single most under-used forensic command in the
+storage stack.</p>
+<h3 id="lvm-on-disk-anatomy">LVM on-disk anatomy</h3>
+<p>Three logical tiers: <strong>PV</strong> (physical volume) →
+<strong>VG</strong> (volume group) → <strong>LV</strong> (logical
+volume). The mechanism:</p>
+<ul>
+<li><strong>PV label</strong> lives in the second 512-byte sector by
+default (<code>label_header</code>, magic <code>LABELONE</code>),
+pointing at the <strong>metadata area (MDA)</strong>. The MDA holds the
+VG metadata as <em>human-readable text</em> (a small config-language
+blob), stored in a ring buffer so the previous copy survives a torn
+write. This is why <code>/etc/lvm/archive/</code> and
+<code>/etc/lvm/backup/</code> exist and why <code>vgcfgrestore</code>
+can rewind a VG to a prior metadata generation. <strong>The text
+metadata is the crown jewel: back it up, and you can recover from almost
+any PV-header disaster.</strong></li>
+<li><strong>PE (physical extent)</strong> is the allocation unit on a
+PV, default 4 MiB. <strong>LE (logical extent)</strong> is the LV-side
+unit. An LV is fundamentally a map of LEs → PEs, which dm expresses as
+one or more <code>linear</code>/<code>striped</code> table rows.
+<code>pvdisplay --maps</code> / <code>lvdisplay --maps</code> show the
+extent mapping.</li>
+</ul>
+<pre><code>PV (/dev/sdb)   VG (vg0)                LV (data)
+┌───────────┐   allocates PEs           LE0 → PE12
+│ label     │   into LVs                LE1 → PE13
+│ MDA (text)│                           LE2 → PE14  (linear run)
+│ PE0 PE1 …│  ───────────────────────▶ …
+└───────────┘</code></pre>
+<p>Because it’s just an extent map, <code>lvextend</code> is trivial
+(append extents + reload the dm table with no I/O interruption).
+<code>lvreduce</code> is dangerous: it truncates the map, and if the
+filesystem wasn’t shrunk first you’ve cut off live data. <strong>XFS
+cannot shrink at all</strong>, which is why “grow the LV, grow the FS”
+is safe but the reverse is a footgun.</p>
+<h3
+id="lvm-snapshots-the-cow-exception-store-and-the-freeze-failure">LVM
+snapshots: the COW exception store and the freeze failure</h3>
+<p>A traditional (thick) LVM snapshot creates a
+<code>snapshot-origin</code> target on the origin and a
+<code>snapshot</code> target backed by a separate <strong>COW exception
+store</strong> LV. On the first write to any origin chunk after the
+snapshot is taken, the <em>original</em> chunk is copied to the
+exception store, then the write proceeds. Reads of the snapshot check
+the exception store (changed chunks) then fall through to the
+origin.</p>
+<pre><code>Origin write to chunk N (post-snapshot):
+  1. read old chunk N from origin
+  2. write old chunk N → COW store   ← the &quot;copy&quot; in copy-on-write
+  3. record exception (N → store loc) in store metadata
+  4. write new data to origin chunk N</code></pre>
+<p><strong>The failure mode every senior must know:</strong> if the COW
+store fills (100% in <code>lvs</code> <code>Data%</code>), the snapshot
+is <strong>dropped/invalidated</strong> — it becomes unreadable, and you
+lose the point-in-time view. In older behavior a full store could stall
+the origin. This is why thick snapshots are only for short-lived
+operations (a consistent backup window), sized generously, and
+monitored. Write amplification is real: every first-touch write to the
+origin becomes read+write+write.</p>
+<h3
+id="thin-provisioning-dm-thin-allocate-on-write-and-the-enospc-cliff">Thin
+provisioning (dm-thin): allocate-on-write and the ENOSPC cliff</h3>
+<p><code>thin-pool</code> decouples <em>allocated</em> from
+<em>provisioned</em>. A pool has a <strong>data device</strong> and a
+<strong>metadata device</strong>. Thin LVs claim virtual size up front
+but consume pool data blocks only on first write (allocate-on-write).
+The metadata is a <strong>B-tree</strong> (managed by
+<code>dm-persistent-data</code>,
+<code>drivers/md/persistent-data/</code>) mapping (thin-dev-id, virtual
+block) → pool physical block, with reference counts that make
+<strong>thin snapshots O(1)</strong>: a snapshot just shares the mapping
+tree and bumps refcounts; divergence copies blocks lazily. This is
+strictly better than thick snapshots for most uses.</p>
+<p>Metadata is written in <strong>transactions</strong> with a
+superblock commit; a power cut mid-transaction leaves the previous
+consistent tree intact (the new tree isn’t referenced until the
+superblock flips). Repair tooling is <code>thin_check</code> /
+<code>thin_repair</code> / <code>thin_dump</code> from
+<code>device-mapper-persistent-data</code>.</p>
+<p><strong>The cliff:</strong> because you overprovision, the pool data
+device can be exhausted while thin LVs still believe they have space.
+When data hits 100%, the pool enters an error/queue mode
+(<code>error_if_no_space</code> vs the default queue-then-timeout) and
+writes fail with EIO or hang. <strong>Worse: if the <em>metadata</em>
+device fills, the pool goes read-only and requires offline
+repair.</strong> Always monitor both <code>Data%</code> and
+<code>Meta%</code> in <code>lvs</code>. Set
+<code>thin_pool_autoextend_threshold</code> in <code>lvm.conf</code> so
+the pool grows before the cliff. This is the mechanism behind “the VM
+host wedged all guests at once” incidents.</p>
+<h3 id="mdraid-superblocks-the-write-hole-and-rebuild-math">md/RAID:
+superblocks, the write hole, and rebuild math</h3>
+<p>md (<code>drivers/md/</code>) is a separate layer from dm (though
+both live under <code>drivers/md/</code>). <code>mdadm</code> manages
+arrays whose member disks carry a <strong>metadata superblock</strong>.
+Default is <strong>v1.2</strong> (superblock 4 KiB from the start of the
+device — survives being mistaken for a whole-disk filesystem, unlike the
+old v0.90 at the end).</p>
+<p>Know the failure physics:</p>
+<ul>
+<li><strong>The RAID5/6 write hole.</strong> A stripe write is
+non-atomic: data blocks and parity are separate writes. A crash between
+them leaves parity inconsistent. On a later disk failure, reconstruction
+uses stale parity → <strong>silent corruption</strong>. Mitigations: a
+<strong>write-intent bitmap</strong> (<code>--bitmap=internal</code>)
+speeds resync but doesn’t close the hole; <strong>PPL (Partial Parity
+Log)</strong> for RAID5 or a <strong>journal device</strong> actually
+closes it. This is <em>the</em> reason many shops avoid RAID5 for
+critical data and prefer RAID10 or a checksumming filesystem (ZFS/btrfs)
+that detects the corruption.</li>
+<li><strong>Rebuild-window risk.</strong> Rebuilding an N-disk RAID5
+reads <em>every sector of every surviving disk</em>. With multi-TB
+drives and a realistic URE rate (~1 in 10^14 bits), the probability of
+hitting an unrecoverable read error mid-rebuild — killing the array — is
+non-trivial. This is the quantitative argument against wide RAID5 on
+large disks, and why RAID6 (two parity) or RAID10 (short rebuild, only
+reads the mirror) exist.</li>
+<li>Watch <code>/proc/mdstat</code> and <code>/sys/block/mdX/md/</code>
+for state, resync speed (<code>sync_speed_max/min</code>), and
+<code>mismatch_cnt</code> after a <code>check</code> scrub.</li>
+</ul>
+<h3 id="nvme-and-multipath">NVMe and multipath</h3>
+<p>NVMe replaces the single SCSI command queue with up to 64K deep,
+64K-count <strong>submission/completion queue pairs</strong>, one set
+per CPU, each with its own doorbell register and interrupt. That’s the
+hardware reason NVMe scales linearly with cores and wants
+<code>none</code> as scheduler.</p>
+<p><strong>Two multipath worlds:</strong></p>
+<ul>
+<li><strong>dm-multipath</strong> (userspace <code>multipathd</code> +
+<code>dm</code> <code>multipath</code> target). Generic, SCSI-era,
+hugely configurable (path groups, <code>path_selector</code> policies
+like round-robin/service-time, <code>prio</code> callouts,
+<code>no_path_retry</code> queueing). Presents
+<code>/dev/mapper/mpathX</code>. This is the enterprise-SAN answer.</li>
+<li><strong>Native NVMe multipath</strong> (in-kernel, no userspace).
+Driven by <strong>ANA (Asymmetric Namespace Access)</strong> — the
+fabric tells the host which paths are optimized/non-optimized and the
+kernel steers accordingly. Policies: <code>numa</code> (default),
+<code>round-robin</code>, <code>queue-depth</code>. Enabled by default
+(<code>nvme-core.multipath=Y</code>); disable with
+<code>nvme-core.multipath=0</code> to fall back to dm-multipath. Lower
+overhead, protocol-aware, but less policy flexibility than
+dm-multipath.</li>
+</ul>
+<p>The senior distinction: <strong>know which one is active</strong>
+(<code>nvme list-subsys</code> / <code>multipath -ll</code>), because
+they’re mutually exclusive per device and troubleshooting steps differ
+entirely.</p>
+<h3 id="dm-crypt-and-luks2">dm-crypt and LUKS2</h3>
+<p><code>dm-crypt</code> is the <code>crypt</code> dm target: it
+encrypts/decrypts bios in flight, default cipher
+<code>aes-xts-plain64</code>. It knows nothing about keys or metadata —
+you hand it a raw key and a table. <strong>LUKS</strong> is the on-disk
+key-management envelope on top.</p>
+<p><strong>LUKS2 header</strong> (current default, spec v1.x from the
+cryptsetup project):</p>
+<ul>
+<li>A binary header + a <strong>JSON metadata area</strong> (kept in two
+redundant copies for torn-write survival) describing
+<code>keyslots</code>, <code>segments</code> (the encrypted data regions
+and their cipher), <code>digests</code>, <code>tokens</code>, and
+<code>config</code>.</li>
+<li>Up to <strong>32 keyslots</strong>. Each holds the single
+<strong>master volume key</strong> (the key dm-crypt actually uses)
+encrypted by a passphrase-derived key. This is why you can have 32
+passphrases for one volume and change any without re-encrypting: they
+all unlock the same master key.</li>
+<li><strong>Argon2id</strong> is the default KDF (memory-hard — resists
+GPU/ASIC brute force), replacing LUKS1’s PBKDF2. The cost params
+(memory, iterations, parallelism) are per-keyslot and benchmarked at
+format time. This is the concrete reason to prefer LUKS2 and to
+<em>re-key old LUKS1 volumes</em>.</li>
+</ul>
+<p>Failure modes: <strong>a corrupted/overwritten header = unrecoverable
+data</strong> (the master key lives only there, wrapped). Hence
+<code>cryptsetup luksHeaderBackup</code> before any header operation.
+Wrong key produces <em>garbage plaintext</em>, not an error — dm-crypt
+has no integrity check unless layered with dm-integrity (authenticated
+encryption).</p>
+<h3 id="quotas-and-the-durability-chain">Quotas and the durability
+chain</h3>
+<ul>
+<li><strong>Quotas:</strong>
+<code>usrquota</code>/<code>grpquota</code>/<code>prjquota</code> mount
+options; XFS project quotas (<code>prjquota</code>) enforce limits on
+directory <em>trees</em> (the mechanism behind container/tenant dir
+limits). Soft limits give a grace period; hard limits return EDQUOT
+immediately. <code>repquota</code>, <code>xfs_quota</code>.</li>
+<li><strong>The durability chain</strong> — the thing that separates
+people who understand storage from people who lose data on power loss:
+<code>write()</code> → page cache (volatile) →
+<code>fsync()</code>/<code>fdatasync()</code> forces writeback →
+filesystem issues a <strong>FLUSH/FUA</strong> barrier → the drive is
+told to persist its <strong>volatile write cache</strong> to media. If
+the app doesn’t fsync, or the drive lies about cache flush (cheap
+consumer SSDs), or a virtualization layer drops the barrier, you get the
+“the file was there before the crash” data-loss class.
+<code>hdparm -W</code>, the <code>queue/write_cache</code> sysfs attr,
+and knowing whether your storage has power-loss-protected cache are the
+levers.</li>
+</ul>
+<h3 id="observability-which-counter-is-lying">Observability: which
+counter is lying</h3>
+<ul>
+<li><strong><code>iostat -x 1</code>:</strong> <code>%util</code> is
+<em>not</em> saturation for multi-queue devices — an NVMe drive with 64
+queues can be “100% util” (had at least one in-flight I/O every sample)
+while barely loaded. Trust <code>aqu-sz</code> (average queue depth) and
+<code>await</code>/<code>r_await</code>/<code>w_await</code> (per-I/O
+latency) instead. Merges (<code>rrqm/s</code>,<code>wrqm/s</code>)
+reveal scheduler/plug behavior.</li>
+<li><strong><code>blktrace</code> →
+<code>blkparse</code>/<code>btt</code>:</strong> the forensic scalpel.
+It timestamps each I/O at every stage, letting you split
+<strong>Q2D</strong> (queue→device: time in the kernel block layer +
+scheduler) from <strong>D2C</strong> (device→completion: actual hardware
+service time). If Q2D dominates, your problem is
+queueing/scheduling/starvation, not the disk. If D2C dominates, it’s the
+hardware/fabric. Nothing else separates these cleanly.</li>
+<li><strong>eBPF/bpftrace:</strong> <code>biolatency</code> (histogram
+of D2C), <code>biosnoop</code> (per-I/O with PID + latency),
+<code>bitesize</code> (I/O size distribution). These attach to the
+<code>block:block_rq_*</code> tracepoints live, no restart, and tie an
+I/O back to the responsible process — the thing iostat can’t do.</li>
+</ul>
+<hr />
+<h2 id="hands-on-labs">Hands-on labs</h2>
+<blockquote>
+<p>Assume a <strong>throwaway VM</strong> (any distro; commands below
+use <code>dnf</code>/<code>apt</code> where they differ). You need root,
+a kernel with dm/loop, and the packages
+<code>lvm2 cryptsetup mdadm blktrace bpftrace fio util-linux thin-provisioning-tools</code>
+(Debian) /
+<code>lvm2 cryptsetup mdadm blktrace bpftrace fio util-linux device-mapper-persistent-data</code>
+(RHEL/Rocky). All labs use <strong>loop devices backed by sparse
+files</strong>, so you never touch a real disk. Clean up per each lab’s
+teardown.</p>
+</blockquote>
+<h3
+id="lab-1-lvm-snapshots-watch-the-cow-store-fill-and-the-snapshot-die">Lab
+1 — LVM snapshots: watch the COW store fill and the snapshot die</h3>
+<p><strong>Objective:</strong> Make copy-on-write visible, then trigger
+the exception-store-full failure and confirm the snapshot is invalidated
+(not the origin).</p>
+<p><strong>Setup</strong></p>
+<pre class="bash"><code># 1 GiB backing file → loop device → PV → VG
+truncate -s 1G /var/tmp/pv1.img
+losetup -f --show /var/tmp/pv1.img          # note the /dev/loopN it prints, e.g. /dev/loop0
+LOOP=$(losetup -j /var/tmp/pv1.img | cut -d: -f1)
+pvcreate &quot;$LOOP&quot;
+vgcreate labvg &quot;$LOOP&quot;
+lvcreate -L 400M -n origin labvg
+mkfs.ext4 -q /dev/labvg/origin
+mkdir -p /mnt/origin &amp;&amp; mount /dev/labvg/origin /mnt/origin
+dd if=/dev/urandom of=/mnt/origin/base.bin bs=1M count=300 status=none
+sync</code></pre>
+<p><strong>Steps</strong></p>
+<ol type="1">
+<li><p>Take a <em>deliberately undersized</em> snapshot so you can fill
+it fast:</p>
+<pre class="bash"><code>lvcreate -L 50M -s -n snap /dev/labvg/origin
+lvs -o lv_name,lv_size,data_percent,lv_attr labvg</code></pre>
+<p>Note <code>snap</code> shows a low <code>Data%</code> and attr
+starting with <code>s</code> (snapshot).</p></li>
+<li><p>Watch the COW store in one pane while you rewrite the origin in
+another:</p>
+<pre class="bash"><code>watch -n1 &#39;lvs -o lv_name,data_percent,lv_attr labvg; echo; dmsetup status labvg-snap&#39;</code></pre></li>
+<li><p>Rewrite origin data — <em>every rewritten chunk copies the old
+chunk into the 50M store</em>:</p>
+<pre class="bash"><code>dd if=/dev/urandom of=/mnt/origin/base.bin bs=1M count=300 conv=notrunc status=none
+sync</code></pre></li>
+<li><p>Observe <code>snap</code> <code>Data%</code> climb past 100% and
+its <code>lv_attr</code> flip to <code>I</code> (Invalid). The origin is
+untouched.</p></li>
+</ol>
+<p><strong>Prove it</strong></p>
+<pre class="bash"><code>lvs -o lv_name,data_percent,lv_attr labvg | grep snap
+# A healthy snapshot shows attr &#39;swi-a-s---&#39;; an overflowed one shows &#39;Swi-I-s---&#39; (capital S + I = Invalid).
+dmsetup status labvg-snap
+# On overflow the status reports the snapshot as &quot;Invalid&quot; instead of &quot;&lt;used&gt;/&lt;total&gt; sectors&quot;.</code></pre>
+<p>Seeing the <code>I</code> flag <em>and</em> confirming
+<code>/mnt/origin/base.bin</code> still reads back fine proves the
+failure is isolated to the snapshot’s COW store, not the origin — the
+core mental model of thick snapshots.</p>
+<p><strong>Teardown</strong></p>
+<pre class="bash"><code>umount /mnt/origin; lvremove -y labvg; vgremove -y labvg; pvremove -y &quot;$LOOP&quot;
+losetup -d &quot;$LOOP&quot;; rm -f /var/tmp/pv1.img</code></pre>
+<hr />
+<h3
+id="lab-2-thin-pool-overprovisioning-drive-it-off-the-enospc-cliff">Lab
+2 — Thin pool overprovisioning: drive it off the ENOSPC cliff</h3>
+<p><strong>Objective:</strong> Overprovision a thin pool, then exhaust
+the <em>data</em> device and observe the difference between the default
+queue-and-timeout behavior and <code>error_if_no_space</code>. Inspect
+the metadata B-tree with <code>thin_dump</code>.</p>
+<p><strong>Setup</strong></p>
+<pre class="bash"><code>truncate -s 2G /var/tmp/thin.img
+LOOP=$(losetup -f --show /var/tmp/thin.img)
+pvcreate &quot;$LOOP&quot;; vgcreate thinvg &quot;$LOOP&quot;
+# A 500M pool, but we&#39;ll provision 2 GiB of thin volumes on top of it (4x overcommit).
+lvcreate -L 500M --thinpool pool thinvg
+lvs -a -o lv_name,lv_size,data_percent,metadata_percent,lv_attr thinvg</code></pre>
+<p><strong>Steps</strong></p>
+<ol type="1">
+<li><p>Create two thin LVs each <em>larger than the whole pool</em>:</p>
+<pre class="bash"><code>lvcreate -V 1G -T thinvg/pool -n thin_a
+lvcreate -V 1G -T thinvg/pool -n thin_b
+lvs -a -o lv_name,lv_size,data_percent,pool_lv thinvg   # both claim 1G; pool is 500M</code></pre></li>
+<li><p>Set the pool to fail fast instead of the default queueing (so the
+lab terminates deterministically):</p>
+<pre class="bash"><code>lvchange --errorwhenfull y thinvg/pool</code></pre></li>
+<li><p>Watch allocation while you write past pool capacity:</p>
+<pre class="bash"><code># pane 1
+watch -n1 &#39;lvs -a -o lv_name,data_percent,metadata_percent,lv_attr thinvg&#39;
+# pane 2: write ~600M into a 500M pool
+mkfs.ext4 -q /dev/thinvg/thin_a &amp;&amp; mount /dev/thinvg/thin_a /mnt || true
+dd if=/dev/zero of=/dev/thinvg/thin_a bs=1M count=600 oflag=direct status=progress</code></pre>
+<p>The <code>dd</code> fails with <code>No space left on device</code>
+(EIO/ENOSPC) once the pool <code>Data%</code> hits ~100%, even though
+<code>thin_a</code> “has” 1G.</p></li>
+<li><p>Dump the metadata B-tree to see the (virtual→physical) mappings
+that ran out:</p>
+<pre class="bash"><code>lvchange -an thinvg/pool           # deactivate to inspect metadata safely
+thin_dump /dev/mapper/thinvg-pool_tmeta | head -40</code></pre>
+<p>You’ll see <code>&lt;device dev_id=...&gt;</code> blocks with
+<code>&lt;range_mapping origin_begin=... data_begin=... length=...&gt;</code>
+— the literal extent map, and <code>&lt;superblock&gt;</code>
+transaction counters.</p></li>
+</ol>
+<p><strong>Prove it</strong></p>
+<pre class="bash"><code>dmsetup status thinvg-pool
+# The thin-pool status line reads:  &lt;transaction_id&gt; &lt;used_meta&gt;/&lt;total_meta&gt; &lt;used_data&gt;/&lt;total_data&gt; ...
+# When full it appends &quot;out_of_data_space&quot; (or &quot;error_if_no_space&quot; mode reports read-only/error).</code></pre>
+<p>Reading <code>used_data == total_data</code> in
+<code>dmsetup status</code> while <code>lvs</code> still shows the thin
+volumes as 1 GiB is the whole lesson: <strong>provisioned size is a
+promise, allocated size is the truth, and the truth lives in the pool,
+not the volume.</strong></p>
+<p><strong>Teardown</strong></p>
+<pre class="bash"><code>umount /mnt 2&gt;/dev/null; lvremove -y thinvg; vgremove -y thinvg
+losetup -d &quot;$LOOP&quot;; rm -f /var/tmp/thin.img</code></pre>
+<hr />
+<h3
+id="lab-3-separate-queueing-latency-from-device-latency-blk-mq-schedulers-blktrace-bpftrace">Lab
+3 — Separate queueing latency from device latency (blk-mq, schedulers,
+blktrace, bpftrace)</h3>
+<p><strong>Objective:</strong> Prove the “the disk isn’t slow, the queue
+is full” hypothesis. Change the I/O scheduler, generate contention, and
+use <code>btt</code> (Q2D vs D2C) plus <code>biolatency</code> to
+attribute latency to the right layer.</p>
+<p><strong>Setup</strong></p>
+<pre class="bash"><code># Use a real-ish block device: a loop dev over a file on your fastest disk, or a spare /dev/vdb if present.
+truncate -s 3G /var/tmp/io.img
+DEV=$(losetup -f --show /var/tmp/io.img)      # e.g. /dev/loop0
+BASE=$(basename &quot;$DEV&quot;)
+cat /sys/block/$BASE/queue/scheduler          # loop devices often show [none]; that&#39;s fine, we observe layers</code></pre>
+<p><strong>Steps</strong></p>
+<ol type="1">
+<li><p>Inspect the multi-queue topology and the tunable that caps
+in-flight I/O:</p>
+<pre class="bash"><code>ls /sys/block/$BASE/mq/ 2&gt;/dev/null; echo &quot;hw queues above (may be 1 for loop)&quot;
+cat /sys/block/$BASE/queue/nr_requests</code></pre></li>
+<li><p>Start a <code>blktrace</code> capture, then hammer the device
+with a deliberately deep, mixed workload:</p>
+<pre class="bash"><code>blktrace -d &quot;$DEV&quot; -o - | blkparse -i - &gt; /var/tmp/trace.txt &amp;   # live parse
+# OR capture to files for btt:
+( blktrace -d &quot;$DEV&quot; -o lab3 &amp; echo $! &gt; /var/tmp/bt.pid )
+fio --name=mix --filename=&quot;$DEV&quot; --direct=1 --rw=randrw --bs=4k \
+    --iodepth=64 --numjobs=4 --runtime=15 --time_based --group_reporting
+kill &quot;$(cat /var/tmp/bt.pid)&quot;; sleep 1</code></pre></li>
+<li><p>Post-process with <code>btt</code> to split the latency
+budget:</p>
+<pre class="bash"><code>btt -i lab3.blktrace.* | sed -n &#39;1,40p&#39;</code></pre>
+<p>Read the <strong>Q2D</strong> (queue-to-issue: kernel/scheduler time)
+vs <strong>D2C</strong> (issue-to-complete: device time) averages. Under
+<code>iodepth=64</code> contention you’ll see Q2D grow — that’s
+queueing, not the medium.</p></li>
+<li><p>In parallel, attribute latency live with eBPF (attaches to
+<code>block_rq_*</code> tracepoints):</p>
+<pre class="bash"><code>biolatency-bpfcc 5 1     # or: bpftrace -e &#39;tracepoint:block:block_rq_complete { @us = hist((nsecs)/1000); }&#39;</code></pre></li>
+<li><p>Now flip the scheduler on a device that supports it (a real
+SATA/SSD <code>/dev/vdb</code>, not loop) and repeat step 2, comparing
+<code>await</code> in <code>iostat -x 1</code>:</p>
+<pre class="bash"><code>echo mq-deadline &gt; /sys/block/vdb/queue/scheduler   # then &#39;none&#39;, then &#39;bfq&#39;
+iostat -x 1 /dev/vdb</code></pre></li>
+</ol>
+<p><strong>Prove it</strong></p>
+<pre class="bash"><code>btt -i lab3.blktrace.* | awk &#39;/Q2D|D2C|Q2C/&#39;</code></pre>
+<p>If you can point at the numbers and say “Q2C is 900 µs but D2C is
+only 150 µs, so 750 µs is queue/scheduler time — the device is fine,
+we’re saturating the queue,” you’ve demonstrated the single most
+valuable storage-debugging skill: <strong>attributing latency to a layer
+instead of blaming <code>%util</code>.</strong></p>
+<p><strong>Teardown</strong></p>
+<pre class="bash"><code>rm -f lab3.blktrace.* /var/tmp/trace.txt
+losetup -d &quot;$DEV&quot;; rm -f /var/tmp/io.img</code></pre>
+<hr />
+<h3
+id="lab-4-luks2-internals-assemble-dm-crypt-by-hand-dissect-the-header">Lab
+4 — LUKS2 internals: assemble dm-crypt by hand, dissect the header</h3>
+<p><strong>Objective:</strong> See that LUKS is <em>just metadata around
+a raw dm-crypt table</em>. Format a LUKS2 volume, dump its JSON
+metadata, prove the master key is independent of passphrases (add/remove
+keyslots), then open the same encryption manually with
+<code>dmsetup create</code> using the exported master key.</p>
+<p><strong>Setup</strong></p>
+<pre class="bash"><code>truncate -s 256M /var/tmp/luks.img
+LOOP=$(losetup -f --show /var/tmp/luks.img)</code></pre>
+<p><strong>Steps</strong></p>
+<ol type="1">
+<li><p>Format LUKS2 and inspect the header + KDF:</p>
+<pre class="bash"><code>echo -n &#39;passOne&#39; | cryptsetup luksFormat --type luks2 &quot;$LOOP&quot; -
+cryptsetup luksDump &quot;$LOOP&quot;       # note: Version 2, Argon2id KDF, keyslot 0 populated, segment cipher aes-xts-plain64</code></pre></li>
+<li><p>Prove multi-keyslot / single-master-key design — add a second
+passphrase, confirm both open the <em>same</em> volume:</p>
+<pre class="bash"><code>echo -e &#39;passOne\npassTwo&#39; | cryptsetup luksAddKey &quot;$LOOP&quot;
+cryptsetup luksDump &quot;$LOOP&quot; | grep -A2 &#39;Keyslots&#39; | head
+# Now 2 keyslots exist; both decrypt the identical master key.</code></pre></li>
+<li><p>Dump the raw JSON metadata area to see the structure the man
+pages describe:</p>
+<pre class="bash"><code>cryptsetup luksDump --dump-json-metadata &quot;$LOOP&quot; | python3 -m json.tool | sed -n &#39;1,60p&#39;
+# Observe keys: config / keyslots / segments / digests / tokens</code></pre></li>
+<li><p><strong>Back up the header</strong> (drill the discipline) and
+prove its criticality:</p>
+<pre class="bash"><code>cryptsetup luksHeaderBackup &quot;$LOOP&quot; --header-backup-file /var/tmp/hdr.bin
+ls -l /var/tmp/hdr.bin</code></pre></li>
+<li><p>Open normally, then extract the master key and open
+<em>manually</em> with dm-crypt to show LUKS is only key management:</p>
+<pre class="bash"><code>echo -n &#39;passOne&#39; | cryptsetup open &quot;$LOOP&quot; secure -
+dmsetup table --showkeys secure        # shows: 0 &lt;sectors&gt; crypt aes-xts-plain64 &lt;MASTERKEY-hex&gt; 0 &lt;dev&gt; &lt;offset&gt;
+cryptsetup close secure</code></pre>
+<p>The <code>crypt</code> table row is exactly what
+<code>dm-crypt</code> needs; LUKS’s whole job was to store and unwrap
+that master key.</p></li>
+</ol>
+<p><strong>Prove it</strong></p>
+<pre class="bash"><code>cryptsetup luksDump &quot;$LOOP&quot; | grep -E &#39;Version|PBKDF|Cipher|Keyslots&#39; </code></pre>
+<p>Output showing <code>Version: 2</code>, <code>PBKDF: argon2id</code>,
+<code>Cipher: aes-xts-plain64</code>, and two keyslots proves you
+understand the LUKS2 envelope: memory-hard KDF, multiple passphrases
+wrapping one master key, XTS cipher handed to dm-crypt. Bonus mastery:
+<code>cryptsetup luksDump --dump-json-metadata</code> returning valid
+JSON with
+<code>segments</code>/<code>keyslots</code>/<code>digests</code> shows
+you can read the on-disk format directly.</p>
+<p><strong>Teardown</strong></p>
+<pre class="bash"><code>cryptsetup close secure 2&gt;/dev/null
+losetup -d &quot;$LOOP&quot;; rm -f /var/tmp/luks.img /var/tmp/hdr.bin</code></pre>
+<hr />
+<h2 id="curated-resources">Curated resources</h2>
+<p><strong>Primary kernel docs (ground truth):</strong></p>
+<ul>
+<li><a href="https://docs.kernel.org/admin-guide/device-mapper/">Device
+Mapper — kernel admin-guide</a> — The per-target reference (linear,
+striped, snapshot, thin, crypt, cache, verity, integrity, multipath).
+This is what lets you decode
+<code>dmsetup table</code>/<code>dmsetup status</code>. The
+<code>thin-provisioning.rst</code> and <code>snapshot.rst</code> pages
+are the authoritative statement of the COW and allocate-on-write
+mechanics used in Labs 1–2.</li>
+<li><a href="https://docs.kernel.org/block/blk-mq.html">Multi-Queue
+Block IO Queueing (blk-mq) — kernel.org</a> — The definitive description
+of software (<code>blk_mq_ctx</code>) vs hardware
+(<code>blk_mq_hw_ctx</code>) queues, tags, and dispatch. Read alongside
+<code>Documentation/block/</code> for <code>queue-sysfs.rst</code>
+(every <code>/sys/block/*/queue/</code> knob) and
+<code>bfq-iosched.rst</code>.</li>
+<li><a
+href="https://docs.kernel.org/admin-guide/device-mapper/thin-provisioning.html">Thin
+provisioning — kernel.org</a> — The exact <code>thin-pool</code> table
+format, <code>error_if_no_space</code> vs queueing, low-water-mark
+semantics, and the metadata/data device split. The spec behind Lab 2’s
+cliff.</li>
+<li><a
+href="https://docs.kernel.org/admin-guide/nvme-multipath.html">Linux
+NVMe multipath — kernel.org</a> — Native (ANA) multipath policies
+(<code>numa</code>/<code>round-robin</code>/<code>queue-depth</code>)
+and the <code>nvme-core.multipath</code> switch. The primary source for
+the native-vs-dm distinction.</li>
+<li><a
+href="https://fossies.org/linux/cryptsetup/docs/on-disk-format-luks2.pdf">LUKS2
+On-Disk Format Specification (cryptsetup project)</a> — The actual
+binary+JSON header layout: keyslots, segments, digests, tokens, config,
+and the redundant metadata copies. Read this once and
+<code>luksDump</code> stops being magic.</li>
+<li><a
+href="https://www.man7.org/linux/man-pages/man8/cryptsetup.8.html">cryptsetup(8)
+/ cryptsetup-luksFormat man pages (man7)</a> — Argon2id defaults,
+keyslot operations, header backup/restore,
+<code>--dump-json-metadata</code>. The operational reference for Lab
+4.</li>
+</ul>
+<p><strong>Man7 / util references:</strong></p>
+<ul>
+<li><a href="https://man7.org/linux/man-pages/man8/lvm.8.html">lvm(8),
+lvmthin(7), lvmraid(7), dmsetup(8)</a> — <code>lvmthin(7)</code> and
+<code>lvmraid(7)</code> are dense, well-written conceptual essays (not
+just flag lists) on thin pools and LVM-integrated RAID.
+<code>dmsetup(8)</code> documents the forensic
+<code>table</code>/<code>status</code>/<code>--showkeys</code> output
+used throughout the labs.</li>
+<li><a href="https://man7.org/linux/man-pages/man4/md.4.html">md(4) and
+mdadm(8) — man7</a> — Superblock versions,
+<code>/sys/block/mdX/md/</code> attributes, resync/check semantics,
+bitmap and journal/PPL for the write hole.</li>
+<li><a
+href="https://manpages.debian.org/testing/blktrace/btt.1.en.html">btt(1)
+/ blktrace(8) / blkparse(1) man pages</a> — The Q2D/D2C/Q2C
+latency-stage definitions that make Lab 3’s attribution rigorous.</li>
+<li><a href="https://rockyman.org/">rockyman.org</a> —
+https://rockyman.org/ — authoritative Rocky Linux man-page index,
+versioned 8/9/10; verify exact flags/config keys here (the
+<code>lvcreate</code>/<code>lvchange</code>/<code>dmsetup</code>/<code>cryptsetup</code>/<code>losetup</code>/<code>btt</code>
+options used in the labs above were checked against the Rocky 9
+pages).</li>
+</ul>
+<p><strong>Books (canonical):</strong></p>
+<ul>
+<li><a
+href="https://www.brendangregg.com/systems-performance-2nd-edition-book.html">Systems
+Performance, 2nd ed — Brendan Gregg</a> — Chapter 9 (Disks) is the
+methodology bible for the block I/O stack: the USE method applied to
+storage, why <code>%util</code> misleads on multi-queue devices, the
+full queueing model, and how to read
+<code>iostat</code>/<code>blktrace</code>/<code>biolatency</code> as a
+system rather than as isolated commands.</li>
+<li><a
+href="https://www.brendangregg.com/bpf-performance-tools-book.html">BPF
+Performance Tools — Brendan Gregg</a> — The disk-I/O chapter’s tools
+(<code>biolatency</code>, <code>biosnoop</code>, <code>bitesize</code>,
+<code>mdflush</code>) with the diagnostic thinking for <em>when</em>
+each applies. The observability endgame for this module.</li>
+<li><a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">Operating Systems:
+Three Easy Pieces (OSTEP) — free</a> — The “Persistence” section: disk
+scheduling theory, RAID (including the RAID5 small-write and reliability
+math behind the rebuild-window argument), journaling, and crash
+consistency. The <em>why</em> under everything Linux-specific here.</li>
+</ul>
+<p><strong>Deep dives / blog + articles:</strong></p>
+<ul>
+<li><a
+href="https://brooker.co.za/blog/2013/07/14/io-performance.html">Beyond
+iostat: storage performance analysis with blktrace — Marc Brooker</a> —
+The clearest short piece on using <code>blktrace</code>/<code>btt</code>
+to separate kernel queueing from device service time, with the
+offset-plotting trick (<code>btt -B</code>) for seeing seek
+patterns.</li>
+<li><a href="https://lwn.net/Articles/465740/">LWN: dm-thin / thin
+provisioning coverage</a> — The original design discussion for dm-thin:
+why the B-tree metadata + transaction/superblock-commit model was chosen
+and its failure semantics. Pair with the current LWN Kernel Index for
+MGLRU/folio-era writeback changes.</li>
+<li><a
+href="https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html-single/configuring_device_mapper_multipath/index">Red
+Hat: Configuring device mapper multipath (RHEL 9)</a> — The production
+reference for <code>multipath.conf</code>, <code>no_path_retry</code>,
+path groups, <code>path_selector</code>/<code>prio</code>, and the NVMe
+multipath interop chapter. This is RHEL/Rocky-current, matching the CIQ
+environment.</li>
+<li><a
+href="https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/managing_storage_devices/setting-the-disk-scheduler_managing-storage-devices">Red
+Hat: Setting the disk scheduler (RHEL 8/9)</a> — How the distro sets
+per-device-class schedulers via udev keyed on
+<code>queue/rotational</code>, and the persistence mechanism (tuned
+profiles vs udev rules).</li>
+<li><a href="https://jvns.ca/">Julia Evans — jvns.ca</a> — The “how do I
+even see what’s happening” reflex-builders for
+<code>strace</code>/<code>/proc</code> spelunking of stuck-in-D-state
+processes blocked on I/O — the human-facing symptom of everything in
+this module.</li>
+</ul>
+<p><strong>Source (when docs aren’t enough):</strong></p>
+<ul>
+<li><code>drivers/md/dm-thin.c</code>,
+<code>drivers/md/persistent-data/</code> (thin B-tree),
+<code>drivers/md/dm-crypt.c</code>, <code>drivers/md/raid5.c</code>
+(write-hole logic + PPL), and <code>block/blk-mq.c</code> /
+<code>block/mq-deadline.c</code> in the kernel tree.
+<code>git log</code> on these files via LWN or
+<code>git.kernel.org</code> shows the design churn (e.g., the removal of
+the legacy request layer).</li>
+</ul>
+<hr />
+<h2 id="senior-signal">Senior signal</h2>
+<ul>
+<li><strong>Attributes I/O latency to a layer, not a device.</strong>
+Reflexively splits Q2D (kernel/scheduler queueing) from D2C (hardware
+service) with <code>blktrace</code>/<code>btt</code> and knows that
+<code>iostat %util</code> is meaningless on a 64-queue NVMe drive —
+reads <code>aqu-sz</code> and <code>await</code> instead. A mid-level
+engineer says “the disk is at 100%”; a senior says “the queue is full
+but the device is idle.”</li>
+<li><strong>Treats
+<code>dmsetup table</code>/<code>dmsetup status</code> as ground truth
+over <code>lvs</code>.</strong> Understands that LVM is userspace
+metadata programming device-mapper, so when the two disagree (or
+<code>lvs</code> hangs), they drop to the dm layer and read the live
+table and per-target runtime state (thin pool
+<code>used_data/total_data</code>, snapshot Invalid flag, multipath path
+status).</li>
+<li><strong>Knows the two ENOSPC cliffs of thin provisioning
+cold</strong> — data-device-full (I/O errors or queue-then-timeout)
+<em>and</em> the nastier metadata-device-full (pool goes read-only,
+needs offline <code>thin_repair</code>) — and monitors both
+<code>Data%</code> and <code>Meta%</code> with autoextend thresholds set
+<em>before</em> the incident, because overcommit is a promise the pool
+can’t always keep.</li>
+<li><strong>Sizes and time-bounds thick snapshots deliberately</strong>
+because they understand the COW exception store fills and
+<em>invalidates the snapshot</em> (write-amplifying every origin
+first-write into read+write+write), and reaches for thin snapshots
+(O(1), shared refcounted B-tree) when the workload is long-lived.</li>
+<li><strong>Reasons quantitatively about RAID reliability:</strong> the
+RAID5 write hole causes silent corruption on crash-then-failure
+(mitigated only by PPL/journal, not by a bitmap), and the
+URE-during-rebuild math makes wide RAID5 on multi-TB disks a real
+data-loss risk — which is <em>why</em> RAID10 or a checksumming
+filesystem is the recommendation, stated as physics rather than
+dogma.</li>
+<li><strong>Owns the durability chain end to end:</strong> knows that
+data isn’t safe until <code>fsync()</code> forces a FLUSH/FUA barrier
+through the filesystem to the drive’s volatile cache, can name every
+place the barrier gets dropped (missing fsync, lying consumer SSD, a
+hypervisor discarding cache flushes), and checks
+<code>queue/write_cache</code> and power-loss protection before trusting
+a “successful” write.</li>
+<li><strong>Picks the I/O scheduler from mechanism:</strong>
+<code>none</code> for NVMe (the FTL reorders better and the scheduler
+just burns IOPS), <code>mq-deadline</code> for bounded latency on
+SATA/SAS SSD, <code>bfq</code> only where per-process fairness on slow
+media actually matters — and knows the distro sets this via udev on
+<code>queue/rotational</code>.</li>
+<li><strong>Distinguishes native NVMe multipath (in-kernel, ANA-driven)
+from dm-multipath (userspace <code>multipathd</code>, SCSI-era, richer
+policy)</strong>, checks which is active before troubleshooting, and
+knows they’re mutually exclusive per device via
+<code>nvme-core.multipath</code>.</li>
+<li><strong>Backs up the LUKS header before touching it</strong> and
+understands <em>why</em> it’s fatal to lose: the master volume key
+exists only there, wrapped by each keyslot’s Argon2id-derived key — so
+32 passphrases unlock one key, a wrong key yields garbage rather than an
+error, and there’s no integrity check unless dm-integrity is layered
+in.</li>
+</ul>
+<hr />
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="04-filesystems-and-the-vfs.html">04 - Filesystems and the
+VFS</a> — the layer directly above this one: the filesystem builds the
+<code>struct bio</code> that the block layer and device-mapper stack
+here consume, and the durability chain (<code>fsync</code> → FLUSH/FUA)
+begins in the VFS/page cache before it reaches the block devices covered
+in this module.</li>
+<li>05 - EC2 and Compute Internals — EBS volumes, instance store, and
+NVMe in cloud VMs are exactly the block layer / blk-mq / device-mapper
+stack here; the <code>%util</code>-lies-on-multiqueue lesson applies
+directly to cloud volume performance debugging.</li>
+<li>07 - Parallel and Networked Filesystems — the parallel-FS backends
+(Lustre OSTs, GPFS NSDs) sit on this block/multipath/NVMe-over-fabric
+layer; multipath and the durability chain carry straight over.</li>
+<li>07 - Data and Storage for ML — throughput and latency of the block
+layer under ML dataset loads; <code>blktrace</code> Q2D-vs-D2C
+attribution is how you prove whether an ML data stall is the queue or
+the device.</li>
+<li>02 - Warewulf Stateless Provisioning — stateless nodes assemble root
+storage (iSCSI/NVMe-oF, LVM, overlays) at boot; the LVM/device-mapper
+mechanics here are what the provisioning layer programs.</li>
+</ul>
+</main>
+</div></body></html>

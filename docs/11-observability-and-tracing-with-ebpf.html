@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 - Observability and Tracing with eBPF | Linux Training Course</title>
+<link rel="stylesheet" href="style.css"></head>
+<body><div class="layout">
+<nav class="sidebar"><a href="index.html"><strong>Linux Training Course</strong></a><hr>
+<a href="00-track-overview.html" data-page="00-track-overview.html">00 - Track Overview</a>
+<a href="01-permissions-and-access-control.html" data-page="01-permissions-and-access-control.html">01 - Permissions and Access Control</a>
+<a href="02-users-authentication-and-pam.html" data-page="02-users-authentication-and-pam.html">02 - Users, Authentication and PAM</a>
+<a href="03-processes-scheduling-and-signals.html" data-page="03-processes-scheduling-and-signals.html">03 - Processes, Scheduling and Signals</a>
+<a href="04-filesystems-and-the-vfs.html" data-page="04-filesystems-and-the-vfs.html">04 - Filesystems and the VFS</a>
+<a href="05-storage-and-lvm.html" data-page="05-storage-and-lvm.html">05 - Storage and LVM</a>
+<a href="06-networking-deep.html" data-page="06-networking-deep.html">06 - Networking Deep</a>
+<a href="07-systemd.html" data-page="07-systemd.html">07 - systemd</a>
+<a href="08-boot-and-init.html" data-page="08-boot-and-init.html">08 - Boot and Init</a>
+<a href="09-the-kernel.html" data-page="09-the-kernel.html">09 - The Kernel</a>
+<a href="10-namespaces-and-cgroups-v2.html" data-page="10-namespaces-and-cgroups-v2.html">10 - Namespaces and cgroups v2</a>
+<a href="11-observability-and-tracing-with-ebpf.html" data-page="11-observability-and-tracing-with-ebpf.html" class="current">11 - Observability and Tracing with eBPF</a>
+<a href="12-selinux-and-hardening.html" data-page="12-selinux-and-hardening.html">12 - SELinux and Hardening</a>
+<a href="13-samba-and-smb.html" data-page="13-samba-and-smb.html">13 - Samba and SMB</a>
+<a href="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html" data-page="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html">14 - Early Userspace - dracut Hooks, udev and the initqueue</a></nav>
+<main><h1 id="observability-and-tracing-with-ebpf">11 — Observability and
+Tracing with eBPF</h1>
+<p>Backlink: <a href="00-track-overview.html">00 - Track
+Overview</a></p>
+<p>Every other module in this track teaches you a subsystem: the
+scheduler, the VFS, the block layer, cgroups. This module teaches you
+how to <em>interrogate all of them on a live production box without a
+debugger, without a restart, and without shipping a patch</em>. That is
+the actual staff-level differentiator. A mid-level engineer reads
+dashboards and greps logs, which only shows you what someone already
+decided to instrument. A staff engineer reaches into the running kernel
+and asks a question nobody pre-baked a metric for: “what is the off-CPU
+stack of the thread that’s stalling this request,” “which process is
+calling <code>fsync</code> in a tight loop,” “what’s the distribution of
+block-I/O latency broken down by device and by whether it was a read or
+a write,” “who is sending SIGKILL to my daemon.” The invisible becomes
+visible.</p>
+<p>The mental model to install first: <strong>there are two families of
+instrumentation, static and dynamic, and two places to run your logic,
+in the kernel or in userspace.</strong> Static instrumentation
+(tracepoints, USDT) is a stable hook a developer placed on purpose.
+Dynamic instrumentation (kprobes, uprobes) patches a live instruction to
+divert into your probe — no source change, no recompile, works on
+functions nobody thought to expose. eBPF is the modern engine that runs
+a small verified program <em>at</em> any of those hook points,
+aggregates in-kernel, and hands you back a histogram instead of a
+firehose of events. The genius, and the thing that separates it from the
+old <code>strace</code>/<code>tcpdump</code> “copy every event to
+userspace” model, is that summarization happens in the kernel, so
+overhead scales with <em>distinct results</em>, not with <em>event
+count</em>. That’s what makes it safe to run against a
+million-events-per-second path in production.</p>
+<p>This module walks the whole toolchain bottom to top:
+<code>strace</code>/<code>ltrace</code> (the ptrace-based blunt
+instrument you already know, and why it’s dangerous in prod),
+<code>ftrace</code>/<code>trace-cmd</code> (the in-kernel tracer that
+needs nothing installed), <code>perf</code> (sampling,
+<code>perf sched</code>, flame graphs), then <code>bpftrace</code> and
+BCC as the eBPF frontends, USDT probes, and the eBPF machine model
+itself — verifier, maps, ring buffer, CO-RE/BTF — at a working level. It
+ends with a <em>method</em>: how to go from a vague “it’s slow” to a
+proven root cause using the USE method and off-CPU analysis, choosing
+the right tool to falsify a specific hypothesis.</p>
+<hr />
+<h2 id="concept-deep-dive">Concept deep-dive</h2>
+<h3 id="the-layer-cake-where-a-probe-actually-fires">The layer cake:
+where a probe actually fires</h3>
+<p>Everything in this module bottoms out in a handful of kernel
+mechanisms. Understanding <em>where</em> each hook lives tells you its
+cost and its stability.</p>
+<pre><code>                         userspace program
+   uprobe / uretprobe  ─────►│  (dynamic: patch a userspace instruction with int3)
+   USDT (SDT note)     ─────►│  (static: a nop the dev placed; tracer patches it)
+─────────────────────────────────────────── syscall boundary ───────────
+   syscall tracepoints ─────►│  sys_enter_* / sys_exit_* (stable)
+   ptrace (strace)     ─────►│  (stop the whole task on every syscall — heavy)
+─────────────────────────────────────────── kernel ─────────────────────
+   kprobe / kretprobe  ─────►│  any kernel instruction (dynamic, int3 patch)
+   tracepoints         ─────►│  static markers in kernel source (stable ABI)
+   perf PMU events     ─────►│  hardware counters + timed sampling (NMI)
+                             │
+        all of the above can attach an eBPF program which:
+          - reads args/regs/context
+          - filters in-kernel (drop uninteresting events cheaply)
+          - aggregates into a MAP (histogram, count, stack table)
+          - optionally emits a record to a RING BUFFER for userspace</code></pre>
+<p>The cost gradient, cheapest to most expensive per event:
+<strong>tracepoint ≈ USDT nop &lt; kprobe/uprobe (int3 trap) &lt; ptrace
+stop</strong>. Sampling (<code>perf record -F</code>) is different — its
+cost is fixed per-sample-per-CPU regardless of workload event rate,
+which is why 99 Hz profiling is nearly free.</p>
+<h3 id="kprobes-how-dynamic-kernel-tracing-physically-works">kprobes:
+how dynamic kernel tracing physically works</h3>
+<p>A kprobe is not magic. When you register a kprobe on kernel symbol
+<code>vfs_read</code>, the kprobes machinery
+(<code>kernel/kprobes.c</code>) saves the original instruction bytes at
+that address and overwrites the first byte with a breakpoint instruction
+— <code>int3</code> (0xCC) on x86. When any CPU executes that address,
+it traps into the <code>do_int3</code> handler, which recognizes the
+address as a kprobe, runs your pre-handler (your eBPF program),
+single-steps the saved original instruction out-of-line, and returns. On
+modern kernels with <code>CONFIG_KPROBES_ON_FTRACE</code>, if the probe
+point coincides with the <code>fentry</code> <code>__fentry__</code>
+hook that the compiler already inserted for ftrace, the kprobe uses the
+ftrace trampoline instead of an <code>int3</code> trap, which is
+significantly cheaper (no exception, just a call). This is why probing
+at function <em>entry</em> is faster than probing an arbitrary offset
+into a function.</p>
+<p>A <strong>kretprobe</strong> is trickier: there is no single
+instruction at “function return.” The kernel installs an entry kprobe
+that, when hit, saves the real return address and <em>rewrites the
+return address on the stack</em> to point at a trampoline
+(<code>kretprobe_trampoline</code>). When the function returns, it lands
+in the trampoline, which runs your return handler and then jumps to the
+saved real return address. The consequence you must know: kretprobes
+have a fixed pool of “return instances” (<code>maxactive</code>). Under
+deep recursion or a flood of concurrent calls, that pool exhausts and
+you <em>silently miss returns</em> — you’ll see it as
+<code>kretprobe: nmissed</code> in
+<code>/sys/kernel/debug/kprobes/list</code> or as fewer return events
+than entries. That asymmetry is a classic footgun when computing
+function latency.</p>
+<p>The modern replacement for entry/exit kprobes is
+<strong>fentry/fexit</strong> (BTF-based
+<code>BPF_TRACE_FENTRY</code>/<code>BPF_TRACE_FEXIT</code>, kernel
+5.5+). These attach directly to the compiler’s <code>fentry</code> hook
+using a BPF trampoline and have access to typed arguments <em>and</em>
+the return value with far less overhead than a kretprobe, and no
+<code>maxactive</code> limit. If your kernel and bpftrace are recent,
+prefer <code>fexit</code> over <code>kretprobe</code>.</p>
+<p>The stability caveat is load-bearing: <strong>kprobes attach to
+whatever the compiler emitted.</strong> Function names, arguments,
+inlining, and calling convention change between kernel versions. A
+one-liner that works on 5.14 can attach to nothing (or the wrong thing)
+on 6.6 because the function got inlined or renamed. This is <em>the</em>
+reason tracepoints exist.</p>
+<h3 id="tracepoints-the-stable-abi">Tracepoints: the stable ABI</h3>
+<p>A tracepoint is a static hook the kernel developers placed in source
+(<code>trace_sched_switch()</code>, <code>trace_block_rq_issue()</code>,
+etc.) via the <code>TRACE_EVENT()</code> macro. Each compiles to a
+patched-out <code>nop</code> plus an out-of-line block; when disabled
+it’s a single untaken branch (via a “jump label”/static key), so a
+disabled tracepoint is effectively free. When you enable it, the static
+key flips the <code>nop</code> to a jump into the trace code. Crucially,
+tracepoints have a <strong>documented, versioned argument
+format</strong> exposed at
+<code>/sys/kernel/tracing/events/&lt;subsystem&gt;/&lt;event&gt;/format</code>.
+That format is treated as kernel ABI — it changes rarely and carefully.
+So <code>tracepoint:block:block_rq_issue</code> gives you named fields
+(<code>args-&gt;bytes</code>, <code>args-&gt;sector</code>,
+<code>args-&gt;comm</code>) that are stable across kernels in a way
+kprobe args never are. <strong>Rule: prefer a tracepoint if one exists;
+fall back to kprobe/fentry only when it doesn’t.</strong></p>
+<p>You can enumerate them:</p>
+<pre><code>ls /sys/kernel/tracing/events/                 # subsystems
+cat /sys/kernel/tracing/events/syscalls/sys_enter_openat/format
+bpftrace -l &#39;tracepoint:*&#39;                      # via bpftrace</code></pre>
+<h3 id="uprobes-and-usdt-reaching-into-userspace">uprobes and USDT:
+reaching into userspace</h3>
+<p>A <strong>uprobe</strong> is the userspace analogue of a kprobe: the
+kernel patches an <code>int3</code> at a virtual address in an
+executable/library file (keyed by inode + offset, so it fires for
+<em>every</em> process mapping that file). When hit, it traps into the
+kernel, runs your eBPF program, single-steps the original instruction,
+and returns to userspace. You can probe any function in
+<code>libc</code>, <code>libssl</code>, a Go binary, the Python
+interpreter — no source, no recompile. The catch: symbol resolution and
+ABI. You need symbols (or you supply raw offsets), and you must know the
+calling convention to read arguments. Optimized/inlined functions may
+not exist as distinct symbols.</p>
+<p>A <strong>USDT probe</strong> (User Statically-Defined Tracing) is
+the userspace analogue of a tracepoint: the developer placed a marker on
+purpose using the <code>DTRACE_PROBE</code>/<code>SDT</code> macros from
+<code>sys/sdt.h</code>. At compile time this emits a <code>nop</code>
+instruction plus an entry in an ELF note section
+(<code>.note.stapsdt</code>) describing the probe’s provider, name, and
+the register/memory locations of its arguments. When no tracer is
+attached it’s a single <code>nop</code> — genuinely zero overhead, which
+is why projects like the JVM, Python, Node, PostgreSQL, MySQL, and libc
+ship them enabled in production builds. When you attach, the tracer
+reads the note, finds the <code>nop</code>, and patches a uprobe there.
+So USDT is “a uprobe at a location and with argument descriptors the
+developer promised to keep stable.” Inspect the notes with:</p>
+<pre><code>readelf -n /usr/lib64/libc.so.6 | grep -A3 stapsdt
+bpftrace -l &#39;usdt:/usr/lib64/libc.so.6:*&#39;</code></pre>
+<p>The senior insight: USDT is a <em>contract</em>. The
+<code>libc:setjmp</code> or <code>python:function__entry</code> markers
+are semantic events the developer curated, far more meaningful and
+stable than reverse-engineering which internal function to uprobe.</p>
+<h3 id="ebpf-the-machine-verifier-jit-maps-ring-buffer">eBPF the
+machine: verifier, JIT, maps, ring buffer</h3>
+<p>eBPF is a 64-bit RISC-like virtual machine (11 registers, a 512-byte
+stack, its own instruction set) that runs <em>inside</em> the kernel.
+You load a program with the <code>bpf(2)</code> syscall
+(<code>BPF_PROG_LOAD</code>). Before it runs, the
+<strong>verifier</strong> (<code>kernel/bpf/verifier.c</code>)
+statically proves the program is safe, because a bug in kernel context
+is a kernel bug. The verifier does a symbolic-execution walk of every
+reachable path and enforces:</p>
+<ul>
+<li><strong>Termination.</strong> Historically no loops at all; since
+5.3, bounded loops the verifier can prove terminate; since 5.17,
+<code>bpf_loop()</code> helper for larger bounded iteration. It rejects
+anything it can’t prove halts.</li>
+<li><strong>Memory safety.</strong> Every pointer is tracked with a type
+and bounds. You cannot read past a map value, dereference a
+possibly-null pointer without checking it, or touch arbitrary kernel
+memory except through helpers like <code>bpf_probe_read_kernel()</code>
+(which does a fault-tolerant copy).</li>
+<li><strong>A complexity ceiling.</strong> The verifier refuses to
+inspect more than <strong>one million instructions</strong> across all
+path permutations. This is not your program’s size — it’s the total
+states explored, which explodes with branches. A program with a modest
+instruction count but many nested conditionals can blow the budget. The
+number “felt big in 2019” and programs now routinely hit it (<a
+href="https://lwn.net/Articles/1017116/">LWN, 2025</a>). Mitigations:
+use <strong>global functions</strong> (5.6+) which the verifier checks
+once in isolation rather than re-inlining, keep loops bounded via
+<code>bpf_loop</code>, and reduce branching.</li>
+</ul>
+<p>After verification the program is <strong>JIT-compiled</strong> to
+native machine code (on all major arches), so it runs at roughly native
+speed — there’s no interpreter in the hot path on production
+kernels.</p>
+<p>Programs are typed (<code>BPF_PROG_TYPE_KPROBE</code>,
+<code>_TRACEPOINT</code>, <code>_PERF_EVENT</code>, <code>_XDP</code>,
+<code>_SCHED_CLS</code>, <code>_TRACING</code> for fentry, etc.). The
+type determines the context struct you get and which helpers are legal —
+a networking program can’t call tracing helpers and vice versa.</p>
+<p><strong>Maps</strong> are the only way an eBPF program keeps state
+and the only way it talks to userspace for anything other than streamed
+events. A map is a kernel-resident key/value store created via
+<code>BPF_MAP_CREATE</code>, referenced by fd. Types you must know:</p>
+<ul>
+<li><strong><code>BPF_MAP_TYPE_HASH</code> /
+<code>PERCPU_HASH</code></strong> — the workhorse for aggregation keyed
+by pid, stack id, device, etc. Per-CPU variants give each CPU its own
+slot so there’s no cross-CPU locking/cache-line bouncing on update;
+userspace sums them at read. Per-CPU is how you count millions of events
+with near-zero contention.</li>
+<li><strong><code>ARRAY</code> / <code>PERCPU_ARRAY</code></strong> —
+fixed integer-indexed, preallocated.</li>
+<li><strong><code>LRU_HASH</code></strong> — evicts least-recently-used
+on overflow, so it can’t grow unbounded (essential for keying on
+something unbounded like flows).</li>
+<li><strong><code>STACK_TRACE</code></strong> — stores captured stacks,
+returns an id you use as a histogram key (this is how flame-graph
+aggregation works in-kernel).</li>
+<li><strong><code>LPM_TRIE</code></strong> — longest-prefix-match, for
+IP routing/ACL style lookups.</li>
+<li><strong><code>RINGBUF</code></strong> (5.8+) and the older
+<strong><code>PERF_EVENT_ARRAY</code></strong> — the event pipe to
+userspace, discussed next.</li>
+</ul>
+<p>The distinction that trips people up: for aggregation, you
+<strong>update a map in-kernel and read it once at the end</strong>
+(cheap, bounded). For per-event detail you <strong>stream records to
+userspace</strong>, which is inherently more expensive and can drop
+events under load.</p>
+<p><strong>Ring buffer vs perf buffer.</strong> The old
+<code>PERF_EVENT_ARRAY</code> (perf buffer) is <em>per-CPU</em>: N
+separate ring buffers. That means (a) memory scales with CPU count even
+if traffic is uneven, and (b) events from different CPUs arrive out of
+order, so a userspace consumer must re-sort by timestamp.
+<code>BPF_MAP_TYPE_RINGBUF</code> (5.8+) is a <strong>single MPSC ring
+shared across all CPUs</strong>, so ordering is preserved globally and
+memory is one buffer sized to actual traffic. It uses producer/consumer
+position counters into a mmap’d region; the eBPF side reserves space
+(<code>bpf_ringbuf_reserve</code>), fills it, and commits
+(<code>bpf_ringbuf_submit</code>) — the reserve/commit split means a
+partially-written record is never visible. <code>max_entries</code> is
+the byte size and <strong>must be a power of two and a multiple of the
+page size</strong> (<a
+href="https://docs.ebpf.io/linux/map-type/BPF_MAP_TYPE_RINGBUF/">eBPF
+docs</a>). Modern tools default to ringbuf; reach for the perf buffer
+only on kernels older than 5.8.</p>
+<h3 id="co-re-and-btf-compile-once-run-everywhere">CO-RE and BTF:
+compile once, run everywhere</h3>
+<p>The original BCC model shipped Clang/LLVM <em>on the target
+machine</em> and compiled the eBPF program at runtime against the
+running kernel’s headers. That’s why BCC tools have a fat dependency
+footprint and a compile pause on first run. It “worked” because struct
+layouts differ between kernels — <code>task_struct</code> field offsets
+move — so you needed the local headers to get offsets right.</p>
+<p><strong>BTF</strong> (BPF Type Format) is a compact description of
+all kernel types, embedded in the kernel image itself
+(<code>/sys/kernel/btf/vmlinux</code>) when built with
+<code>CONFIG_DEBUG_INFO_BTF=y</code> (default on RHEL 8.2+/Rocky, modern
+Ubuntu, etc.). <strong>CO-RE</strong> (Compile Once, Run Everywhere)
+uses BTF plus compiler relocations: you compile your program
+<em>once</em> on your dev box against a generated
+<code>vmlinux.h</code>, and the compiler emits relocation records for
+every kernel-struct field access (“the offset of
+<code>task_struct-&gt;pid</code>”). At load time, libbpf reads the
+target kernel’s BTF and <em>patches the offsets</em> to match the
+running kernel. The result: a single small pre-compiled <code>.o</code>
+that runs across kernel versions with no Clang, no headers, no runtime
+compile. This is the mechanism behind libbpf-based tools,
+<code>bpftool gen skeleton</code>, and modern BCC’s
+<code>libbpf-tools/</code> rewrite. Understand it because it’s
+<em>the</em> reason production eBPF tooling became deployable at scale
+(<a href="https://ebpf.io/get-started/">ebpf.io</a>).</p>
+<h3 id="why-strace-is-a-trap-in-production">Why strace is a trap in
+production</h3>
+<p><code>strace</code> uses <code>ptrace(2)</code>. For every syscall
+the traced process makes, the tracer is stopped-and-resumed
+<em>twice</em> (entry and exit), each a context switch, and the tracee
+is fully halted in between. Overhead is commonly
+<strong>100x–500x</strong> on syscall-heavy workloads. Worse, it changes
+timing enough to mask or move races, and on a production service it can
+push latency past SLA or trip watchdogs. It’s an outstanding tool for a
+single process on a dev box and a <em>loaded gun</em> on a busy
+production daemon. The eBPF equivalent — <code>trace-cmd</code>,
+<code>bpftrace -e 'tracepoint:syscalls:sys_enter_* /pid == X/ {...}'</code>,
+or BCC’s <code>syscount</code>/<code>trace</code> — hooks the syscall
+tracepoints, filters in-kernel, and adds a tiny bounded per-event cost
+with no ptrace stop. The senior move is to <em>know</em> the difference
+and reach for the tracepoint on anything live.</p>
+<h3 id="failure-modes-and-scale-behavior">Failure modes and scale
+behavior</h3>
+<ul>
+<li><strong>Event storms and drops.</strong> Streaming per-event to
+userspace via ring/perf buffer will <em>drop</em> events when the
+consumer can’t keep up (you’ll see a lost-events counter). The fix is
+almost always to aggregate in-kernel (map/histogram) instead of
+streaming. If you truly need every event, size the buffer up and
+minimize per-event work.</li>
+<li><strong>kretprobe missed returns.</strong> As above —
+<code>maxactive</code> exhaustion silently undercounts. Prefer
+<code>fexit</code>.</li>
+<li><strong>Verifier rejections at scale.</strong> Complex programs hit
+the 1M-instruction/state ceiling. Split into global functions, bound
+loops, simplify branching.</li>
+<li><strong>Symbol/stack resolution gaps.</strong> JITed runtimes (Java,
+Node) and stripped/<code>-fomit-frame-pointer</code> binaries give
+broken stacks. Fixes: frame pointers
+(<code>-fno-omit-frame-pointer</code>), DWARF-based unwinding
+(<code>perf record --call-graph dwarf</code>, heavier), or LBR
+(<code>--call-graph lbr</code>), and per-runtime symbol maps
+(<code>perf-&lt;pid&gt;.map</code> for JITs). This is why so many “why
+is my flame graph a wall of <code>[unknown]</code>” tickets exist.</li>
+<li><strong>Tracepoint absence.</strong> Not every interesting event has
+a tracepoint; you fall back to kprobe/fentry and inherit version
+fragility.</li>
+<li><strong>Overhead on ultra-hot paths.</strong> Even a few-nanosecond
+probe on a path taken tens of millions of times per second adds up.
+Sample instead of trace, or filter to the narrowest predicate.</li>
+<li><strong>Locked-down kernels.</strong>
+<code>kernel.perf_event_paranoid</code>, <code>kptr_restrict</code>,
+lockdown mode, and missing <code>CAP_BPF</code>/<code>CAP_PERFMON</code>
+(or root) will block attach. On a hardened box, ftrace via raw tracefs
+may be the only thing available.</li>
+</ul>
+<hr />
+<h2 id="hands-on-labs">Hands-on labs</h2>
+<blockquote>
+<p>All labs assume a throwaway VM (any modern distro on kernel ≥ 5.8;
+Rocky 9, Ubuntu 22.04+, Fedora all work). Run as root
+(<code>sudo -i</code>) unless noted. Install the toolchain up front:</p>
+<pre><code># Debian/Ubuntu
+apt-get update &amp;&amp; apt-get install -y bpftrace bcc-tools linux-tools-$(uname -r) trace-cmd strace ltrace git
+# RHEL/Rocky/Fedora
+dnf install -y bpftrace bcc-tools perf trace-cmd strace ltrace git</code></pre>
+<p>Sanity check the kernel has what we need:</p>
+<pre><code>uname -r
+ls /sys/kernel/btf/vmlinux &amp;&amp; echo &quot;BTF present (CO-RE ready)&quot;
+mount | grep tracefs || mount -t tracefs nodev /sys/kernel/tracing
+bpftrace --version</code></pre>
+</blockquote>
+<h3
+id="lab-1-strace-overhead-vs.-tracepoints-prove-why-we-dont-strace-prod">Lab
+1 — strace overhead vs. tracepoints: prove why we don’t strace prod</h3>
+<p><strong>Objective:</strong> Measure, with a stopwatch, the
+multi-hundred-x slowdown <code>ptrace</code> imposes, then reproduce the
+same visibility with an eBPF tracepoint at negligible cost. This
+installs the reflex for why the rest of the module exists.</p>
+<p><strong>Setup:</strong> a syscall-heavy microbenchmark.</p>
+<pre><code>cat &gt; /tmp/hammer.c &lt;&lt;&#39;EOF&#39;
+#include &lt;unistd.h&gt;
+int main(void){ for (long i=0;i&lt;2000000;i++){ getpid(); } return 0; }
+EOF
+cc -O2 -o /tmp/hammer /tmp/hammer.c</code></pre>
+<p><strong>Steps:</strong></p>
+<ol type="1">
+<li><p>Baseline — no tracer:</p>
+<pre><code>time /tmp/hammer</code></pre></li>
+<li><p>Under strace (counting mode, still ptrace under the hood):</p>
+<pre><code>time strace -f -c /tmp/hammer</code></pre></li>
+<li><p>Under strace with full per-syscall printing to see the truly
+pathological case:</p>
+<pre><code>time strace -f -e trace=getpid /tmp/hammer &gt;/dev/null 2&gt;/tmp/strace.out
+wc -l /tmp/strace.out</code></pre></li>
+<li><p>Now the eBPF equivalent. In one terminal, count
+<code>getpid</code> calls system-wide via the syscall tracepoint
+(in-kernel aggregation, no ptrace):</p>
+<pre><code>bpftrace -e &#39;tracepoint:syscalls:sys_enter_getpid { @[comm] = count(); }&#39; &amp;
+BT=$!
+time /tmp/hammer
+kill -INT $BT</code></pre></li>
+<li><p>Compare the wall-clock numbers from steps 1, 2, 3, and
+4.</p></li>
+</ol>
+<p><strong>Prove it:</strong> the ratio is the lesson. Compute it
+explicitly:</p>
+<pre><code># Fill in the &#39;real&#39; seconds you observed:
+python3 -c &#39;base=&lt;step1&gt;; st=&lt;step3&gt;; print(f&quot;strace slowdown: {st/base:.0f}x&quot;)&#39;</code></pre>
+<p>You should see strace step 3 running one to several hundred times
+slower than baseline, while the bpftrace run in step 4 is within a few
+percent of baseline <em>and</em> still produced an accurate per-process
+count. That gap — same visibility, ~0 vs ~300x overhead — is the entire
+argument for eBPF over ptrace in production.</p>
+<p><strong>Teardown:</strong></p>
+<pre><code>kill $BT 2&gt;/dev/null            # if the background bpftrace is still up
+rm -f /tmp/hammer /tmp/hammer.c /tmp/strace.out</code></pre>
+<h3
+id="lab-2-ftrace-with-nothing-installed-function_graph-and-the-raw-tracefs-interface">Lab
+2 — ftrace with nothing installed: function_graph and the raw tracefs
+interface</h3>
+<p><strong>Objective:</strong> Trace kernel function execution and
+latency using only the kernel’s built-in ftrace via
+<code>/sys/kernel/tracing</code>, no external tools. This is your
+fallback on a locked-down box where you can’t install anything, and it’s
+the substrate <code>perf</code> and much of eBPF tracing sit on.</p>
+<p><strong>Setup:</strong></p>
+<pre><code>cd /sys/kernel/tracing
+cat available_tracers      # expect: function function_graph ... nop</code></pre>
+<p><strong>Steps:</strong></p>
+<ol type="1">
+<li><p>Watch which kernel functions fire when a file is opened, using
+<code>function_graph</code> (shows call nesting and per-function
+duration). Filter to the VFS open path so you don’t drown:</p>
+<pre><code>echo function_graph &gt; current_tracer
+echo &#39;do_sys_openat2 vfs_open do_filp_open path_openat&#39; &gt; set_ftrace_filter
+echo 1 &gt; tracing_on
+cat /etc/hostname &gt; /dev/null            # trigger some opens
+echo 0 &gt; tracing_on
+head -40 trace</code></pre>
+<p>Read the <code>DURATION</code> column — that’s wall-clock time in
+each function, with <code>+</code>/<code>!</code> markers flagging
+functions that ran unusually long.</p></li>
+<li><p>Reset, then use the event/tracepoint interface instead of
+function tracing. Trace every <code>openat</code> syscall system-wide
+and see the filename argument:</p>
+<pre><code>echo nop &gt; current_tracer
+echo &gt; set_ftrace_filter
+echo 1 &gt; events/syscalls/sys_enter_openat/enable
+echo 1 &gt; tracing_on ; sleep 2 ; echo 0 &gt; tracing_on
+grep -m5 openat trace
+echo 0 &gt; events/syscalls/sys_enter_openat/enable</code></pre></li>
+<li><p>Same thing with the friendlier <code>trace-cmd</code> wrapper,
+and record for later analysis:</p>
+<pre><code>trace-cmd record -p function_graph -l vfs_read -O funcgraph-tail sleep 1
+trace-cmd report | head -30</code></pre></li>
+<li><p>Turn on a latency tracer to find the longest time interrupts were
+disabled (a real-time / jitter tool):</p>
+<pre><code>cat available_tracers | tr &#39; &#39; &#39;\n&#39; | grep irqsoff &amp;&amp; {
+  echo irqsoff &gt; current_tracer; echo 1 &gt; tracing_on; sleep 3; echo 0 &gt; tracing_on
+  grep -A2 &quot;latency:&quot; trace | head
+}
+echo nop &gt; current_tracer</code></pre></li>
+</ol>
+<p><strong>Prove it:</strong> you captured kernel-internal timing with
+zero installed tooling. Confirm the tracefs pipeline actually recorded
+functions and durations:</p>
+<pre><code>trace-cmd report 2&gt;/dev/null | grep -c vfs_read &amp;&amp; echo &quot;ftrace captured events with no eBPF, no perf&quot;</code></pre>
+<p>Nonzero count means you traced the kernel through the raw interface.
+The point to internalize: <code>/sys/kernel/tracing</code> is always
+there.</p>
+<p><strong>Teardown:</strong> reset the tracer state you changed so
+tracefs is back to idle (leaving a tracer armed or events enabled keeps
+adding overhead system-wide).</p>
+<pre><code>cd /sys/kernel/tracing
+echo nop &gt; current_tracer
+echo &gt; set_ftrace_filter
+echo 0 &gt; events/syscalls/sys_enter_openat/enable 2&gt;/dev/null
+echo 0 &gt; tracing_on
+echo &gt; trace                    # clear the ring buffer
+rm -f /sys/kernel/tracing/trace.dat trace.dat   # trace-cmd output, if written to cwd</code></pre>
+<h3
+id="lab-3-perf-from-a-slow-symptom-to-a-cpu-flame-graph-and-an-off-cpu-flame-graph">Lab
+3 — perf: from a “slow” symptom to a CPU flame graph and an off-CPU
+flame graph</h3>
+<p><strong>Objective:</strong> Do real performance forensics. Sample
+on-CPU stacks to see where CPU time goes, then do off-CPU analysis to
+see where <em>blocked</em> time goes — the half that on-CPU profiling
+structurally cannot show. This is the single most valuable performance
+skill in the module.</p>
+<p><strong>Setup:</strong> grab the FlameGraph scripts and make a
+workload with both a hot CPU loop and a blocking sleep/IO component.</p>
+<pre><code>git clone https://github.com/brendangregg/FlameGraph /opt/FlameGraph
+# CPU burner + periodic disk sync (mixes on-CPU and off-CPU time)
+cat &gt; /tmp/mixed.sh &lt;&lt;&#39;EOF&#39;
+#!/bin/bash
+burn(){ local x=0; for ((i=0;i&lt;50000000;i++)); do x=$((x+i)); done; }
+while true; do burn; dd if=/dev/zero of=/tmp/blob bs=1M count=64 oflag=dsync status=none; sleep 0.2; done
+EOF
+chmod +x /tmp/mixed.sh; /tmp/mixed.sh &amp; WL=$!</code></pre>
+<p><strong>Steps:</strong></p>
+<ol type="1">
+<li><p>First triage with <code>perf top</code> — live sampled function
+hotlist:</p>
+<pre><code>perf top -F 99          # q to quit; note the top symbols</code></pre></li>
+<li><p>On-CPU flame graph. Sample all CPUs at 99 Hz with call graphs for
+15 s, then fold and render:</p>
+<pre><code>perf record -F 99 -a -g -- sleep 15
+perf script | /opt/FlameGraph/stackcollapse-perf.pl | /opt/FlameGraph/flamegraph.pl &gt; /tmp/cpu.svg</code></pre>
+<p>Open <code>/tmp/cpu.svg</code> — width = CPU time. The
+<code>burn</code> loop should dominate. Note what you <em>don’t</em>
+see: the time spent blocked in <code>dd</code>’s
+<code>fsync</code>.</p></li>
+<li><p>Off-CPU flame graph via a scheduler tracepoint (where does
+blocked/waiting time go). Use bpftrace to aggregate off-CPU stacks by
+the time between a task going off-CPU and coming back:</p>
+<pre><code>bpftrace -e &#39;
+tracepoint:sched:sched_switch { @off[args-&gt;prev_pid] = nsecs; }
+tracepoint:sched:sched_switch /@off[args-&gt;next_pid]/ {
+    $delta = nsecs - @off[args-&gt;next_pid];
+    @us[kstack, comm] = hist($delta / 1000);
+    delete(@off[args-&gt;next_pid]);
+}
+interval:s:15 { exit(); }&#39; &gt; /tmp/offcpu.txt
+head -60 /tmp/offcpu.txt</code></pre>
+<p>(For the canonical version use BCC’s
+<code>offcputime-bpfcc -df 15 &gt; /tmp/off.folded &amp;&amp; /opt/FlameGraph/flamegraph.pl --color=io /tmp/off.folded &gt; /tmp/offcpu.svg</code>.)</p></li>
+<li><p>Use <code>perf sched</code> to quantify scheduler latency
+(run-queue wait) directly:</p>
+<pre><code>perf sched record -- sleep 5
+perf sched latency | head -20      # per-task avg/max scheduling delay
+perf sched timehist | head         # per-wakeup timeline with wait + run</code></pre></li>
+</ol>
+<p><strong>Prove it:</strong> you can now point at <em>both</em> halves
+of the time budget. Verify the CPU flame graph is dominated by your burn
+loop and the off-CPU data captured the <code>dd</code>/sync
+blocking:</p>
+<pre><code>/opt/FlameGraph/stackcollapse-perf.pl &lt; &lt;(perf script) 2&gt;/dev/null | grep -c mixed || true
+grep -Ei &#39;dd|sync|blk|io_schedule&#39; /tmp/offcpu.txt | head</code></pre>
+<p>Seeing your burn function wide in <code>cpu.svg</code> <em>and</em>
+<code>io_schedule</code>/sync stacks in <code>offcpu.txt</code> proves
+you measured on-CPU and off-CPU time as two separate axes — the thing a
+naive “CPU is only 60%, must not be CPU-bound” reading gets wrong.</p>
+<p><strong>Teardown:</strong> kill the workload and remove the artifacts
+(the perf sampling and bpftrace probes detach when their processes exit;
+nothing persists in the kernel).</p>
+<pre><code>kill $WL 2&gt;/dev/null
+rm -f /tmp/mixed.sh /tmp/blob /tmp/cpu.svg /tmp/offcpu.txt /tmp/off.folded /tmp/offcpu.svg
+rm -rf /opt/FlameGraph            # only if you cloned it just for this lab</code></pre>
+<h3
+id="lab-4-bpftrace-as-a-scalpel-block-io-latency-histogram-and-a-syscall-latency-breakdown">Lab
+4 — bpftrace as a scalpel: block-I/O latency histogram and a
+syscall-latency breakdown</h3>
+<p><strong>Objective:</strong> Answer production questions with
+one-liners: what’s the <em>distribution</em> (not the average) of disk
+I/O latency, broken down by device and direction, and which processes
+are causing the slowest <code>read</code>s. Averages lie; histograms
+tell the truth about tail latency.</p>
+<p><strong>Setup:</strong> generate mixed disk I/O.</p>
+<pre><code>dd if=/dev/zero of=/tmp/io.bin bs=1M count=512 oflag=direct status=none &amp;
+fio_or_dd(){ while true; do dd if=/tmp/io.bin of=/dev/null bs=64k iflag=direct status=none; done; }
+fio_or_dd &amp; IOPID=$!</code></pre>
+<p><strong>Steps:</strong></p>
+<ol type="1">
+<li><p>Block-I/O latency histogram, keyed by device and R/W, using the
+<code>block</code> tracepoints (stable ABI — this works across
+kernels):</p>
+<pre><code>bpftrace -e &#39;
+tracepoint:block:block_rq_issue { @start[args-&gt;dev, args-&gt;sector] = nsecs; }
+tracepoint:block:block_rq_complete /@start[args-&gt;dev, args-&gt;sector]/ {
+    $lat = (nsecs - @start[args-&gt;dev, args-&gt;sector]) / 1000;
+    @usecs[args-&gt;rwbs] = hist($lat);
+    delete(@start[args-&gt;dev, args-&gt;sector]);
+}
+interval:s:10 { exit(); }&#39;</code></pre>
+<p>Read the power-of-two histogram buckets. The width of the high
+buckets is your tail latency. <code>rwbs</code> tells you read vs write
+vs flush.</p></li>
+<li><p>Which processes issue the most/slowest reads — attach at the
+syscall tracepoints and time the interval per-thread:</p>
+<pre><code>bpftrace -e &#39;
+tracepoint:syscalls:sys_enter_read  { @t[tid] = nsecs; }
+tracepoint:syscalls:sys_exit_read  /@t[tid]/ {
+    @read_us[comm] = hist((nsecs - @t[tid]) / 1000);
+    delete(@t[tid]);
+}
+interval:s:10 { exit(); }&#39;</code></pre></li>
+<li><p>Prove the in-kernel aggregation story: count <em>all</em>
+syscalls system-wide for 5 s and see that the tool returns a compact
+summary, not a firehose:</p>
+<pre><code>bpftrace -e &#39;tracepoint:raw_syscalls:sys_enter { @[probe] = count(); } interval:s:5 { exit(); }&#39; | sort -t, -k2 | tail</code></pre></li>
+<li><p>Now switch from static to <em>dynamic</em> instrumentation to
+make the tracepoint/kprobe distinction concrete. Time
+<code>vfs_read</code> via a kprobe/kretprobe pair (fragile across
+kernels), then note bpftrace’s preference for tracepoints:</p>
+<pre><code>bpftrace -e &#39;
+kprobe:vfs_read { @t[tid] = nsecs; }
+kretprobe:vfs_read /@t[tid]/ { @ns = hist(nsecs - @t[tid]); delete(@t[tid]); }
+interval:s:5 { exit(); }&#39;</code></pre></li>
+</ol>
+<p><strong>Prove it:</strong> the histogram is the deliverable. Capture
+it to a file and confirm you have a real distribution with distinct
+buckets, not a single average:</p>
+<pre><code>bpftrace -e &#39;
+tracepoint:block:block_rq_issue { @s[args-&gt;dev,args-&gt;sector]=nsecs; }
+tracepoint:block:block_rq_complete /@s[args-&gt;dev,args-&gt;sector]/ {
+  @us[args-&gt;rwbs]=hist((nsecs-@s[args-&gt;dev,args-&gt;sector])/1000);
+  delete(@s[args-&gt;dev,args-&gt;sector]); }
+interval:s:8 { exit(); }&#39; | tee /tmp/iolat.txt
+grep -c &#39;@us&#39; /tmp/iolat.txt &amp;&amp; grep -Ec &#39;\[[0-9K, )]+&#39; /tmp/iolat.txt</code></pre>
+<p>Multiple bucket lines under <code>@us[...]</code> proves you measured
+the <em>shape</em> of latency per device/direction entirely in-kernel.
+If a customer says “disk is slow,” this histogram tells you whether it’s
+a uniformly slow device or a small tail of pathological outliers — a
+distinction the average completely hides.</p>
+<p><strong>Teardown:</strong> stop the I/O generator and clean up its
+scratch file (all bpftrace probes here exit with the one-liner, so no
+bpf programs are left loaded).</p>
+<pre><code>kill $IOPID 2&gt;/dev/null
+jobs -p | xargs -r kill 2&gt;/dev/null    # catch the background dd from Setup
+rm -f /tmp/io.bin /tmp/iolat.txt</code></pre>
+<h3
+id="lab-5-stretch-usdt-and-the-ebpf-machine-trace-libcruntime-markers-and-watch-a-map-fill">Lab
+5 (stretch) — USDT and the eBPF machine: trace libc/runtime markers and
+watch a map fill</h3>
+<p><strong>Objective:</strong> Attach to a user statically-defined
+tracepoint (a semantic event a developer curated), and separately
+observe eBPF’s in-kernel map aggregation directly, tying the abstract
+“verifier + map” model to something you can watch.</p>
+<p><strong>Setup:</strong></p>
+<pre><code>readelf -n /usr/lib64/libc.so.6 2&gt;/dev/null || readelf -n /lib/x86_64-linux-gnu/libc.so.6 | grep -A3 -i stapsdt | head -30
+bpftrace -l &#39;usdt:/usr/lib64/libc.so.6:*&#39; 2&gt;/dev/null || bpftrace -l &#39;usdt:/lib/x86_64-linux-gnu/libc.so.6:*&#39;</code></pre>
+<p><strong>Steps:</strong></p>
+<ol type="1">
+<li><p>Trace a libc USDT marker if present (glibc ships markers like
+<code>libc:memory_*</code> / <code>lll_lock_wait</code>; the exact set
+varies). List and attach to whatever your libc exposes:</p>
+<pre><code>LIBC=$(bpftrace -l &#39;usdt:/usr/lib64/libc.so.6:*&#39; 2&gt;/dev/null | head -1 | cut -d: -f1-3)
+[ -n &quot;$LIBC&quot; ] &amp;&amp; bpftrace -e &quot;usdt:${LIBC#usdt:} { @[comm] = count(); } interval:s:5 { exit(); }&quot;</code></pre></li>
+<li><p>If your libc has no useful USDT, use a guaranteed one: build a
+tiny program with a hand-placed USDT probe.</p>
+<pre><code>dnf install -y systemtap-sdt-dtrace 2&gt;/dev/null || apt-get install -y systemtap-sdt-dev
+cat &gt; /tmp/usdt.c &lt;&lt;&#39;EOF&#39;
+#include &lt;sys/sdt.h&gt;
+#include &lt;unistd.h&gt;
+int main(void){ for(int i=0;;i++){ DTRACE_PROBE1(demo, loop, i); usleep(200000);} }
+EOF
+cc -o /tmp/usdt /tmp/usdt.c &amp;&amp; /tmp/usdt &amp; UP=$!
+bpftrace -e &#39;usdt:/tmp/usdt:demo:loop { printf(&quot;iter=%d comm=%s\n&quot;, arg0, comm); }&#39; &amp;
+sleep 3; kill %2 %1 2&gt;/dev/null; kill $UP 2&gt;/dev/null</code></pre>
+<p>You just consumed a static userspace marker and read its argument
+(<code>arg0</code>) — the same contract a JVM/Python/Postgres
+exposes.</p></li>
+<li><p>Watch the eBPF map/verifier machinery with <code>bpftool</code>.
+In one shell, start a bpftrace that maintains a map; in another,
+enumerate loaded programs and maps:</p>
+<pre><code>bpftrace -e &#39;kprobe:vfs_read { @reads[comm] = count(); }&#39; &amp; BT=$!
+sleep 1
+bpftool prog show | tail -5          # your loaded program, its type + JITed bytes
+bpftool map show | tail -5           # the @reads hash map
+MAPID=$(bpftool map show | awk &#39;/hash/{id=$1} END{gsub(&quot;:&quot;,&quot;&quot;,id); print id}&#39;)
+bpftool map dump id $MAPID | head    # the live key/value pairs, dumped from kernel
+kill $BT</code></pre></li>
+<li><p>Force a verifier rejection to see the safety boundary. Try to
+read arbitrary kernel memory unsafely / write an unbounded loop and read
+the verifier’s complaint:</p>
+<pre><code>bpftrace -e &#39;kprobe:vfs_read { $p = (int8 *)0; @ = *$p; }&#39; 2&gt;&amp;1 | head -20 || true</code></pre></li>
+</ol>
+<p><strong>Prove it:</strong> you observed the machine, not just the
+frontend. Confirm the map is a real kernel object holding live
+state:</p>
+<pre><code>bpftrace -e &#39;kprobe:vfs_read { @reads[comm] = count(); } interval:s:3 { exit(); }&#39; &amp; sleep 1
+bpftool map show | grep -c hash &amp;&amp; echo &quot;eBPF map is a live kernel object&quot;; wait</code></pre>
+<p>A nonzero hash-map count while your program runs, plus a successful
+<code>bpftool map dump</code>, proves the aggregation lives in the
+kernel and is dumpable out-of-band — the concrete reality behind “eBPF
+summarizes in-kernel and you read the map once.”</p>
+<p><strong>Teardown:</strong> kill any bpftrace/USDT processes still
+running so no bpf programs or maps stay resident, then remove the build
+artifacts. Optionally drop the packages you installed just for this
+lab.</p>
+<pre><code>pkill -f &#39;bpftrace&#39; 2&gt;/dev/null
+kill $UP $BT 2&gt;/dev/null ; jobs -p | xargs -r kill 2&gt;/dev/null
+rm -f /tmp/usdt /tmp/usdt.c
+bpftool prog show | grep -q . &amp;&amp; echo &quot;check: some bpf programs still loaded, re-run pkill&quot;
+# Optional, if this VM is not throwaway and you want the packages gone:
+# dnf remove -y systemtap-sdt-dtrace     # Rocky 9.x</code></pre>
+<hr />
+<h2 id="curated-resources">Curated resources</h2>
+<p><strong>Primary docs (authoritative, read as essays not
+lookups)</strong></p>
+<ul>
+<li><a href="https://bpftrace.org/tutorial-one-liners">bpftrace
+One-Liner Tutorial</a> and the <a
+href="https://github.com/bpftrace/bpftrace/blob/master/docs/reference_guide.md">reference
+guide</a> — the 12 escalating one-liners are the fastest path from “I
+know <code>perf top</code>” to answering arbitrary live-kernel
+questions. The reference guide is the definitive language spec (probe
+types, builtins like
+<code>arg0</code>/<code>kstack</code>/<code>comm</code>,
+<code>hist()</code>/<code>lhist()</code>, map semantics). Start here;
+everything else builds on this vocabulary.</li>
+<li><a href="https://docs.kernel.org/trace/ftrace.html">ftrace —
+Function Tracer, kernel.org</a> — the built-in tracer driven entirely
+through <code>/sys/kernel/tracing</code>, needing nothing installed.
+Teaches <code>function_graph</code>, the event/tracepoint system,
+filters and triggers, per-CPU ring buffers. This is the substrate perf
+and eBPF tracing sit on; knowing the raw tracefs interface means you can
+trace on a locked-down box.</li>
+<li><a href="https://docs.ebpf.io/linux/concepts/verifier/">Control
+Group v2 / eBPF docs — docs.ebpf.io</a> and the <a
+href="https://docs.ebpf.io/linux/map-type/BPF_MAP_TYPE_RINGBUF/">ringbuf
+map type page</a> — the clearest current reference on the verifier’s
+complexity model and on map types. The ringbuf page states the
+power-of-two/page-multiple sizing rule and the single-ring-vs-per-CPU
+ordering guarantee that the perf buffer lacks.</li>
+<li><a href="https://docs.cilium.io/en/stable/reference-guides/bpf/">BPF
+and XDP Reference Guide — Cilium</a> — the best single reference on the
+eBPF machine model itself: instruction set, why the verifier rejects
+what it rejects, map types and their locking/memory tradeoffs, tail
+calls, the tc-vs-XDP hook placement, and the bpffs object-pinning model.
+Written by the team that pushes eBPF hardest in production.</li>
+<li><a href="https://ebpf.io/get-started/">ebpf.io — get started +
+ecosystem</a> — the community front door; the clearest articulation of
+programs/maps/helpers/verifier/JIT and specifically the <strong>CO-RE +
+BTF</strong> portability mechanism (relocations against the running
+kernel’s type info) that made eBPF tooling deployable.</li>
+<li><a href="https://man7.org/linux/man-pages/man1/strace.1.html">man7:
+strace(1)</a>, <a href="https://perfwiki.github.io/main/">perf(1)
+wiki</a>, and the <code>bpftrace.8</code> man page — the ABI-level truth
+for each tool.</li>
+</ul>
+<p><strong>Books (canonical)</strong></p>
+<ul>
+<li><a
+href="https://www.brendangregg.com/bpf-performance-tools-book.html">BPF
+Performance Tools — Brendan Gregg</a> (+ the <a
+href="https://github.com/brendangregg/bpf-perf-tools-book">tools
+repo</a>) — 150+ ready-to-run bcc/bpftrace tools organized by subsystem,
+each with the <em>methodology</em> for when to reach for it. The
+staff-level value is the diagnostic thinking (USE method, off-CPU
+analysis, symptom→exact-kprobe). This is the observability endgame; live
+in it.</li>
+<li><a
+href="https://www.brendangregg.com/systems-performance-2nd-edition-book.html">Systems
+Performance, 2nd ed — Brendan Gregg</a> — the methodology bible. USE
+method (Utilization/Saturation/Errors per resource), workload
+characterization, drill-down, and per-subsystem internals. This is the
+<em>method</em>; BPF Performance Tools is the <em>toolkit</em>. Read the
+CPU, memory, and disk chapters alongside labs 3–4.</li>
+<li><a href="https://github.com/lizrice/learning-ebpf">Learning eBPF —
+Liz Rice</a> — the gentlest rigorous on-ramp to <em>writing</em> eBPF
+(not just running tools): hello-world kprobe → maps → tail calls → CO-RE
+→ tc/XDP, with a ready VM config. The bridge to take before the Cilium
+reference’s density.</li>
+<li><a href="https://docs.kernel.org/bpf/index.html">Learning eBPF / BPF
+internals via the kernel BPF docs</a> — the primary source for program
+types, map types, the verifier, and BTF/CO-RE as the kernel documents
+them.</li>
+</ul>
+<p><strong>Landmark talks, blog posts, and hubs</strong></p>
+<ul>
+<li><a href="https://www.brendangregg.com/linuxperf.html">Brendan Gregg
+— Linux Performance hub</a> — the master index tying together his perf
+examples, ftrace tools, eBPF page, and flame graphs. Use as the map;
+bookmark the sub-pages (<a
+href="https://www.brendangregg.com/perf.html">perf.html</a>, <a
+href="https://www.brendangregg.com/ebpf.html">ebpf.html</a>)
+separately.</li>
+<li><a href="https://www.brendangregg.com/offcpuanalysis.html">Off-CPU
+Analysis</a> and <a
+href="https://www.brendangregg.com/FlameGraphs/offcpuflamegraphs.html">Off-CPU
+Flame Graphs</a> — the concept behind Lab 3’s second half: measuring
+blocked time, the half on-CPU profiling can’t see. Non-negotiable for
+latency work.</li>
+<li><a
+href="https://www.brendangregg.com/blog/2019-08-19/bpftrace.html">A
+thorough introduction to bpftrace — Brendan Gregg</a> — the narrative
+companion to the one-liner tutorial, with the design rationale for why
+bpftrace looks like awk.</li>
+<li><a href="https://github.com/brendangregg/FlameGraph">FlameGraph repo
+— Brendan Gregg</a> — the
+<code>stackcollapse-*</code>/<code>flamegraph.pl</code> scripts used in
+Lab 3. Read <code>stackcollapse-perf.pl</code> once to understand the
+folded-stack intermediate format; every profiler now emits it.</li>
+<li><a
+href="https://www.joyfulbikeshedding.com/blog/2019-01-31-full-system-dynamic-tracing-on-linux-using-ebpf-and-bpftrace.html">Full-system
+dynamic tracing using eBPF and bpftrace — Joyful Bikeshedding</a> — an
+unusually clear from-first-principles walk of
+kprobes/uprobes/tracepoints/USDT and how bpftrace wires to each.</li>
+<li><a href="https://lwn.net/Articles/1017116/">Taking BPF programs
+beyond one-million instructions — LWN (2025)</a> — current reporting on
+the verifier complexity ceiling and the global-functions mitigation;
+exactly the kind of “your knowledge is going stale” update LWN exists to
+give.</li>
+<li><a href="https://jvns.ca/">Julia Evans — jvns.ca</a> and her
+strace/tcpdump/perf zines — unmatched for building the reflex of
+interrogating a live system with standard tools. The <a
+href="https://jvns.ca/blog/2015/04/14/strace-zine/">strace zine</a>
+pairs perfectly with Lab 1.</li>
+</ul>
+<p><strong>Source and tooling</strong></p>
+<ul>
+<li><a href="https://github.com/iovisor/bcc">BCC repo</a> — especially
+<code>tools/</code> and the newer <code>libbpf-tools/</code> (CO-RE, no
+runtime compile). <code>biolatency</code>, <code>offcputime</code>,
+<code>funclatency</code>, <code>execsnoop</code>,
+<code>opensnoop</code>, <code>tcpconnect</code>, <code>runqlat</code>
+are the ones to memorize. Read a <code>libbpf-tools/*.bpf.c</code> to
+see a real CO-RE program.</li>
+<li><a
+href="https://github.com/bpftrace/bpftrace/tree/master/docs">bpftrace
+repo docs</a> — the <code>tools/</code> directory is a second library of
+production one-liners-turned-scripts.</li>
+<li><code>bpftool</code> (ships with <code>linux-tools</code>) —
+<code>prog show</code>, <code>map show/dump</code>,
+<code>btf dump</code>, <code>gen skeleton</code>. The out-of-band window
+into what’s loaded, used in Lab 5.</li>
+<li><a href="https://rockyman.org/">rockyman.org</a> — Rocky Linux
+man-page index. Fast way to confirm which package ships a given tool
+(<code>perf</code>, <code>trace-cmd</code>, <code>strace</code>,
+<code>bpftool</code>, <code>bcc-*</code>) and to check the exact flags
+for the Rocky release you’re on before running any of these labs against
+a real box.</li>
+</ul>
+<hr />
+<h2 id="senior-signal">Senior signal</h2>
+<ul>
+<li><strong>Reaches for the right instrument to falsify a specific
+hypothesis, and states the expected output first.</strong> “If it’s
+fsync latency I’ll see <code>io_schedule</code> dominate the off-CPU
+flame graph; if it’s lock contention I’ll see
+<code>futex</code>/<code>mutex</code> wait stacks. Let me run
+<code>offcputime</code> and check.” That’s structured, hypothesis-driven
+troubleshooting versus command-guessing. Mid-level runs
+<code>top</code>, sees 60% CPU, and stops.</li>
+<li><strong>Knows the average is a lie and instinctively asks for the
+distribution.</strong> Reflexively produces a latency <em>histogram</em>
+(<code>hist()</code>, <code>biolatency</code>) and reads the tail,
+because p99 pain hides inside a healthy mean. Knows that “50% CPU” can
+conceal severe CFS throttling and that a benign load average can mask a
+pile of D-state tasks blocked on I/O — and knows which counter is
+lying.</li>
+<li><strong>Owns the tracepoint-vs-kprobe stability tradeoff.</strong>
+Prefers tracepoints and USDT (stable ABI) and understands that a kprobe
+one-liner is version-fragile because it attaches to whatever the
+compiler emitted; knows <code>fexit</code> beats <code>kretprobe</code>
+(no <code>maxactive</code> missed-returns) on 5.5+ kernels.</li>
+<li><strong>Refuses to <code>strace</code> a production daemon.</strong>
+Understands ptrace’s per-syscall double-stop is 100x+ overhead that
+moves timing and can trip SLAs, and substitutes an in-kernel tracepoint
+that filters and aggregates with bounded cost.</li>
+<li><strong>Understands why eBPF is safe and cheap enough for
+production, mechanically.</strong> Can explain the verifier (memory
+safety, termination, the ~1M-instruction/state ceiling and how global
+functions mitigate it), the JIT, per-CPU maps for lock-free aggregation,
+ring-buffer vs perf-buffer ordering/memory tradeoffs, and CO-RE/BTF as
+the reason a single pre-built <code>.o</code> runs across kernels.
+Aggregates in-kernel and reads the map once instead of streaming a
+firehose.</li>
+<li><strong>Does off-CPU analysis, not just on-CPU profiling.</strong>
+Knows that CPU flame graphs structurally cannot show blocked/waiting
+time, and pairs them with scheduler-tracepoint off-CPU flame graphs and
+<code>perf sched latency</code> to account for the <em>whole</em> time
+budget — the difference between “the CPU is busy here” and “the request
+is slow because it’s waiting here.”</li>
+<li><strong>Diagnoses broken stacks instead of trusting a wall of
+<code>[unknown]</code>.</strong> Recognizes missing frame pointers, JIT
+runtimes without symbol maps, and stripped binaries, and fixes them
+(<code>--call-graph dwarf/lbr</code>,
+<code>-fno-omit-frame-pointer</code>, per-runtime symbol files) rather
+than concluding “the profiler doesn’t work.”</li>
+<li><strong>Traces across subsystem boundaries.</strong> Follows a
+symptom from syscall → VFS → block layer → device with one coherent set
+of tools, and reads the coupling (a scheduler stall showing up as I/O
+latency, a cgroup throttle showing up as run-queue wait) rather than
+treating each layer as a black box. Knows the raw
+<code>/sys/kernel/tracing</code> interface as the always-available
+fallback on a hardened host where nothing can be installed.</li>
+</ul>
+<hr />
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="06-networking-deep.html">06 - Networking Deep</a> — where
+XDP/tc eBPF hooks and socket-level tracepoints live; the networking
+counterpart to the tracing hooks covered here.</li>
+<li><a href="09-the-kernel.html">09 - The Kernel</a> — kprobes,
+tracepoints, and the <code>int3</code>/ftrace trampoline machinery that
+this module attaches to; the subsystem internals you’re
+interrogating.</li>
+<li><a href="03-processes-scheduling-and-signals.html">03 - Processes,
+Scheduling and Signals</a> — the <code>sched_switch</code> tracepoint
+and run-queue concepts behind Lab 3’s off-CPU analysis and
+<code>perf sched latency</code>.</li>
+<li>09 - Observability and SRE — the SRE methodology (USE method, golden
+signals, SLOs, latency distributions over averages) that consumes these
+tracing primitives; this module is the low-level toolkit, that one is
+the practice.</li>
+<li>08 - Observability and Efficiency for ML Infrastructure —
+GPU/training observability and efficiency tuning build on these same
+tracepoints, histograms, and off-CPU analysis to find data-pipeline
+stalls and throttling.</li>
+<li>08 - Logging Auditing and Detection — eBPF as a security-detection
+sensor (syscall/exec tracing, tamper-evident telemetry) is the
+cloud-detection counterpart to the tracing hooks here.</li>
+<li>05 - Kubernetes Networking and Workloads — Cilium’s eBPF/XDP
+dataplane is this machine model (verifier, maps, CO-RE) applied to pod
+networking and observability.</li>
+</ul>
+</main>
+</div></body></html>

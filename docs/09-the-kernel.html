@@ -1,0 +1,1128 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 - The Kernel | Linux Training Course</title>
+<link rel="stylesheet" href="style.css"></head>
+<body><div class="layout">
+<nav class="sidebar"><a href="index.html"><strong>Linux Training Course</strong></a><hr>
+<a href="00-track-overview.html" data-page="00-track-overview.html">00 - Track Overview</a>
+<a href="01-permissions-and-access-control.html" data-page="01-permissions-and-access-control.html">01 - Permissions and Access Control</a>
+<a href="02-users-authentication-and-pam.html" data-page="02-users-authentication-and-pam.html">02 - Users, Authentication and PAM</a>
+<a href="03-processes-scheduling-and-signals.html" data-page="03-processes-scheduling-and-signals.html">03 - Processes, Scheduling and Signals</a>
+<a href="04-filesystems-and-the-vfs.html" data-page="04-filesystems-and-the-vfs.html">04 - Filesystems and the VFS</a>
+<a href="05-storage-and-lvm.html" data-page="05-storage-and-lvm.html">05 - Storage and LVM</a>
+<a href="06-networking-deep.html" data-page="06-networking-deep.html">06 - Networking Deep</a>
+<a href="07-systemd.html" data-page="07-systemd.html">07 - systemd</a>
+<a href="08-boot-and-init.html" data-page="08-boot-and-init.html">08 - Boot and Init</a>
+<a href="09-the-kernel.html" data-page="09-the-kernel.html" class="current">09 - The Kernel</a>
+<a href="10-namespaces-and-cgroups-v2.html" data-page="10-namespaces-and-cgroups-v2.html">10 - Namespaces and cgroups v2</a>
+<a href="11-observability-and-tracing-with-ebpf.html" data-page="11-observability-and-tracing-with-ebpf.html">11 - Observability and Tracing with eBPF</a>
+<a href="12-selinux-and-hardening.html" data-page="12-selinux-and-hardening.html">12 - SELinux and Hardening</a>
+<a href="13-samba-and-smb.html" data-page="13-samba-and-smb.html">13 - Samba and SMB</a>
+<a href="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html" data-page="14-early-userspace-dracut-hooks-udev-and-the-initqueue.html">14 - Early Userspace - dracut Hooks, udev and the initqueue</a></nav>
+<main><h1 id="the-kernel">09 - The Kernel</h1>
+<p>Backlink: <a href="00-track-overview.html">00 - Track
+Overview</a></p>
+<blockquote>
+<p>Prior modules taught you the subsystems (scheduler, memory, cgroups,
+namespaces, block, net, VFS) as separate stories. This module is about
+the <em>thing that contains them all</em>: the kernel as a single
+deployable artifact and a single running address space. You will learn
+to read the kernel like a map, load and unload code into a live kernel,
+tune it through <code>/proc/sys</code> and <code>/sys</code>, control it
+from the command line before it even mounts root, build and patch your
+own, understand the hardening (KASLR, lockdown, Secure Boot, module
+signing) that constrains what you can do to a production box, and attach
+live tracers (ftrace, perf) to answer arbitrary questions about a
+running system with nothing pre-installed. The through-line: everything
+the kernel exposes to userspace is a <em>file</em>, a <em>syscall</em>,
+or a <em>boot-time decision</em>, and a staff engineer knows which one
+they’re touching and what it costs.</p>
+</blockquote>
+<hr />
+<h2 id="concept-deep-dive">Concept deep-dive</h2>
+<h3 id="what-the-kernel-actually-is-on-disk-and-in-memory">1. What the
+kernel actually is on disk and in memory</h3>
+<p>There are two artifacts and one running image, and conflating them is
+a classic mid-level mistake.</p>
+<ul>
+<li><strong><code>vmlinux</code></strong> — the raw, uncompressed,
+statically-linked ELF executable of the kernel, with full symbols. This
+is what you feed to <code>gdb</code>, <code>crash</code>,
+<code>pahole</code>, and <code>objdump</code>. It is <em>not</em> what
+boots. On RHEL/Rocky it ships (stripped) in
+<code>kernel-debuginfo</code>; the build tree leaves it at the top of
+the source dir.</li>
+<li><strong><code>vmlinuz</code> / <code>bzImage</code></strong> — the
+<em>bootable</em> image: <code>vmlinux</code> stripped, then compressed
+(gzip/xz/zstd, chosen by <code>CONFIG_KERNEL_*</code>), wrapped in a
+small self-decompressing stub plus the real-mode/EFI setup code. On x86
+this is the <code>bzImage</code> (“big zImage”). The bootloader loads
+this; the stub decompresses the payload into memory (into a KASLR-chosen
+slot, see below) and jumps to it.</li>
+<li><strong>The running image</strong> — after decompression the kernel
+lives in kernel virtual address space (on x86-64, the top of the 64-bit
+canonical range, e.g. <code>0xffffffff80000000+</code> for the kernel
+text with the default mapping). It is <em>never swapped</em>, its text
+is normally read-only (<code>CONFIG_STRICT_KERNEL_RWX</code>), and
+userspace can only touch it through the syscall boundary, the trap/fault
+handlers, or the pseudo-filesystems.</li>
+</ul>
+<pre><code> on-disk boot artifact                     running kernel (single address space)
+ ┌────────────────────────────┐            ┌───────────────────────────────────┐
+ │ bzImage / vmlinuz          │            │  .text (RO+X)  syscalls, subsystems │
+ │  ┌──────────────────────┐  │  decomp    │  .rodata(RO)                        │
+ │  │ setup / EFI stub     │  │ ───────►   │  .data / .bss (RW)                  │
+ │  │ compressed payload ──┼──┼──►vmlinux  │  percpu areas                       │
+ │  └──────────────────────┘  │  (KASLR    │  vmalloc region  ← modules live here│
+ └────────────────────────────┘  slot)     │  direct map (all phys RAM)          │
+                                            │  fixmap / vsyscall / vDSO           │
+ initramfs (separate cpio.gz) ─────────────► unpacked into a tmpfs rootfs first  │
+                                            └───────────────────────────────────┘</code></pre>
+<p>The kernel is a <strong>monolithic</strong> kernel with
+<strong>loadable modules</strong>: subsystems are compiled in
+(<code>y</code>) or built as <code>.ko</code> objects (<code>m</code>)
+that are linked into the <em>same address space</em> at load time. There
+is no protection boundary between a module and core kernel: a buggy
+module can corrupt anything. “Monolithic” is the architecture; “modular”
+is a deployment convenience, not an isolation mechanism.</p>
+<p>The <strong>System.map</strong> (and the in-memory
+<code>/proc/kallsyms</code>) is the symbol table: name → virtual
+address. This is the “map” you read the kernel with.
+<code>/proc/kallsyms</code> shows <code>0000000000000000</code> for
+every address unless you are root <em>and</em>
+<code>kptr_restrict</code> allows it (see §5) — that zeroing is a
+KASLR/info-leak defense, not a bug.</p>
+<h3 id="loadable-modules-the-mechanism">2. Loadable modules: the
+mechanism</h3>
+<p>A <code>.ko</code> is a <strong>relocatable ELF object</strong> (not
+a shared library, not an executable) plus special sections the kernel’s
+loader understands:</p>
+<ul>
+<li><code>.modinfo</code> — a blob of NUL-separated
+<code>key=value</code> strings: <code>vermagic</code>,
+<code>depends</code>, <code>author</code>, <code>license</code>,
+<code>parm=...</code>, <code>alias=...</code>. Read it with
+<code>modinfo foo.ko</code>.</li>
+<li><code>__versions</code> (when <code>CONFIG_MODVERSIONS=y</code>) —
+CRCs of every symbol the module imports, for ABI checking.</li>
+<li><code>.gnu.linkonce.this_module</code> — the
+<code>struct module</code> template.</li>
+<li>Appended module signature (see §7) — PKCS#7 blob glued
+<em>after</em> the ELF, with a magic marker
+<code>~Module signature appended~\n</code> at the very end.</li>
+</ul>
+<p><strong>Load path (the syscalls):</strong></p>
+<ul>
+<li><code>init_module(2)</code> — takes the module image already in a
+userspace buffer. Legacy.</li>
+<li><code>finit_module(2)</code> — takes an <em>fd</em> to the
+<code>.ko</code> file plus flags. This is what modern
+<code>modprobe</code>/<code>insmod</code> use, because it lets the
+kernel read the file directly (needed for IMA appraisal and signature
+checking against the on-disk bytes, and it avoids a userspace copy).
+<code>strace insmod</code> on any modern distro shows
+<code>finit_module</code>, not <code>init_module</code>.</li>
+</ul>
+<p>Inside the kernel, <code>load_module()</code> (in
+<code>kernel/module/main.c</code>, formerly
+<code>kernel/module.c</code>) does: copy in → sanity-check the ELF →
+<strong>check vermagic</strong> (kernel version, SMP, preemption,
+module-versioning flags must match — this is why a module built for
+<code>6.6.0</code> refuses to load on <code>6.6.1</code> unless
+MODVERSIONS smooths it) → <strong>verify signature</strong> if required
+→ <strong>resolve symbols</strong> against the kernel’s exported symbol
+table (<code>__ksymtab</code>, populated by
+<code>EXPORT_SYMBOL</code>/<code>EXPORT_SYMBOL_GPL</code>) → apply ELF
+relocations to place the code in the <code>vmalloc</code> region → run
+the module’s <code>init</code> function → add to the global module
+list.</p>
+<p><code>insmod</code> is dumb: it loads exactly the file you name, no
+dependency resolution. <code>modprobe</code> is smart: it reads
+<code>/lib/modules/$(uname -r)/modules.dep</code> (generated by
+<code>depmod</code> from each module’s <code>depends=</code> modinfo)
+and loads the dependency closure in order. <code>modules.alias</code>
+maps PCI/USB/etc. device IDs and <code>MODULE_ALIAS()</code> strings to
+module names — this is how udev autoloads a driver when a device appears
+(<code>modprobe</code> gets called with an alias like
+<code>pci:v00008086d...</code>).</p>
+<p><strong>Unloading</strong> (<code>delete_module(2)</code>,
+i.e. <code>rmmod</code>) only succeeds if the module refcount is zero.
+Refcounts are bumped by <code>try_module_get()</code> (e.g. an open fd
+to a device the module owns, a mounted filesystem of that type, another
+module depending on it). <code>lsmod</code>’s third column <em>is</em>
+that refcount; the fourth is the list of users. A module can also be
+<code>[permanent]</code> (no exit function) and never removable.</p>
+<p><strong>Failure modes worth internalizing:</strong> -
+<code>Invalid module format</code> + <code>dmesg</code> shows
+<code>vermagic</code> mismatch → built against wrong headers. -
+<code>Unknown symbol in module</code> → it imports a symbol the running
+kernel doesn’t export (or a GPL-only symbol from a proprietary module).
+- <code>Required key not available</code> → signature enforcement is on
+and the key isn’t in the kernel keyring (see §7). <em>This is the single
+most common Secure Boot support ticket.</em> -
+<code>Module ... is in use</code> → nonzero refcount; find the user in
+<code>lsmod</code>’s last column. - Taints the kernel
+(<code>/proc/sys/kernel/tainted</code>) — an out-of-tree
+(<code>O</code>), unsigned (<code>E</code>), or proprietary
+(<code>P</code>) module sets taint bits that engineering will ask about
+on any bug report. <code>cat /proc/sys/kernel/tainted</code> decoded via
+the bitmask in
+<code>Documentation/admin-guide/tainted-kernels.rst</code>.</p>
+<p><strong>Module parameters</strong> live at
+<code>/sys/module/&lt;mod&gt;/parameters/&lt;param&gt;</code>. Set at
+load (<code>modprobe foo debug=1</code>), persistently via
+<code>/etc/modprobe.d/*.conf</code> (<code>options foo debug=1</code>),
+or on the kernel cmdline as <code>foo.debug=1</code>. Whether a param is
+writable at runtime depends on the permission mask passed to
+<code>module_param()</code> (e.g. <code>0644</code> → world-readable,
+root-writable via sysfs). Not all params are runtime-mutable; many are
+<code>0444</code>.</p>
+<h3 id="procfs-sysfs-and-the-rest-of-the-pseudo-filesystem-zoo">3.
+procfs, sysfs, and the rest of the pseudo-filesystem zoo</h3>
+<p>These are <strong>not real filesystems</strong>; they are kernel data
+structures projected as files. Reads/writes are
+<code>-&gt;read</code>/<code>-&gt;write</code> callbacks that run kernel
+code. Understanding <em>which</em> interface owns <em>what</em> is a
+real senior differentiator.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Mount</th>
+<th>Backing</th>
+<th>Purpose</th>
+<th>ABI stability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/proc</code> (<code>procfs</code>)</td>
+<td>per-process + global</td>
+<td>Process state (<code>/proc/PID/*</code>), global tunables under
+<code>/proc/sys</code>, legacy dumping ground
+(<code>/proc/meminfo</code>, <code>/proc/interrupts</code>,
+<code>/proc/kallsyms</code>, <code>/proc/cmdline</code>)</td>
+<td>Mostly stable, but a historical grab-bag</td>
+</tr>
+<tr>
+<td><code>/sys</code> (<code>sysfs</code>)</td>
+<td>kobject tree</td>
+<td>Device model, module info, per-device/-driver attributes,
+<code>/sys/fs/cgroup</code> (cgroup v2), power, firmware</td>
+<td><strong>Documented ABI</strong> in
+<code>Documentation/ABI/{stable,testing,obsolete}</code> — one attribute
+per file</td>
+</tr>
+<tr>
+<td><code>/sys/kernel/tracing</code> (<code>tracefs</code>)</td>
+<td>ftrace</td>
+<td>The tracing control plane (§8)</td>
+<td>Interface stable</td>
+</tr>
+<tr>
+<td><code>/sys/kernel/debug</code> (<code>debugfs</code>)</td>
+<td>ad-hoc</td>
+<td>Developer debugging, <em>no ABI guarantee</em>, blocked under
+lockdown</td>
+<td><strong>None</strong> — can change any release</td>
+</tr>
+<tr>
+<td><code>/proc/sys</code> (<code>sysctl</code>)</td>
+<td>ctl_table tree</td>
+<td>Tunable knobs (§4)</td>
+<td>Stable-ish</td>
+</tr>
+</tbody>
+</table>
+<p><strong>sysfs is the projection of the driver model.</strong> The
+unit is the <strong>kobject</strong> (<code>struct kobject</code>: a
+name, a refcount <code>kref</code>, a parent pointer, a
+<code>kobj_type</code>). A directory in <code>/sys</code> <em>is</em> a
+kobject. A file in it is a <strong>kobject attribute</strong> whose
+show/store ops are defined by the kobject’s
+<code>kobj_type-&gt;sysfs_ops</code>. A <strong>kset</strong> is a
+collection of kobjects that also emits <strong>uevents</strong> (the
+netlink messages udev listens to). Source of truth:
+<code>docs.kernel.org/core-api/kobject.html</code> and
+<code>Documentation/filesystems/sysfs.rst</code>. The rule “one value
+per file” is enforced by convention and is <em>why</em> sysfs is
+scriptable and greppable in a way <code>/proc/meminfo</code> (many
+values, one file) is not.</p>
+<p>The symlink web in <code>/sys</code> encodes the same object graph
+from multiple views: <code>/sys/bus/pci/devices/&lt;addr&gt;</code> →
+<code>../../../devices/pci0000:00/...</code> (physical topology),
+<code>/sys/class/net/eth0/device</code> → the PCI device,
+<code>/sys/block/sda/queue/scheduler</code> (the I/O scheduler knob you
+met in the storage module). Following symlinks in <code>/sys</code> is
+reading the kobject parent/child and bus/class/device relationships.</p>
+<p><code>/proc/PID/</code> is the forensics goldmine:
+<code>status</code> (state, caps, <code>NSpid</code>,
+<code>VmRSS</code>), <code>stat</code> (the raw scheduler/mm fields),
+<code>maps</code>/<code>smaps</code> (VMA layout), <code>fd/</code>
+(open descriptors — count them to find fd leaks), <code>cgroup</code>
+(which cgroups this task is in), <code>stack</code> (kernel stack if
+<code>CONFIG_STACKTRACE</code>), <code>wchan</code> (what kernel
+function a D-state task is blocked in), <code>environ</code>,
+<code>limits</code>. A task stuck in <code>D</code> (uninterruptible
+sleep) with <code>wchan</code> pointing into the I/O path is the
+“healthy load average hides blocked-on-I/O tasks” senior tell from the
+track intro.</p>
+<h3 id="sysctl-and-the-ctl_table-tree">4. sysctl and the ctl_table
+tree</h3>
+<p><code>sysctl</code> knobs are the same objects viewed two ways:
+<code>sysctl net.ipv4.tcp_syncookies</code> and
+<code>cat /proc/sys/net/ipv4/tcp_syncookies</code> hit the identical
+<code>ctl_table</code> entry (<code>.</code> ↔︎ <code>/</code>). The
+registration lives in each subsystem
+(<code>net/ipv4/sysctl_net_ipv4.c</code>, <code>kernel/sysctl.c</code>,
+<code>mm/</code>, etc.).</p>
+<p>Precedence and persistence are where people get burned: - Runtime:
+<code>sysctl -w key=val</code> or
+<code>echo val &gt; /proc/sys/...</code> — <strong>not
+persistent</strong>. - Persistent: files in a <em>strict load order</em>
+— <code>/etc/sysctl.d/*.conf</code>, <code>/run/sysctl.d/*.conf</code>,
+<code>/usr/lib/sysctl.d/*.conf</code>, then
+<code>/etc/sysctl.conf</code> last. <code>systemd-sysctl.service</code>
+applies these at boot. Within a directory, files load in lexical order;
+a later file wins. <code>sysctl --system</code> shows the exact order
+and which file set each value. - <strong>Namespaced sysctls</strong>:
+many <code>net.*</code> knobs are <em>per-network-namespace</em>.
+Setting <code>net.ipv4.ip_forward</code> inside a container’s netns does
+not touch the host. <code>kernel.*</code> and most <code>vm.*</code> are
+global (not namespaced), which is why a container can’t set
+<code>vm.max_map_count</code> for itself on older kernels — a real
+production gotcha for Elasticsearch-in-a-container.</p>
+<p><code>sysctl -a</code> dumps everything; grep it.
+<code>sysctl -w</code> failing with <code>permission denied</code> on a
+<code>net.*</code> key inside a container is usually a read-only
+<code>/proc/sys</code> mount (the runtime masked it), not a capability
+problem.</p>
+<h3
+id="kernel-command-line-controlling-the-kernel-before-it-can-defend-itself">5.
+Kernel command line: controlling the kernel before it can defend
+itself</h3>
+<p><code>/proc/cmdline</code> shows what you booted with. The bootloader
+(GRUB2 on RHEL/Rocky) hands this string to the kernel; some params are
+consumed by the kernel core, some by subsystems, some are
+<code>module.param=value</code> forms (§2), and anything the kernel
+doesn’t recognize is passed to PID 1 as environment/args
+(<code>systemd.*</code> params, or <code>init=</code>).</p>
+<p>High-value params a staff engineer reaches for:</p>
+<ul>
+<li><code>root=</code>, <code>rootflags=</code>,
+<code>ro</code>/<code>rw</code> — where and how the real root mounts
+(after initramfs pivots).</li>
+<li><code>rd.break</code>, <code>rd.break=pre-mount</code>,
+<code>rd.debug</code>, <code>rd.shell</code> — drop to the
+<strong>dracut/initramfs emergency shell</strong> at a chosen hook.
+<code>rd.break</code> (root password not yet needed) is the canonical “I
+locked myself out / broke <code>/etc/fstab</code> / need to reset root
+password” recovery.</li>
+<li><code>systemd.unit=rescue.target</code> /
+<code>emergency.target</code>, or the bare
+<code>1</code>/<code>single</code> — bring up minimal userspace.</li>
+<li><code>nokaslr</code> — disable KASLR (§6), required to use
+fixed-address kernel debugging or to correlate a crash address across
+boots.</li>
+<li><code>lsm=...</code> — order and selection of LSMs including
+<code>lockdown</code> (§7).</li>
+<li><code>mitigations=off</code> / <code>=auto</code> /
+<code>=auto,nosmt</code> — master switch for CPU-vuln mitigations
+(Spectre/Meltdown/MDS/etc.). <code>mitigations=off</code> is a huge perf
+lever and a huge security foot-gun; know the tradeoff cold.</li>
+<li><code>isolcpus=</code>, <code>nohz_full=</code>,
+<code>rcu_nocbs=</code> — CPU isolation for latency-sensitive/HPC
+workloads (ties to the scheduler module).</li>
+<li><code>crashkernel=</code> — reserve memory for the kdump capture
+kernel (§ forensics; ties to the crash module).</li>
+<li><code>kptr_restrict</code>, <code>slab_nomerge</code>,
+<code>init_on_alloc=1</code>, <code>page_poison=1</code>,
+<code>debugfs=off</code> — hardening knobs.</li>
+<li><code>console=ttyS0,115200 earlyprintk=/earlycon=</code> — get log
+output <em>before</em> the console driver is up; indispensable when the
+kernel dies during early boot.</li>
+<li><code>panic=N</code> — reboot N seconds after a panic (with
+<code>0</code> = hang forever, the default; set to e.g. <code>10</code>
+in prod so a panicked node reboots).</li>
+</ul>
+<p>The mental model: the cmdline is your only lever <em>before</em> any
+config file, any service, any filesystem is available. It’s the layer
+you debug boot failures from.</p>
+<h3 id="kaslr">6. KASLR</h3>
+<p><code>CONFIG_RANDOMIZE_BASE</code> (on by default since 4.12; also
+<code>CONFIG_RANDOMIZE_MEMORY</code> randomizes the direct map / vmalloc
+/ vmemmap base offsets). At boot the decompression stub picks a random
+slot for the kernel image from the available physical memory
+(constrained by alignment and by avoiding reserved regions), so the
+kernel text base differs every boot. Defeats exploits that hardcode
+kernel symbol addresses (ROP/ret2kernel).</p>
+<p>Consequences you must know: - <code>/proc/kallsyms</code> addresses
+change every boot; with <code>kptr_restrict=1</code> non-root sees
+zeros, <code>=2</code> everyone sees zeros. A crash dump address is
+meaningless without the <em>KASLR offset for that boot</em> —
+<code>crash</code> and <code>dmesg</code> record it
+(<code>Kernel Offset: 0x... from 0xffffffff81000000</code>), and you
+must feed it to symbol resolution. - KASLR entropy on x86-64 is limited
+(a few hundred slots historically) and has been the subject of many
+side-channel breaks (TLB timing, prefetch, EntryBleed against KPTI). It
+raises cost, it is not a wall. - Disable with <code>nokaslr</code> when
+you need reproducible addresses for live
+<code>gdb</code>/<code>crash</code> work against a known kernel, or when
+a hypervisor/debug setup requires it. - <code>kexec</code>/kdump: the
+capture kernel is a <em>separate</em> image and can be loaded with
+<code>nokaslr</code> for predictable analysis.</p>
+<h3
+id="lockdown-secure-boot-and-module-signing-the-production-hardening-stack">7.
+Lockdown, Secure Boot, and module signing (the production hardening
+stack)</h3>
+<p>These three are separate mechanisms that are usually deployed
+together, and support engineers must be able to disentangle them.</p>
+<p><strong>Secure Boot</strong> is a <em>firmware/UEFI</em> feature: the
+firmware verifies the bootloader’s signature against keys in the
+platform’s <code>db</code> (allowed) / <code>dbx</code> (revoked) key
+databases. On RHEL/Rocky the chain is <code>shim</code> (signed by
+Microsoft’s UEFI CA, the near-universal trust anchor) →
+<code>GRUB2</code> → kernel. shim also introduces the
+<strong>MOK</strong> (Machine Owner Key) list, which lets a local admin
+enroll their own signing key via <code>mokutil</code> + a reboot-time
+MokManager prompt, <em>without</em> touching firmware keys.</p>
+<p><strong>Module/kernel signature verification</strong> (kernel
+feature, <code>CONFIG_MODULE_SIG*</code>): the kernel keeps keyrings —
+the built-in <code>.builtin_trusted_keys</code> (compiled into
+<code>vmlinux</code>), <code>.secondary_trusted_keys</code>, and on UEFI
+the <code>.platform</code> keyring populated from firmware
+<code>db</code> + enrolled MOKs. A module’s appended PKCS#7 signature
+(§2) is verified against these. <code>CONFIG_MODULE_SIG_FORCE=y</code>
+(or the <code>module.sig_enforce=1</code> cmdline) makes an
+unsigned/badly-signed module fail with
+<code>Required key not available</code>. This is why a third-party or
+self-built driver (NVIDIA, a patched NIC driver) won’t load on a Secure
+Boot box until you sign it with an enrolled MOK — the fix is
+<code>/usr/src/kernels/.../scripts/sign-file sha256 MOK.priv MOK.der module.ko</code>
+after <code>mokutil --import MOK.der</code>.</p>
+<p><strong>Lockdown</strong> (<code>CONFIG_SECURITY_LOCKDOWN_LSM</code>,
+an LSM enabled via <code>lsm=...,lockdown</code> and/or auto-activated
+when Secure Boot is on) closes the <em>userspace-to-kernel</em> back
+doors that would let root modify or read the running kernel and thereby
+bypass the signature chain. Two modes:</p>
+<ul>
+<li><strong><code>integrity</code></strong> — blocks anything that lets
+userspace <em>modify</em> the running kernel: unsigned module load,
+<code>kexec</code> of unsigned images, unencrypted hibernation,
+<code>/dev/mem</code> <code>/dev/kmem</code> <code>/dev/kcore</code>
+<code>/dev/ioports</code>, direct PCI BAR access,
+<code>ioperm</code>/<code>iopl</code>, MSR writes, raw ACPI table
+override, and certain <code>debugfs</code>/BPF/kprobe operations that
+can write kernel memory.</li>
+<li><strong><code>confidentiality</code></strong> — everything integrity
+blocks, <em>plus</em> things that let userspace <em>read</em> kernel
+secrets (which could leak the KASLR offset or signing material): further
+restricts <code>bpf</code>, <code>perf</code>, kprobes, and
+kernel-memory reads.</li>
+</ul>
+<p>Runtime behavior: lockdown can only be <em>tightened</em> at runtime
+(<code>echo confidentiality &gt; /sys/kernel/security/lockdown</code>),
+<strong>never loosened</strong> without a reboot. The log line is
+<code>Lockdown: &lt;prog&gt;: &lt;feature&gt; is restricted; see man kernel_lockdown.7</code>.
+The senior implication: on a Secure Boot + lockdown box,
+<code>bpftrace</code>, <code>perf probe</code>, <code>/dev/mem</code>
+tools, and unsigned modules may <em>silently</em> be off the table for
+live debugging — you need to know this <em>before</em> an incident, and
+you need the alternative (signed tools, ftrace which is generally still
+allowed, or a maintenance-window reboot with lockdown off).</p>
+<h3 id="live-tracing-entry-points-ftrace-and-perf">8. Live tracing entry
+points: ftrace and perf</h3>
+<p>The kernel is instrumented from the factory. You do not need to
+rebuild or restart it to watch it work.</p>
+<p><strong>ftrace</strong> is the in-kernel tracer, driven entirely
+through <strong>tracefs</strong> at <code>/sys/kernel/tracing</code>
+(older path <code>/sys/kernel/debug/tracing</code>). No tools required —
+it’s all <code>echo</code>/<code>cat</code>. Core mechanism: the
+compiler emits a <code>mcount</code>/<code>__fentry__</code> call at the
+start of (almost) every kernel function
+(<code>CONFIG_FUNCTION_TRACER</code>); ftrace patches these NOPs at
+runtime to detour into the tracer. The important files:</p>
+<ul>
+<li><code>available_tracers</code> / <code>current_tracer</code> —
+select <code>function</code>, <code>function_graph</code> (shows call
+nesting + per-function duration),
+<code>wakeup</code>/<code>wakeup_rt</code> (scheduler latency),
+<code>irqsoff</code>/<code>preemptoff</code> (longest
+IRQ/preempt-disabled region), <code>nop</code>.</li>
+<li><code>set_ftrace_filter</code> / <code>set_ftrace_notrace</code> —
+restrict to functions matching a glob
+(e.g. <code>echo 'ext4_*' &gt; set_ftrace_filter</code>), because
+tracing <em>every</em> function is a firehose.</li>
+<li><code>trace</code> (snapshot) / <code>trace_pipe</code> (draining
+stream), <code>tracing_on</code> (master switch).</li>
+<li><code>available_events</code> + the <code>events/</code> tree — the
+hundreds of <strong>static tracepoints</strong> (stable, kernel-defined
+hook points: <code>sched:sched_switch</code>,
+<code>block:block_rq_issue</code>,
+<code>syscalls:sys_enter_openat</code>). Enable one with
+<code>echo 1 &gt; events/sched/sched_switch/enable</code>. Tracepoints
+are the <em>stable</em> substrate; kprobes (dynamic, patched-in via
+<code>int3</code>) reach anything but can break across versions.</li>
+<li><code>kprobe_events</code> / <code>uprobe_events</code> — define
+dynamic probes from userspace text.</li>
+</ul>
+<p>ftrace is the tracer you can always use on a locked-down box with
+nothing installed. That property alone makes it worth mastering.</p>
+<p><strong>perf</strong> (<code>tools/perf</code> in the tree,
+<code>perf_event_open(2)</code> under the hood) is the sampling/counting
+profiler and the front door to hardware PMU counters, software events,
+tracepoints, and dynamic probes: - <code>perf stat</code> — count events
+(cycles, instructions, cache-misses, context-switches, page-faults) for
+a command or system-wide. IPC (instructions/cycle) instantly tells you
+compute-bound vs. stalled. - <code>perf record -g</code> /
+<code>perf report</code> — sampled call-graph profiling → flame graphs.
+<code>-g</code> needs frame pointers or DWARF/LBR unwinding. -
+<code>perf sched record</code> / <code>perf sched latency</code> —
+scheduler runqueue latency, the tool that proves CFS/cgroup throttling
+from the intro (“50% CPU hiding throttling”). - <code>perf probe</code>
+— create a dynamic tracepoint at an arbitrary function/line/variable,
+then record it (subject to lockdown). - <code>perf top</code> — live
+sampling profile.</p>
+<p>The relationship: tracepoints are shared substrate; ftrace and perf
+and eBPF/bpftrace all consume them. eBPF (bpftrace/bcc, covered in the
+observability module) is the programmable layer on top. The discipline
+is <em>hypothesis-driven</em>: pick the tool that will confirm or
+falsify a specific claim, and state the expected output beforehand.</p>
+<h3 id="building-and-patching-a-kernel">9. Building and patching a
+kernel</h3>
+<p>The workflow, mechanism-first:</p>
+<ol type="1">
+<li><strong>Get a config.</strong> Never start from
+<code>make defconfig</code> on a real machine. Start from your running
+config (<code>/proc/config.gz</code> if
+<code>CONFIG_IKCONFIG_PROC</code>, or
+<code>/boot/config-$(uname -r)</code>), then
+<code>make olddefconfig</code> to fill new symbols with defaults, or
+<code>make localmodconfig</code> to <em>prune</em> to only the modules
+currently loaded (<code>lsmod</code>) — cutting build time from hours to
+minutes by not building thousands of unused drivers.
+<code>make menuconfig</code>/<code>nconfig</code> for interactive edits;
+the result is <code>.config</code>, and Kconfig dependency resolution
+(<code>select</code>/<code>depends on</code>) is why you can’t just set
+a symbol without its prerequisites.</li>
+<li><strong>Build.</strong> <code>make -j$(nproc)</code> builds
+<code>vmlinux</code> + <code>bzImage</code> + modules.
+<code>make modules_install</code> drops <code>.ko</code>s into
+<code>/lib/modules/$(uname -r)/</code> and runs <code>depmod</code>.
+<code>make install</code> copies the image to <code>/boot</code> and
+(via the distro’s kernel-install hooks) regenerates the initramfs and
+GRUB entries. Distro-packaged builds: <code>make bindeb-pkg</code>
+(Debian <code>.deb</code>) or
+<code>make binrpm-pkg</code>/<code>make rpm-pkg</code> (RPM) produce
+installable packages instead — the <em>correct</em> way to deploy a
+custom kernel to a fleet, because it’s tracked by the package manager
+(ties to the “don’t edit package-owned files” rule; a package-built
+kernel is upgradeable and removable).</li>
+<li><strong>Patch.</strong> <code>patch -p1 &lt; fix.patch</code> (or
+<code>git am</code> on a git tree). <code>-p1</code> strips the leading
+<code>a/</code>,<code>b/</code> path component that
+<code>git diff</code> emits — the single most common <code>patch</code>
+mistake. Rebuild only the touched objects (make is incremental). For a
+targeted fix, <code>git bisect</code> between a known-good and known-bad
+tag is how you find <em>which commit</em> introduced a regression, and
+it’s a genuine staff-level skill.</li>
+<li><strong><code>LOCALVERSION</code></strong> (or
+<code>CONFIG_LOCALVERSION</code>) tags your build
+(<code>6.6.0-mytest</code>) so <code>uname -r</code>, the modules dir,
+and GRUB entries don’t collide with the distro kernel.</li>
+</ol>
+<p>Scale/failure notes: a full allmodconfig build is ~50GB and can take
+an hour+; <code>localmodconfig</code> + <code>ccache</code> is how you
+iterate. <code>vermagic</code> (§2) means modules and vmlinux are a
+matched set — you cannot mix a distro module into your custom kernel.
+The <code>Module.symvers</code> file carries the symbol CRCs for
+MODVERSIONS across builds.</p>
+<hr />
+<h2 id="hands-on-labs">Hands-on labs</h2>
+<blockquote>
+<p>All labs assume a <strong>throwaway VM</strong> you can crash and
+rebuild (a cloud instance, <code>multipass launch</code>,
+<code>vagrant</code>, or a local VM). Commands are shown for a
+Debian/Ubuntu base and a RHEL/Rocky base where they diverge; pick the
+ones matching your VM. Run as root or with <code>sudo</code>. <strong>Do
+not run these on a machine you care about</strong> — several
+intentionally taint the kernel and one deliberately breaks module
+loading.</p>
+</blockquote>
+<h3 id="lab-1-author-load-break-and-introspect-a-kernel-module">Lab 1 —
+Author, load, break, and introspect a kernel module</h3>
+<p><strong>Objective.</strong> Build a minimal <code>.ko</code>, watch
+the exact syscalls <code>insmod</code>/<code>modprobe</code> use, drive
+it via a runtime-writable module parameter through
+<code>/sys/module/...</code>, observe the taint and refcount mechanics,
+and trigger the two canonical load failures (<code>vermagic</code>
+mismatch and unknown symbol).</p>
+<p><strong>Setup.</strong></p>
+<pre class="bash"><code># Debian/Ubuntu
+sudo apt-get update
+sudo apt-get install -y build-essential linux-headers-$(uname -r) strace kmod
+# RHEL/Rocky
+sudo dnf install -y gcc make kernel-devel-$(uname -r) strace kmod
+
+mkdir -p ~/lab_mod &amp;&amp; cd ~/lab_mod</code></pre>
+<p><strong>Steps.</strong></p>
+<ol type="1">
+<li>Write the module. It exposes a runtime-writable parameter and logs
+on load/unload:</li>
+</ol>
+<pre class="bash"><code>cat &gt; hello.c &lt;&lt;&#39;EOF&#39;
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kernel.h&gt;
+#include &lt;linux/moduleparam.h&gt;
+
+static int loudness = 1;
+module_param(loudness, int, 0644);        /* 0644 =&gt; writable via sysfs by root */
+MODULE_PARM_DESC(loudness, &quot;how loud to be&quot;);
+
+static int __init hello_init(void)
+{
+    pr_info(&quot;lab_mod: loaded, loudness=%d\n&quot;, loudness);
+    return 0;
+}
+static void __exit hello_exit(void)
+{
+    pr_info(&quot;lab_mod: unloaded\n&quot;);
+}
+module_init(hello_init);
+module_exit(hello_exit);
+MODULE_LICENSE(&quot;GPL&quot;);
+MODULE_AUTHOR(&quot;lab&quot;);
+MODULE_DESCRIPTION(&quot;throwaway lab module&quot;);
+EOF
+
+cat &gt; Makefile &lt;&lt;&#39;EOF&#39;
+obj-m := hello.o
+KDIR  := /lib/modules/$(shell uname -r)/build
+all:
+    $(MAKE) -C $(KDIR) M=$(PWD) modules
+clean:
+    $(MAKE) -C $(KDIR) M=$(PWD) clean
+EOF
+
+make</code></pre>
+<ol start="2" type="1">
+<li>Inspect the artifact before loading. Note the <code>vermagic</code>,
+the <code>parm</code>, and the license:</li>
+</ol>
+<pre class="bash"><code>modinfo hello.ko</code></pre>
+<ol start="3" type="1">
+<li>Load it while tracing the syscall. Confirm it uses
+<code>finit_module</code>, not <code>init_module</code>:</li>
+</ol>
+<pre class="bash"><code>sudo strace -e trace=init_module,finit_module,delete_module insmod hello.ko loudness=5
+sudo dmesg | tail -3</code></pre>
+<ol start="4" type="1">
+<li>Observe it in the running kernel and drive its parameter through
+sysfs at runtime:</li>
+</ol>
+<pre class="bash"><code>lsmod | grep hello                       # refcount (col 3) is 0, no users
+cat /sys/module/hello/parameters/loudness # =&gt; 5
+echo 42 | sudo tee /sys/module/hello/parameters/loudness
+cat /sys/module/hello/parameters/loudness # =&gt; 42, live-changed, no reload
+cat /sys/module/hello/taint 2&gt;/dev/null; cat /proc/sys/kernel/tainted</code></pre>
+<ol start="5" type="1">
+<li>Break it two ways. First, an <strong>unknown symbol</strong> — add a
+call to a non-exported function, rebuild, load, and read the precise
+dmesg reason:</li>
+</ol>
+<pre class="bash"><code>sed -i &#39;s|return 0;\n}|extern void this_symbol_does_not_exist(void);\n    this_symbol_does_not_exist();\n    return 0;\n}|&#39; hello.c 2&gt;/dev/null || \
+  perl -0pi -e &#39;s/return 0;\n\}/extern void this_symbol_does_not_exist(void);\n    this_symbol_does_not_exist();\n    return 0;\n}/&#39; hello.c
+make 2&gt;&amp;1 | tail -5     # note: WARNING: &quot;this_symbol_does_not_exist&quot; undefined
+sudo rmmod hello 2&gt;/dev/null
+sudo insmod hello.ko ; echo &quot;exit=$?&quot;
+sudo dmesg | tail -3    # =&gt; &quot;Unknown symbol this_symbol_does_not_exist&quot;</code></pre>
+<ol start="6" type="1">
+<li>Now a <strong>vermagic mismatch</strong>: hand-corrupt the vermagic
+and watch the format rejection (this proves the version-gate is a string
+compare, not magic):</li>
+</ol>
+<pre class="bash"><code># revert the symbol break first
+perl -0pi -e &#39;s/extern void this_symbol_does_not_exist\(void\);\n    this_symbol_does_not_exist\(\);\n//&#39; hello.c
+make
+# forge the vermagic string inside the .ko
+cp hello.ko hello_bad.ko
+CUR=$(modinfo -F vermagic hello.ko | awk &#39;{print $1}&#39;)
+python3 - &lt;&lt;PY
+data=open(&quot;hello_bad.ko&quot;,&quot;rb&quot;).read()
+data=data.replace(b&quot;vermagic=$CUR&quot;, b&quot;vermagic=0.0.0-fake&quot;)
+open(&quot;hello_bad.ko&quot;,&quot;wb&quot;).write(data)
+PY
+sudo insmod hello_bad.ko ; echo &quot;exit=$?&quot;
+sudo dmesg | tail -2    # =&gt; &quot;version magic ... should be ...&quot; / Invalid module format</code></pre>
+<p><strong>Prove it.</strong> The following one-liner shows the module
+loaded, its refcount, and that its parameter is the value you last wrote
+through sysfs — confirming you controlled a live kernel data structure
+from userspace without a reload:</p>
+<pre class="bash"><code>sudo rmmod hello 2&gt;/dev/null; sudo insmod hello.ko loudness=7
+echo 99 | sudo tee /sys/module/hello/parameters/loudness &gt;/dev/null
+printf &#39;loaded=%s refcnt=%s param=%s\n&#39; \
+  &quot;$(lsmod | awk &#39;/^hello/{print &quot;yes&quot;}&#39;)&quot; \
+  &quot;$(lsmod | awk &#39;/^hello/{print $3}&#39;)&quot; \
+  &quot;$(cat /sys/module/hello/parameters/loudness)&quot;
+# expected: loaded=yes refcnt=0 param=99
+sudo rmmod hello</code></pre>
+<p><strong>Teardown.</strong> Unload any lab module still resident and
+remove the build tree. The taint bit set by loading an out-of-tree
+module only clears on reboot, so reboot the throwaway VM if you need a
+clean <code>/proc/sys/kernel/tainted</code>.</p>
+<pre class="bash"><code>sudo rmmod hello 2&gt;/dev/null; sudo rmmod hello_bad 2&gt;/dev/null
+rm -rf ~/lab_mod
+cat /proc/sys/kernel/tainted   # nonzero until reboot if a module was loaded</code></pre>
+<h3
+id="lab-2-read-the-kernel-like-a-map-proc-sys-kallsyms-and-the-d-state-hunt">Lab
+2 — Read the kernel like a map: /proc, /sys, kallsyms, and the D-state
+hunt</h3>
+<p><strong>Objective.</strong> Use the pseudo-filesystems as a forensic
+surface: resolve a running symbol from <code>/proc/kallsyms</code>, walk
+the sysfs kobject/device graph by following symlinks, and reproduce the
+“healthy load average hides blocked-on-I/O tasks” scenario by
+manufacturing a D-state task and reading <em>where in the kernel</em> it
+is stuck via <code>/proc/PID/wchan</code> and
+<code>/proc/PID/stack</code>.</p>
+<p><strong>Setup.</strong></p>
+<pre class="bash"><code># tools available on any base image
+command -v stress-ng || sudo apt-get install -y stress-ng || sudo dnf install -y stress-ng</code></pre>
+<p><strong>Steps.</strong></p>
+<ol type="1">
+<li>Confirm what you booted with and the KASLR offset in play:</li>
+</ol>
+<pre class="bash"><code>cat /proc/cmdline
+sudo dmesg | grep -i &#39;kernel offset&#39; || echo &quot;no offset line (nokaslr or not logged)&quot;</code></pre>
+<ol start="2" type="1">
+<li>Read the symbol map. See kptr_restrict censor it, then (as root)
+resolve a real address:</li>
+</ol>
+<pre class="bash"><code>grep &#39; sys_call_table\| commit_creds\|T do_sys_openat2&#39; /proc/kallsyms | head
+cat /proc/sys/kernel/kptr_restrict
+# as non-root many addresses show as 0000000000000000; as root they resolve</code></pre>
+<ol start="3" type="1">
+<li>Walk the device model by following sysfs symlinks. Pick your root
+disk and traverse from the block device up to the physical bus:</li>
+</ol>
+<pre class="bash"><code>DISK=$(lsblk -ndo pkname $(findmnt -no SOURCE /) 2&gt;/dev/null || echo sda)
+ls -l /sys/class/block/$DISK/device 2&gt;/dev/null
+readlink -f /sys/class/block/$DISK 2&gt;/dev/null
+cat /sys/block/$DISK/queue/scheduler        # the I/O scheduler knob, one-value-per-file
+cat /sys/block/$DISK/queue/rotational        # 0=SSD/NVMe, 1=spinning — a kobject attribute</code></pre>
+<ol start="4" type="1">
+<li>Manufacture the invisible failure. Create heavy uninterruptible I/O
+and observe that load average climbs while these tasks are <em>not</em>
+consuming CPU:</li>
+</ol>
+<pre class="bash"><code># Run background I/O that spends time in D-state
+stress-ng --hdd 4 --hdd-bytes 1G --timeout 60s &amp;
+sleep 5
+uptime                                   # load average is high
+# Find D-state tasks and where in the kernel they are blocked:
+ps -eo pid,stat,wchan:32,comm | awk &#39;$2 ~ /D/&#39;</code></pre>
+<ol start="5" type="1">
+<li>For one blocked PID, read its kernel-side blocking point
+precisely:</li>
+</ol>
+<pre class="bash"><code>DPID=$(ps -eo pid,stat --no-headers | awk &#39;$2 ~ /D/ {print $1; exit}&#39;)
+echo &quot;D-state pid: $DPID&quot;
+cat /proc/$DPID/wchan; echo
+sudo cat /proc/$DPID/stack 2&gt;/dev/null | head    # kernel stack: the exact call chain
+cat /proc/$DPID/status | grep -E &#39;State|VmRSS&#39;</code></pre>
+<p><strong>Prove it.</strong> Show simultaneously that CPU is
+<em>not</em> the bottleneck (idle time is high) while load average is
+elevated <em>because</em> of D-state tasks — the exact reading a senior
+gives that a “CPU is only 30%, we’re fine” mid-level misses:</p>
+<pre class="bash"><code>NR_D=$(ps -eo stat --no-headers | grep -c &#39;^D&#39;)
+LOAD=$(cut -d&#39; &#39; -f1 /proc/loadavg)
+IDLE=$(grep &#39;cpu &#39; /proc/stat | awk &#39;{print $5/($2+$3+$4+$5+$6+$7+$8)*100}&#39;)
+printf &#39;loadavg=%s  D-state tasks=%s  cpu_idle=%.0f%%\n&#39; &quot;$LOAD&quot; &quot;$NR_D&quot; &quot;$IDLE&quot;
+# expected while stress-ng runs: load high, several D tasks, idle still substantial
+kill %1 2&gt;/dev/null; wait 2&gt;/dev/null</code></pre>
+<h3
+id="lab-3-sysctl-and-kernel-cmdline-layered-config-namespaces-and-reboot-time-levers">Lab
+3 — sysctl and kernel cmdline: layered config, namespaces, and
+reboot-time levers</h3>
+<p><strong>Objective.</strong> Prove the <code>/proc/sys</code> ↔︎
+<code>sysctl</code> identity, demonstrate the drop-in load-order
+precedence, show that a <code>net.*</code> sysctl is
+<em>per-network-namespace</em> (so a container can’t see the host’s
+value), and read the runtime-vs-persistent distinction that causes “it
+worked until reboot” tickets.</p>
+<p><strong>Setup.</strong></p>
+<pre class="bash"><code>sudo sysctl --version
+command -v unshare || sudo apt-get install -y util-linux || true</code></pre>
+<p><strong>Steps.</strong></p>
+<ol type="1">
+<li>Prove the two views are one object:</li>
+</ol>
+<pre class="bash"><code>sysctl net.ipv4.ip_forward
+cat /proc/sys/net/ipv4/ip_forward
+echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward &gt;/dev/null
+sysctl net.ipv4.ip_forward            # =&gt; 1, same object, changed via the /proc face</code></pre>
+<ol start="2" type="1">
+<li>Demonstrate drop-in precedence and the exact apply order:</li>
+</ol>
+<pre class="bash"><code>echo &#39;net.ipv4.ip_forward = 0&#39; | sudo tee /etc/sysctl.d/10-lab.conf &gt;/dev/null
+echo &#39;net.ipv4.ip_forward = 1&#39; | sudo tee /etc/sysctl.d/99-lab.conf &gt;/dev/null
+sudo sysctl --system 2&gt;&amp;1 | grep -A0 &#39;ip_forward\|lab.conf&#39;
+sysctl net.ipv4.ip_forward            # 99- file wins over 10- (lexical, later wins) =&gt; 1</code></pre>
+<ol start="3" type="1">
+<li>Show a <code>net.*</code> sysctl is namespaced. Enter a fresh
+network namespace and see it revert to the kernel default, independent
+of the host value you set:</li>
+</ol>
+<pre class="bash"><code>sysctl net.ipv4.ip_forward                       # host: 1 (from step 2)
+sudo unshare --net sysctl net.ipv4.ip_forward     # new netns: 0 (default), host unaffected
+# and setting it inside the ns does NOT change the host:
+sudo unshare --net sh -c &#39;sysctl -w net.ipv4.ip_forward=1 &gt;/dev/null; sysctl net.ipv4.ip_forward&#39;
+sysctl net.ipv4.ip_forward                        # host still 1, untouched by the ns</code></pre>
+<ol start="4" type="1">
+<li>Contrast with a <strong>global</strong> (non-namespaced) sysctl to
+feel the difference:</li>
+</ol>
+<pre class="bash"><code>sudo unshare --net cat /proc/sys/vm/swappiness    # same as host — vm.* is global
+cat /proc/sys/vm/swappiness</code></pre>
+<ol start="5" type="1">
+<li>Read the reboot-time levers without rebooting (inspection only, so
+the lab stays non-destructive). Identify how you <em>would</em> drop to
+an emergency shell and what KASLR/lockdown state you’re in:</li>
+</ol>
+<pre class="bash"><code>grep -o &#39;crashkernel=[^ ]*\|mitigations=[^ ]*\|nokaslr\|lsm=[^ ]*&#39; /proc/cmdline || echo &quot;none of those set&quot;
+cat /sys/kernel/security/lockdown 2&gt;/dev/null || echo &quot;lockdown LSM not active&quot;
+# The bracketed value in that file is the CURRENT mode; others are selectable-tighter-only.</code></pre>
+<p><strong>Prove it.</strong> One block that demonstrates the namespace
+isolation and the persistence layering together, which is the
+combination behind most sysctl support tickets:</p>
+<pre class="bash"><code>HOST=$(sysctl -n net.ipv4.ip_forward)
+NS=$(sudo unshare --net sysctl -n net.ipv4.ip_forward)
+WINNER=$(sudo sysctl --system 2&gt;&amp;1 | grep -o &#39;/etc/sysctl.d/[0-9]*-lab.conf&#39; | tail -1)
+printf &#39;host_ip_forward=%s  fresh_netns_ip_forward=%s  last_applied_dropin=%s\n&#39; &quot;$HOST&quot; &quot;$NS&quot; &quot;$WINNER&quot;
+# expected: host_ip_forward=1  fresh_netns_ip_forward=0  last_applied_dropin=/etc/sysctl.d/99-lab.conf
+sudo rm -f /etc/sysctl.d/10-lab.conf /etc/sysctl.d/99-lab.conf</code></pre>
+<p><strong>Teardown.</strong> Remove the drop-in files (idempotent with
+the prove-it step) and reset the runtime value you changed on the host
+back to the kernel default. The netns changes were ephemeral and
+vanished with the namespace.</p>
+<pre class="bash"><code>sudo rm -f /etc/sysctl.d/10-lab.conf /etc/sysctl.d/99-lab.conf
+echo 0 | sudo tee /proc/sys/net/ipv4/ip_forward &gt;/dev/null   # back to default; reapply your real config with: sudo sysctl --system</code></pre>
+<h3
+id="lab-4-live-tracing-with-ftrace-and-perf-make-the-invisible-visible-no-rebuild">Lab
+4 — Live tracing with ftrace and perf: make the invisible visible, no
+rebuild</h3>
+<p><strong>Objective.</strong> Use only in-kernel machinery to watch the
+kernel work: enable a static tracepoint through raw tracefs, capture a
+function-graph trace of a real syscall path, and use <code>perf</code>
+to prove a workload’s IPC and to catch scheduler wakeups. This is the
+“answer arbitrary questions on a locked box” skill.</p>
+<p><strong>Setup.</strong></p>
+<pre class="bash"><code># Debian/Ubuntu
+sudo apt-get install -y linux-perf trace-cmd || sudo apt-get install -y linux-tools-$(uname -r) trace-cmd
+# RHEL/Rocky
+sudo dnf install -y perf trace-cmd
+sudo mount -t tracefs nodev /sys/kernel/tracing 2&gt;/dev/null || true
+cd /sys/kernel/tracing</code></pre>
+<p><strong>Steps.</strong></p>
+<ol type="1">
+<li>Survey what the running kernel already exposes. No module, no
+rebuild:</li>
+</ol>
+<pre class="bash"><code>wc -l available_events                 # hundreds of static tracepoints
+cat available_tracers                  # function, function_graph, wakeup, irqsoff, nop, ...</code></pre>
+<ol start="2" type="1">
+<li>Enable the <code>sched_switch</code> static tracepoint the raw way
+and watch context switches live, then turn it off:</li>
+</ol>
+<pre class="bash"><code>echo 1 | sudo tee events/sched/sched_switch/enable &gt;/dev/null
+sudo cat trace_pipe | head -20         # ctrl-C or it streams; each line is a real switch
+echo 0 | sudo tee events/sched/sched_switch/enable &gt;/dev/null</code></pre>
+<ol start="3" type="1">
+<li>Function-graph trace the <code>openat</code> path, filtered so it’s
+not a firehose. This shows call nesting and per-function timing inside
+the kernel:</li>
+</ol>
+<pre class="bash"><code>echo function_graph | sudo tee current_tracer &gt;/dev/null
+echo &#39;do_sys_openat2&#39; | sudo tee set_graph_function &gt;/dev/null
+echo 1 | sudo tee tracing_on &gt;/dev/null
+cat /etc/hostname &gt;/dev/null            # trigger an openat
+echo 0 | sudo tee tracing_on &gt;/dev/null
+sudo head -40 trace                     # the kernel-side call tree of open(2)
+# reset
+echo nop | sudo tee current_tracer &gt;/dev/null
+echo | sudo tee set_graph_function &gt;/dev/null</code></pre>
+<ol start="4" type="1">
+<li>Switch to perf. Measure IPC to distinguish compute-bound from
+stalled — the reading a senior gives instead of “CPU is busy”:</li>
+</ol>
+<pre class="bash"><code>perf stat -- dd if=/dev/zero of=/dev/null bs=1M count=200000 2&gt;&amp;1 | \
+  grep -E &#39;instructions|cycles|insn per cycle|task-clock&#39;</code></pre>
+<ol start="5" type="1">
+<li>Catch scheduler behavior with perf’s sched tooling (proves runqueue
+latency, the throttling tell):</li>
+</ol>
+<pre class="bash"><code>sudo perf sched record -- sleep 3 2&gt;/dev/null
+sudo perf sched latency 2&gt;/dev/null | head -20   # per-task avg/max scheduling delay
+rm -f perf.data*</code></pre>
+<p><strong>Prove it.</strong> Show that you drove a specific kernel code
+path with ftrace (the trace names the in-kernel functions of
+<code>open(2)</code>) and that perf attributes real hardware counters to
+a workload — both without loading a module or restarting anything:</p>
+<pre class="bash"><code>cd /sys/kernel/tracing
+echo function | sudo tee current_tracer &gt;/dev/null
+echo &#39;vfs_open&#39; | sudo tee set_ftrace_filter &gt;/dev/null
+echo 1 | sudo tee tracing_on &gt;/dev/null; cat /etc/hostname &gt;/dev/null; echo 0 | sudo tee tracing_on &gt;/dev/null
+HIT=$(sudo grep -c vfs_open trace)
+IPC=$(perf stat -- sleep 0.2 2&gt;&amp;1 | awk &#39;/insn per cycle/{print $4}&#39;)
+echo nop | sudo tee current_tracer &gt;/dev/null; echo | sudo tee set_ftrace_filter &gt;/dev/null
+printf &#39;ftrace_saw_vfs_open=%s_times  measured_ipc=%s\n&#39; &quot;$HIT&quot; &quot;$IPC&quot;
+# expected: a nonzero hit count and a real IPC figure, proving live introspection with zero rebuild</code></pre>
+<p><strong>Teardown.</strong> Return the global tracing state to idle.
+tracefs settings persist for the life of the boot, so a box left with a
+tracer active and events enabled keeps paying the overhead until you
+reset it (or reboot).</p>
+<pre class="bash"><code>cd /sys/kernel/tracing
+echo 0 | sudo tee tracing_on &gt;/dev/null
+echo nop | sudo tee current_tracer &gt;/dev/null
+echo | sudo tee set_ftrace_filter &gt;/dev/null
+echo | sudo tee set_graph_function &gt;/dev/null
+echo 0 | sudo tee events/sched/sched_switch/enable &gt;/dev/null
+sudo tee /sys/kernel/tracing/trace &gt;/dev/null &lt;/dev/null   # clear the ring buffer
+rm -f ~/perf.data* perf.data*</code></pre>
+<hr />
+<h2 id="curated-resources">Curated resources</h2>
+<p><strong>Primary kernel documentation (the source of
+truth)</strong></p>
+<ul>
+<li><a href="https://docs.kernel.org/">The Linux Kernel documentation —
+docs.kernel.org</a> — The canonical, versioned docs. For this module,
+read <code>admin-guide/README</code> (build),
+<code>admin-guide/kernel-parameters</code> (the exhaustive cmdline
+reference — bookmark it), <code>admin-guide/module-signing</code>,
+<code>admin-guide/tainted-kernels</code>,
+<code>admin-guide/sysctl/</code>, and <code>admin-guide/LSM/</code>.
+When a blog and this disagree, this wins.</li>
+<li><a
+href="https://docs.kernel.org/admin-guide/kernel-parameters.html">kernel-parameters.txt
+/ admin-guide/kernel-parameters</a> — Every boot parameter the kernel
+core and subsystems accept, authoritatively. This is the reference
+behind §5; you will return to it constantly for real incidents
+(<code>mitigations=</code>, <code>isolcpus=</code>,
+<code>crashkernel=</code>, <code>rd.*</code>).</li>
+<li><a href="https://docs.kernel.org/core-api/kobject.html">Everything
+you never wanted to know about kobjects, ksets, and ktypes</a> — The
+mechanism <em>under</em> sysfs. Explains why <code>/sys</code> is shaped
+the way it is and why “one value per file” is a rule. Read before
+treating <code>/sys</code> as more than a curiosity.</li>
+<li><a href="https://docs.kernel.org/filesystems/sysfs.html">sysfs — The
+filesystem for exporting kernel objects</a> + the
+<code>Documentation/ABI/</code> tree — The sysfs ABI contract
+(stable/testing/obsolete). Knowing an attribute is
+<code>ABI/stable</code> vs <code>ABI/testing</code> tells you whether
+you can build tooling on it.</li>
+<li><a href="https://docs.kernel.org/trace/ftrace.html">ftrace —
+Function Tracer (kernel.org)</a> — The definitive tracefs reference for
+Lab 4. Covers <code>function_graph</code>, filters, triggers, the events
+tree, and the per-CPU ring buffers. The substrate perf and eBPF sit on;
+master the raw interface so you can trace a locked-down box with nothing
+installed.</li>
+<li><a
+href="https://man7.org/linux/man-pages/man7/kernel_lockdown.7.html">kernel_lockdown(7)
+— man7</a> — Authoritative list of what integrity vs confidentiality
+mode restrict (§7). The reference to cite when a customer’s
+<code>bpftrace</code>/<code>perf probe</code>/<code>/dev/mem</code> tool
+“mysteriously” fails on a Secure Boot box.</li>
+<li><a href="https://rockyman.org/">rockyman.org</a> —
+https://rockyman.org/ — authoritative Rocky Linux man-page index,
+versioned 8/9/10; verify exact flags/config keys here (the
+<code>mokutil</code>, <code>sysctl</code>, <code>kmod</code>
+(<code>modinfo</code>/<code>insmod</code>/<code>modprobe</code>),
+<code>lsblk</code>, <code>findmnt</code>, and <code>unshare</code>
+invocations in the labs above were checked against the 9.x pages
+here).</li>
+</ul>
+<p><strong>Module signing / Secure Boot / lockdown (production
+hardening)</strong></p>
+<ul>
+<li><a
+href="https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/managing_monitoring_and_updating_the_kernel/signing-a-kernel-and-modules-for-secure-boot_managing-monitoring-and-updating-the-kernel">Red
+Hat: Signing a kernel and modules for Secure Boot (RHEL 8/9)</a> — The
+exact MOK + <code>sign-file</code> workflow you will actually run on
+RHEL/Rocky to make a self-built or third-party driver load under Secure
+Boot. Directly relevant to CIQ support tickets (“Required key not
+available”).</li>
+<li><a
+href="https://rodsbooks.com/efi-bootloaders/sb-modules.html">rodsbooks:
+Signing Kernel Modules for Secure Boot</a> — The clearest independent
+explanation of the shim→MOK→kernel-keyring trust chain, disentangling
+the three overlapping mechanisms (firmware Secure Boot vs
+<code>MODULE_SIG_FORCE</code> vs lockdown) that people conflate.</li>
+<li><a href="https://wiki.debian.org/SecureBoot">Debian Wiki:
+SecureBoot</a> — The non-RHEL view of the same chain (shim,
+<code>sbsign</code>, MOK), useful for cross-distro fluency.</li>
+</ul>
+<p><strong>KASLR</strong></p>
+<ul>
+<li><a
+href="https://0xax.gitbooks.io/linux-insides/content/Booting/linux-bootstrap-6.html">linux-insides:
+Kernel load address randomization (0xAX)</a> — Source-level walk of
+where in the decompression stub the random slot is actually chosen. This
+is the “how it works” behind §6, not just “it randomizes the base.”</li>
+</ul>
+<p><strong>Building / configuring</strong></p>
+<ul>
+<li><a
+href="https://kernel-team.pages.debian.net/kernel-handbook/ch-common-tasks.html">Debian
+Kernel Handbook — Common kernel tasks</a> — The
+<code>make bindeb-pkg</code> / <code>localmodconfig</code> workflow done
+the packaged (fleet-correct) way. Pairs with the “don’t edit
+package-owned files; deploy as a package” principle.</li>
+<li><a
+href="https://www.kernel.org/doc/html/latest/admin-guide/README.html">kernel.org
+admin-guide/README (Linux 6.x release notes)</a> — The upstream build
+instructions and config-target reference (<code>olddefconfig</code>,
+<code>localmodconfig</code>, <code>menuconfig</code>), always current
+for the tip.</li>
+</ul>
+<p><strong>Books (deep, durable)</strong></p>
+<ul>
+<li><a
+href="https://www.amazon.com/Linux-Kernel-Development-Robert-Love/dp/0672329468">Linux
+Kernel Development, 3rd ed — Robert Love</a> — The best on-ramp to
+kernel architecture: process descriptor, the module system, memory, VFS,
+and the synchronization rules. Read the modules and “kernel data
+structures” chapters for this module.</li>
+<li><a
+href="https://www.oreilly.com/library/view/understanding-the-linux-kernel/0596005652/">Understanding
+the Linux Kernel, 3rd ed — Bovet &amp; Cesati</a> — The structural
+counterpart: actual data structures and code paths. Dated to 2.6 but the
+architecture (how a subsystem is wired, how the module loader relocates
+code) is still the best paper explanation.</li>
+<li><a href="https://lwn.net/Kernel/LDD3/">Linux Device Drivers, 3rd ed
+(LDD3, free)</a> — Even if you never ship a driver, chapters 2
+(building/running a module) and 14 (the device model/sysfs/kobjects) are
+exactly this module’s mechanism, hands-on. Use <a
+href="https://github.com/martinezjavier/ldd3">martinezjavier/ldd3</a>
+for examples that build on modern kernels.</li>
+<li><a
+href="https://0xax.gitbooks.io/linux-insides/content/">linux-insides —
+0xAX (free)</a> — Source-level tour of boot, decompression, and early
+init; the resource that ties abstract stages to specific functions in
+<code>arch/x86</code>.</li>
+</ul>
+<p><strong>Ongoing (stay current — the kernel moves)</strong></p>
+<ul>
+<li><a href="https://lwn.net/Kernel/Index/">LWN.net Kernel Index</a> —
+The one subscription worth paying for. Module-loader changes, the
+<code>kernel/module.c</code> → <code>kernel/module/</code> split,
+lockdown evolution, KASLR side-channel breaks, and tracing/BPF changes
+are all explained here first, with the actual reasoning. Reading it
+weekly is how your knowledge avoids going silently stale.</li>
+<li><a href="https://bootlin.com/docs/">Bootlin training materials</a> —
+Continuously updated, CC-licensed slides on the kernel build, the
+driver/device model, and sysfs against <em>current</em> kernels (unlike
+the 2.6-era books). Good for refreshing book material against
+reality.</li>
+</ul>
+<hr />
+<h2 id="senior-signal">Senior signal</h2>
+<ul>
+<li><strong>Distinguishes the three artifacts and reasons about
+each.</strong> Knows <code>vmlinux</code> (debug/symbols),
+<code>vmlinuz</code>/<code>bzImage</code> (bootable, compressed,
+self-decompressing, KASLR-placed), and the running image are different
+things — and that a crash address is meaningless without the boot’s
+KASLR offset, which they know to pull from
+<code>dmesg</code>/<code>crash</code>.</li>
+<li><strong>Disentangles Secure Boot vs <code>module.sig_enforce</code>
+vs lockdown on sight.</strong> When a self-built or NVIDIA driver won’t
+load, a senior immediately reads <code>dmesg</code> for
+<code>Required key not available</code>, checks
+<code>mokutil --sb-state</code> and the loaded keyrings, and reaches for
+<code>sign-file</code> + MOK enrollment — rather than telling the
+customer to disable Secure Boot (the mid-level “fix” that fails the
+security posture).</li>
+<li><strong>Knows which tracer survives lockdown.</strong> On a Secure
+Boot + confidentiality-lockdown box,
+<code>bpftrace</code>/<code>perf probe</code>/<code>/dev/mem</code> may
+be off the table; ftrace via raw tracefs generally is not. A senior
+plans the debugging approach around the box’s actual lockdown mode
+<em>before</em> the incident, and knows the only way to loosen lockdown
+is a reboot.</li>
+<li><strong>Treats <code>/proc</code> and <code>/sys</code> as a
+forensic instrument, not a curiosity.</strong> Reads
+<code>/proc/PID/wchan</code> and <code>/proc/PID/stack</code> to find
+<em>where in the kernel</em> a D-state task is blocked, counts
+<code>/proc/PID/fd/</code> for fd leaks, and follows <code>/sys</code>
+symlinks to walk the device/bus/driver graph — proving I/O saturation
+while a mid-level stares at a “healthy” CPU graph.</li>
+<li><strong>Understands sysctl precedence and namespacing cold.</strong>
+Knows the <code>/etc/sysctl.d</code> → <code>/run</code> →
+<code>/usr/lib</code> → <code>sysctl.conf</code> load order (later file
+wins), that <code>net.*</code> is per-netns while
+<code>vm.*</code>/<code>kernel.*</code> are global, and that “it worked
+until reboot” means a runtime <code>-w</code> that was never persisted.
+Diagnoses the container-can’t-set-<code>vm.max_map_count</code> class of
+bug from first principles.</li>
+<li><strong>Uses <code>vermagic</code> and taint flags as diagnostic
+signal.</strong> Reads <code>/proc/sys/kernel/tainted</code> and decodes
+the bitmask before filing a bug, knows an
+out-of-tree/unsigned/proprietary module taints the kernel and that
+engineering will discount reports from a tainted kernel, and explains
+“Invalid module format” as a version-string gate rather than
+corruption.</li>
+<li><strong>Deploys custom kernels as packages, not
+<code>make install</code> on a live box.</strong> Reaches for
+<code>binrpm-pkg</code>/<code>bindeb-pkg</code> +
+<code>localmodconfig</code> + <code>LOCALVERSION</code> so the kernel is
+package-manager-tracked, upgradeable, and removable — and uses
+<code>git bisect</code> to pin a regression to a single commit rather
+than guessing.</li>
+<li><strong>Commands the boot-time levers.</strong> Knows
+<code>rd.break</code> to recover a box that won’t boot,
+<code>mitigations=off</code> as an explicit perf-vs-security decision
+(not a default), <code>panic=N</code> so prod nodes reboot instead of
+hanging, and <code>earlycon</code>/<code>console=ttyS0</code> to get
+output when the kernel dies before the console is up.</li>
+<li><strong>Practices hypothesis-driven tracing.</strong> States what
+output would confirm or falsify a theory, then picks ftrace
+<code>function_graph</code> vs <code>perf sched latency</code> vs a
+specific tracepoint accordingly — instead of running <code>top</code>
+and guessing.</li>
+</ul>
+<hr />
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="10-namespaces-and-cgroups-v2.html">10 - Namespaces and
+cgroups v2</a> — This module treated the kernel as one address space;
+that module drills into the namespace/cgroup machinery that carves it
+into isolated views, and picks up the per-netns sysctl thread (Lab 3)
+and the <code>unshare</code> mechanics.</li>
+<li><a href="11-observability-and-tracing-with-ebpf.html">11 -
+Observability and Tracing with eBPF</a> — The programmable layer above
+the ftrace/perf tracepoint substrate introduced in §8/Lab 4; also where
+the lockdown-vs-BPF restrictions from §7 bite hardest.</li>
+<li><a href="06-networking-deep.html">06 - Networking Deep</a> — Expands
+the <code>net.*</code> sysctl knobs and per-network-namespace behavior
+seen in Lab 3 into the full networking stack.</li>
+<li>01 - The GPU Stack on Linux — NVIDIA/GPU drivers are out-of-tree
+modules: the module-signing, MOK enrollment, lockdown, and taint
+mechanics (§2/§7) are precisely what a GPU driver install hits on a
+Secure Boot box, and the #1 “Required key not available” support
+ticket.</li>
+<li>06 - Apptainer for HPC Containers — Apptainer depends on kernel
+features gated here (user namespaces, module availability, lockdown
+constraints); knowing which cmdline/sysctl toggles govern them is what
+unblocks rootless HPC containers.</li>
+<li>05 - EC2 and Compute Internals — cloud instance kernels: KASLR,
+<code>mitigations=</code>, the boot cmdline, and per-instance sysctl
+tuning are the same levers, and the tainted-kernel/module story governs
+custom drivers on cloud VMs.</li>
+</ul>
+</main>
+</div></body></html>
