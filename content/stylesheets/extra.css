@@ -1,0 +1,342 @@
+/* ==========================================================================
+   extra.css — visual polish layer for the Linux Training Course
+   Sits on top of mkdocs-material. Restrained refinements only:
+   typography, tables, admonitions, code blocks, dark-mode surfaces,
+   task-list checkboxes, and a homepage hero / module-card grid.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Design tokens
+   -------------------------------------------------------------------------- */
+
+:root {
+  --ltc-radius: 0.5rem;
+  --ltc-radius-lg: 0.75rem;
+  --ltc-border-width: 1px;
+  --ltc-content-measure: 44em; /* comfortable line length for prose */
+  --ltc-transition: 120ms ease;
+}
+
+/* Light scheme surfaces / accents */
+[data-md-color-scheme="default"] {
+  --ltc-surface: #ffffff;
+  --ltc-surface-raised: #f8f9fb;
+  --ltc-border: rgba(0, 0, 0, 0.08);
+  --ltc-border-strong: rgba(0, 0, 0, 0.14);
+  --ltc-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 10px rgba(0, 0, 0, 0.04);
+  --ltc-code-bg: #f4f5f7;
+  --ltc-table-stripe: rgba(0, 0, 0, 0.025);
+  --ltc-table-header-bg: #eef0f3;
+  --ltc-hero-grad-start: #eef2f6;
+  --ltc-hero-grad-end: #f9fafc;
+}
+
+/* Dark scheme surfaces / accents — softer than Material's flat slate */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #1b1f26;
+  --md-default-bg-color--light: #1b1f26;
+  --md-default-bg-color--lightest: #1b1f26;
+
+  --ltc-surface: #232830;
+  --ltc-surface-raised: #2a3039;
+  --ltc-border: rgba(255, 255, 255, 0.08);
+  --ltc-border-strong: rgba(255, 255, 255, 0.14);
+  --ltc-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 16px rgba(0, 0, 0, 0.35);
+  --ltc-code-bg: #1e232b;
+  --ltc-table-stripe: rgba(255, 255, 255, 0.025);
+  --ltc-table-header-bg: #2a3039;
+  --ltc-hero-grad-start: #232a35;
+  --ltc-hero-grad-end: #1b1f26;
+}
+
+/* --------------------------------------------------------------------------
+   2. Typography — measured for long-form technical reading
+   -------------------------------------------------------------------------- */
+
+.md-typeset {
+  font-size: 0.72rem;
+  line-height: 1.7;
+}
+
+.md-typeset p,
+.md-typeset ul,
+.md-typeset ol,
+.md-typeset dl {
+  max-width: var(--ltc-content-measure);
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  letter-spacing: -0.01em;
+  font-weight: 700;
+}
+
+.md-typeset h1 {
+  margin-bottom: 1.25em;
+}
+
+.md-typeset h2 {
+  margin-top: 2em;
+  padding-top: 0.6em;
+  border-top: var(--ltc-border-width) solid var(--ltc-border);
+}
+
+.md-typeset h3 {
+  margin-top: 1.6em;
+}
+
+.md-typeset a {
+  text-decoration-thickness: from-font;
+  text-underline-offset: 0.15em;
+}
+
+.md-typeset code {
+  font-size: 0.85em;
+  border-radius: 0.3rem;
+}
+
+/* --------------------------------------------------------------------------
+   3. Tables — the default is cramped and harsh in dark mode
+   -------------------------------------------------------------------------- */
+
+.md-typeset table:not([class]) {
+  display: table;
+  width: 100%;
+  border: var(--ltc-border-width) solid var(--ltc-border);
+  border-radius: var(--ltc-radius);
+  overflow: hidden;
+  box-shadow: var(--ltc-shadow);
+  font-size: 0.72rem;
+}
+
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+  padding: 0.6em 1em;
+  border: none;
+  border-bottom: var(--ltc-border-width) solid var(--ltc-border);
+}
+
+.md-typeset table:not([class]) th {
+  background-color: var(--ltc-table-header-bg);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.md-typeset table:not([class]) tr:last-child td {
+  border-bottom: none;
+}
+
+.md-typeset table:not([class]) tr:nth-child(even) td {
+  background-color: var(--ltc-table-stripe);
+}
+
+.md-typeset table:not([class]) tr:hover td {
+  background-color: var(--ltc-border);
+  transition: background-color var(--ltc-transition);
+}
+
+/* --------------------------------------------------------------------------
+   4. Admonitions — softer surfaces, clearer left-edge accent
+   -------------------------------------------------------------------------- */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border: var(--ltc-border-width) solid var(--ltc-border);
+  border-left-width: 4px;
+  border-radius: var(--ltc-radius);
+  box-shadow: var(--ltc-shadow);
+  background-color: var(--ltc-surface-raised);
+  overflow: hidden;
+}
+
+.md-typeset .admonition-title,
+.md-typeset summary {
+  background-color: transparent;
+  font-weight: 700;
+}
+
+.md-typeset .admonition-title::before,
+.md-typeset summary::before {
+  opacity: 0.9;
+}
+
+/* --------------------------------------------------------------------------
+   5. Code blocks — polish, subtle elevation
+   -------------------------------------------------------------------------- */
+
+.md-typeset pre,
+.md-typeset .highlight {
+  border-radius: var(--ltc-radius-lg);
+}
+
+.md-typeset pre > code {
+  border-radius: var(--ltc-radius-lg);
+}
+
+.md-typeset .highlight pre {
+  background-color: var(--ltc-code-bg);
+  box-shadow: var(--ltc-shadow);
+  border: var(--ltc-border-width) solid var(--ltc-border);
+}
+
+.md-typeset .highlight span.filename {
+  border-radius: var(--ltc-radius-lg) var(--ltc-radius-lg) 0 0;
+  background-color: var(--ltc-table-header-bg);
+  border: var(--ltc-border-width) solid var(--ltc-border);
+  border-bottom: none;
+  font-weight: 600;
+}
+
+.md-clipboard {
+  border-radius: 0.3rem;
+  transition: background-color var(--ltc-transition);
+}
+
+/* --------------------------------------------------------------------------
+   6. Task lists — clearer checkbox styling
+   -------------------------------------------------------------------------- */
+
+.md-typeset .task-list-item {
+  list-style-type: none;
+}
+
+.md-typeset .task-list-control .task-list-indicator::before {
+  border-radius: 0.25rem;
+  border: var(--ltc-border-width) solid var(--ltc-border-strong);
+}
+
+.md-typeset [type="checkbox"]:checked + .task-list-indicator::before {
+  background-color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+}
+
+/* --------------------------------------------------------------------------
+   7. General surface elevation for content body (dark mode especially)
+   -------------------------------------------------------------------------- */
+
+[data-md-color-scheme="slate"] .md-main__inner {
+  background-color: var(--ltc-surface);
+  border-radius: var(--ltc-radius-lg);
+}
+
+/* --------------------------------------------------------------------------
+   8. Homepage hero
+   -------------------------------------------------------------------------- */
+
+.course-hero {
+  position: relative;
+  margin: -1.2rem -1.2rem 2rem;
+  padding: 3.5rem 2rem 3rem;
+  border-radius: 0 0 var(--ltc-radius-lg) var(--ltc-radius-lg);
+  text-align: center;
+  background: linear-gradient(
+    160deg,
+    var(--ltc-hero-grad-start),
+    var(--ltc-hero-grad-end)
+  );
+  border-bottom: var(--ltc-border-width) solid var(--ltc-border);
+}
+
+.course-hero .course-hero__eyebrow {
+  display: inline-block;
+  margin-bottom: 0.75rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--md-accent-fg-color);
+  background-color: var(--ltc-surface);
+  border: var(--ltc-border-width) solid var(--ltc-border);
+}
+
+.course-hero h1 {
+  margin: 0 0 0.5rem;
+  font-size: 2.1rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.course-hero p {
+  max-width: 38em;
+  margin: 0 auto 1.5rem;
+  font-size: 1.05rem;
+  color: var(--md-default-fg-color--light);
+}
+
+.course-hero .course-hero__actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.course-hero .course-hero__actions .md-button {
+  border-radius: var(--ltc-radius);
+}
+
+/* --------------------------------------------------------------------------
+   9. Module grid / cards
+   -------------------------------------------------------------------------- */
+
+.module-grid {
+  display: grid;
+  gap: 1rem;
+  margin: 2rem 0;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+}
+
+.module-grid .module-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 1.1rem 1.2rem;
+  border: var(--ltc-border-width) solid var(--ltc-border);
+  border-radius: var(--ltc-radius-lg);
+  background-color: var(--ltc-surface-raised);
+  box-shadow: var(--ltc-shadow);
+  text-decoration: none !important;
+  color: var(--md-default-fg-color) !important;
+  transition: transform var(--ltc-transition), border-color var(--ltc-transition),
+    box-shadow var(--ltc-transition);
+}
+
+.module-grid .module-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--md-accent-fg-color);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+
+.module-grid .module-card__index {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--md-accent-fg-color);
+}
+
+.module-grid .module-card__title {
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.module-grid .module-card__desc {
+  font-size: 0.8rem;
+  color: var(--md-default-fg-color--light);
+  line-height: 1.5;
+}
+
+/* Small screens: tighten hero padding */
+@media (max-width: 44em) {
+  .course-hero {
+    margin: -1rem -1rem 1.5rem;
+    padding: 2.25rem 1.25rem 2rem;
+  }
+
+  .course-hero h1 {
+    font-size: 1.6rem;
+  }
+}

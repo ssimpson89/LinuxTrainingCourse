@@ -5,34 +5,76 @@ site_dir: dist
 
 theme:
   name: material
+  font:
+    text: Inter
+    code: JetBrains Mono
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: blue grey
+      primary: indigo
+      accent: deep orange
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: blue grey
+      primary: indigo
+      accent: deep orange
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
   features:
     - navigation.instant
     - navigation.top
-    - toc.integrate
+    - navigation.footer
     - search.suggest
+    - search.highlight
     - content.code.copy
+    - content.code.annotate
+
+extra_css:
+  - stylesheets/extra.css
+
+hooks:
+  - hooks/wikilink_cleanup.py
 
 plugins:
   - search
   - roamlinks
 
+nav:
+  - Home: index.md
+  - '00 · Track Overview': '00 - Track Overview.md'
+  - '01 · Permissions and Access Control': '01 - Permissions and Access Control.md'
+  - '02 · Users, Authentication and PAM': '02 - Users, Authentication and PAM.md'
+  - '03 · Processes, Scheduling and Signals': '03 - Processes, Scheduling and Signals.md'
+  - '04 · Filesystems and the VFS': '04 - Filesystems and the VFS.md'
+  - '05 · Storage and LVM': '05 - Storage and LVM.md'
+  - '06 · Networking Deep': '06 - Networking Deep.md'
+  - '07 · systemd': '07 - systemd.md'
+  - '08 · Boot and Init': '08 - Boot and Init.md'
+  - '09 · The Kernel': '09 - The Kernel.md'
+  - '10 · Namespaces and cgroups v2': '10 - Namespaces and cgroups v2.md'
+  - '11 · Observability and Tracing with eBPF': '11 - Observability and Tracing with eBPF.md'
+  - '12 · SELinux and Hardening': '12 - SELinux and Hardening.md'
+  - '13 · Samba and SMB': '13 - Samba and SMB.md'
+  - '14 · Early Userspace - dracut Hooks, udev and the initqueue': '14 - Early Userspace - dracut Hooks, udev and the initqueue.md'
+
 markdown_extensions:
   - tables
   - admonition
+  - attr_list
+  - md_in_html
   - pymdownx.superfences
-  - pymdownx.highlight
+  - pymdownx.highlight:
+      use_pygments: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.inlinehilite
+  - pymdownx.mark
   - toc:
       permalink: true
+      toc_depth: 2
