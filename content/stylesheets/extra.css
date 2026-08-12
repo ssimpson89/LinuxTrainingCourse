@@ -1,340 +1,640 @@
-/* ==========================================================================
-   extra.css — visual polish layer for the Linux Training Course
-   Sits on top of mkdocs-material. Restrained refinements only:
-   typography, tables, admonitions, code blocks, dark-mode surfaces,
-   task-list checkboxes, and a homepage hero / module-card grid.
-   ========================================================================== */
-
-/* --------------------------------------------------------------------------
-   1. Design tokens
-   -------------------------------------------------------------------------- */
+/* Linux Training Course — visual system layered on MkDocs Material */
 
 :root {
-  --ltc-radius: 0.5rem;
-  --ltc-radius-lg: 0.75rem;
-  --ltc-border-width: 1px;
-  --ltc-content-measure: 44em; /* comfortable line length for prose */
-  --ltc-transition: 120ms ease;
+  --course-green: #0f8a68;
+  --course-green-bright: #19b886;
+  --course-amber: #e9822b;
+  --course-radius-sm: 0.35rem;
+  --course-radius: 0.65rem;
+  --course-radius-lg: 1rem;
+  --course-border-width: 1px;
+  --course-reading-width: 46rem;
+  --course-ease: 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-/* Light scheme surfaces / accents */
 [data-md-color-scheme="default"] {
-  --ltc-surface: #ffffff;
-  --ltc-surface-raised: #f8f9fb;
-  --ltc-border: rgba(0, 0, 0, 0.08);
-  --ltc-border-strong: rgba(0, 0, 0, 0.14);
-  --ltc-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 10px rgba(0, 0, 0, 0.04);
-  --ltc-code-bg: #f4f5f7;
-  --ltc-table-stripe: rgba(0, 0, 0, 0.025);
-  --ltc-table-header-bg: #eef0f3;
-  --ltc-hero-grad-start: #eef2f6;
-  --ltc-hero-grad-end: #f9fafc;
+  --md-primary-fg-color: #102521;
+  --md-primary-fg-color--light: #173c34;
+  --md-primary-fg-color--dark: #091713;
+  --md-accent-fg-color: var(--course-green);
+  --md-typeset-a-color: #08775b;
+
+  --course-page: #f4f7f6;
+  --course-surface: #ffffff;
+  --course-surface-soft: #edf3f1;
+  --course-surface-code: #f4f7f6;
+  --course-ink: #14211e;
+  --course-muted: #63716d;
+  --course-border: rgba(20, 49, 42, 0.12);
+  --course-border-strong: rgba(20, 49, 42, 0.22);
+  --course-grid: rgba(15, 138, 104, 0.075);
+  --course-shadow-sm: 0 1px 2px rgba(14, 34, 29, 0.05);
+  --course-shadow: 0 12px 36px rgba(14, 34, 29, 0.09);
+  --course-header-shadow: 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 8px 32px rgba(5, 19, 16, 0.16);
 }
 
-/* Dark scheme surfaces / accents — softer than Material's flat slate */
 [data-md-color-scheme="slate"] {
-  --md-default-bg-color: #1b1f26;
-  --md-default-bg-color--light: #1b1f26;
-  --md-default-bg-color--lightest: #1b1f26;
+  --md-primary-fg-color: #0b1715;
+  --md-primary-fg-color--light: #132a25;
+  --md-primary-fg-color--dark: #07100e;
+  --md-accent-fg-color: #27d3a0;
+  --md-typeset-a-color: #51d9b1;
+  --md-default-bg-color: #0e1615;
+  --md-default-bg-color--light: #111c1a;
+  --md-default-bg-color--lighter: #16221f;
+  --md-default-bg-color--lightest: #1a2825;
 
-  --ltc-surface: #232830;
-  --ltc-surface-raised: #2a3039;
-  --ltc-border: rgba(255, 255, 255, 0.08);
-  --ltc-border-strong: rgba(255, 255, 255, 0.14);
-  --ltc-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 16px rgba(0, 0, 0, 0.35);
-  --ltc-code-bg: #1e232b;
-  --ltc-table-stripe: rgba(255, 255, 255, 0.025);
-  --ltc-table-header-bg: #2a3039;
-  --ltc-hero-grad-start: #232a35;
-  --ltc-hero-grad-end: #1b1f26;
+  --course-page: #0e1615;
+  --course-surface: #141f1d;
+  --course-surface-soft: #192724;
+  --course-surface-code: #0d1514;
+  --course-ink: #e4eeeb;
+  --course-muted: #93a7a1;
+  --course-border: rgba(173, 224, 208, 0.1);
+  --course-border-strong: rgba(173, 224, 208, 0.19);
+  --course-grid: rgba(39, 211, 160, 0.065);
+  --course-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --course-shadow: 0 16px 42px rgba(0, 0, 0, 0.3);
+  --course-header-shadow: 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 10px 34px rgba(0, 0, 0, 0.35);
 }
 
-/* --------------------------------------------------------------------------
-   2. Typography — measured for long-form technical reading
-   -------------------------------------------------------------------------- */
+/* Page chrome */
+
+body {
+  background-color: var(--course-page);
+  background-image: radial-gradient(
+    circle at 50% 0,
+    color-mix(in srgb, var(--md-accent-fg-color) 5%, transparent),
+    transparent 30rem
+  );
+}
+
+.md-header {
+  background: linear-gradient(110deg, var(--md-primary-fg-color--dark), var(--md-primary-fg-color));
+  box-shadow: var(--course-header-shadow);
+}
+
+.md-header__title {
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.md-logo svg {
+  color: var(--course-green-bright);
+}
+
+.md-tabs {
+  background-color: var(--md-primary-fg-color--dark);
+}
+
+.md-search__form {
+  border: var(--course-border-width) solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--course-radius);
+}
+
+.md-search__output {
+  border-radius: 0 0 var(--course-radius) var(--course-radius);
+}
+
+.md-main__inner {
+  margin-top: 1.8rem;
+}
+
+.md-content {
+  min-width: 0;
+}
+
+.md-content__inner {
+  padding-bottom: 3rem;
+}
+
+.md-sidebar__scrollwrap {
+  scrollbar-width: thin;
+  scrollbar-color: var(--course-border-strong) transparent;
+}
+
+.md-nav__title {
+  color: var(--course-muted);
+  font-size: 0.63rem;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.md-nav__link {
+  border-radius: var(--course-radius-sm);
+  line-height: 1.35;
+  transition: background-color var(--course-ease), color var(--course-ease),
+    transform var(--course-ease);
+}
+
+.md-nav__link:hover {
+  transform: translateX(0.12rem);
+}
+
+.md-nav__item .md-nav__link--active {
+  padding: 0.45rem 0.55rem;
+  color: var(--md-accent-fg-color);
+  background: color-mix(in srgb, var(--md-accent-fg-color) 9%, transparent);
+  box-shadow: inset 2px 0 var(--md-accent-fg-color);
+}
+
+.md-sidebar--secondary .md-nav {
+  border-left: var(--course-border-width) solid var(--course-border);
+  padding-left: 0.6rem;
+}
+
+/* Technical reading typography */
 
 .md-typeset {
-  font-size: 0.8rem;
-  line-height: 1.7;
+  color: var(--course-ink);
+  font-size: 0.79rem;
+  line-height: 1.75;
+}
+
+.md-typeset > :not(.intro):not(.syllabus-grid) {
+  max-width: var(--course-reading-width);
 }
 
 .md-typeset h1,
 .md-typeset h2,
-.md-typeset h3 {
-  letter-spacing: -0.01em;
-  font-weight: 700;
+.md-typeset h3,
+.md-typeset h4 {
+  color: var(--course-ink);
+  font-weight: 750;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
 }
 
 .md-typeset h1 {
-  margin-bottom: 1.25em;
+  position: relative;
+  margin: 0 0 1.7rem;
+  padding-bottom: 0.8rem;
+  font-size: clamp(1.85rem, 4vw, 2.55rem);
+  line-height: 1.12;
+}
+
+.md-typeset h1::after {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 4rem;
+  height: 0.2rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--md-accent-fg-color), var(--course-amber));
+  content: "";
 }
 
 .md-typeset h2 {
-  margin-top: 2em;
-  padding-top: 0.6em;
-  border-top: var(--ltc-border-width) solid var(--ltc-border);
+  margin: 2.8rem 0 1rem;
+  padding-top: 1rem;
+  border-top: var(--course-border-width) solid var(--course-border);
+  font-size: 1.35rem;
 }
 
 .md-typeset h3 {
-  margin-top: 1.6em;
+  margin: 2.1rem 0 0.65rem;
+  font-size: 1.05rem;
+}
+
+.md-typeset h4 {
+  margin-top: 1.6rem;
+  color: var(--md-accent-fg-color);
+}
+
+.md-typeset p,
+.md-typeset ul,
+.md-typeset ol {
+  text-wrap: pretty;
 }
 
 .md-typeset a {
-  text-decoration-thickness: from-font;
-  text-underline-offset: 0.15em;
+  font-weight: 550;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-decoration-thickness: 0.06em;
+  text-underline-offset: 0.17em;
+  transition: color var(--course-ease), text-decoration-color var(--course-ease);
 }
+
+.md-typeset a:hover {
+  text-decoration-color: currentColor;
+}
+
+.md-typeset :is(ul, ol) li::marker {
+  color: var(--md-accent-fg-color);
+  font-weight: 700;
+}
+
+.md-typeset hr {
+  border-color: var(--course-border);
+}
+
+.headerlink {
+  color: var(--course-muted) !important;
+}
+
+/* Inline code, code blocks, and diagrams */
 
 .md-typeset code {
-  font-size: 0.85em;
+  border: var(--course-border-width) solid var(--course-border);
   border-radius: 0.3rem;
+  background-color: var(--course-surface-code);
+  font-size: 0.84em;
+  box-shadow: var(--course-shadow-sm);
 }
 
-/* --------------------------------------------------------------------------
-   3. Tables — the default is cramped and harsh in dark mode
-   -------------------------------------------------------------------------- */
+.md-typeset pre {
+  border-radius: var(--course-radius);
+}
+
+.md-typeset pre > code {
+  border: 0;
+  border-radius: var(--course-radius);
+  box-shadow: none;
+  line-height: 1.65;
+}
+
+.md-typeset .highlight {
+  margin: 1.25rem 0;
+  border: var(--course-border-width) solid var(--course-border);
+  border-radius: var(--course-radius);
+  background-color: var(--course-surface-code);
+  box-shadow: var(--course-shadow-sm);
+  overflow: hidden;
+}
+
+.md-typeset .highlight pre {
+  margin: 0;
+  background-color: transparent;
+}
+
+.md-typeset .highlight span.filename {
+  border-bottom: var(--course-border-width) solid var(--course-border);
+  background-color: var(--course-surface-soft);
+  color: var(--course-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.035em;
+}
+
+.md-clipboard {
+  border-radius: var(--course-radius-sm);
+  color: var(--course-muted);
+  transition: color var(--course-ease), background-color var(--course-ease);
+}
+
+/* Tables */
+
+.md-typeset__table {
+  width: 100%;
+}
 
 .md-typeset table:not([class]) {
   display: table;
   width: 100%;
-  border: var(--ltc-border-width) solid var(--ltc-border);
-  border-radius: var(--ltc-radius);
-  overflow: hidden;
-  box-shadow: var(--ltc-shadow);
+  margin: 1.3rem 0;
+  border: var(--course-border-width) solid var(--course-border);
+  border-radius: var(--course-radius);
+  background-color: var(--course-surface);
+  box-shadow: var(--course-shadow-sm);
   font-size: 0.72rem;
+  overflow: hidden;
 }
 
 .md-typeset table:not([class]) th,
 .md-typeset table:not([class]) td {
-  padding: 0.6em 1em;
-  border: none;
-  border-bottom: var(--ltc-border-width) solid var(--ltc-border);
+  padding: 0.7em 1em;
+  border: 0;
+  border-bottom: var(--course-border-width) solid var(--course-border);
 }
 
 .md-typeset table:not([class]) th {
-  background-color: var(--ltc-table-header-bg);
-  font-weight: 700;
-  letter-spacing: 0.01em;
+  background-color: var(--course-surface-soft);
+  color: var(--course-ink);
+  font-size: 0.67rem;
+  font-weight: 800;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
 }
 
 .md-typeset table:not([class]) tr:last-child td {
-  border-bottom: none;
+  border-bottom: 0;
 }
 
-.md-typeset table:not([class]) tr:nth-child(even) td {
-  background-color: var(--ltc-table-stripe);
+.md-typeset table:not([class]) tbody tr {
+  transition: background-color var(--course-ease);
 }
 
-.md-typeset table:not([class]) tr:hover td {
-  background-color: var(--ltc-border);
-  transition: background-color var(--ltc-transition);
+.md-typeset table:not([class]) tbody tr:hover {
+  background-color: color-mix(in srgb, var(--md-accent-fg-color) 5%, transparent);
 }
 
-/* --------------------------------------------------------------------------
-   4. Admonitions — softer surfaces, clearer left-edge accent
-   -------------------------------------------------------------------------- */
+/* Notes and module scope callouts */
+
+.md-typeset blockquote {
+  margin: 1.4rem 0;
+  padding: 1rem 1.15rem;
+  border: var(--course-border-width) solid var(--course-border);
+  border-left: 0.22rem solid var(--course-amber);
+  border-radius: 0 var(--course-radius) var(--course-radius) 0;
+  background: linear-gradient(
+    110deg,
+    color-mix(in srgb, var(--course-amber) 7%, var(--course-surface)),
+    var(--course-surface)
+  );
+  color: var(--course-ink);
+  box-shadow: var(--course-shadow-sm);
+}
+
+.md-typeset blockquote > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset blockquote > :last-child {
+  margin-bottom: 0;
+}
 
 .md-typeset .admonition,
 .md-typeset details {
-  border: var(--ltc-border-width) solid var(--ltc-border);
-  border-left-width: 4px;
-  border-radius: var(--ltc-radius);
-  box-shadow: var(--ltc-shadow);
-  background-color: var(--ltc-surface-raised);
+  border: var(--course-border-width) solid var(--course-border);
+  border-left-width: 0.22rem;
+  border-radius: var(--course-radius);
+  background-color: var(--course-surface);
+  box-shadow: var(--course-shadow-sm);
   overflow: hidden;
 }
 
 .md-typeset .admonition-title,
 .md-typeset summary {
-  background-color: transparent;
-  font-weight: 700;
+  background-color: color-mix(in srgb, currentColor 5%, transparent);
+  font-weight: 750;
 }
 
-.md-typeset .admonition-title::before,
-.md-typeset summary::before {
-  opacity: 0.9;
-}
-
-/* --------------------------------------------------------------------------
-   5. Code blocks — polish, subtle elevation
-   -------------------------------------------------------------------------- */
-
-.md-typeset pre,
-.md-typeset .highlight {
-  border-radius: var(--ltc-radius-lg);
-}
-
-.md-typeset pre > code {
-  border-radius: var(--ltc-radius-lg);
-}
-
-.md-typeset .highlight pre {
-  background-color: var(--ltc-code-bg);
-  box-shadow: var(--ltc-shadow);
-  border: var(--ltc-border-width) solid var(--ltc-border);
-}
-
-.md-typeset .highlight span.filename {
-  border-radius: var(--ltc-radius-lg) var(--ltc-radius-lg) 0 0;
-  background-color: var(--ltc-table-header-bg);
-  border: var(--ltc-border-width) solid var(--ltc-border);
-  border-bottom: none;
-  font-weight: 600;
-}
-
-.md-clipboard {
-  border-radius: 0.3rem;
-  transition: background-color var(--ltc-transition);
-}
-
-/* --------------------------------------------------------------------------
-   6. Task lists — clearer checkbox styling
-   -------------------------------------------------------------------------- */
+/* Progress lists */
 
 .md-typeset .task-list-item {
-  list-style-type: none;
+  margin: 0.35rem 0;
 }
 
-.md-typeset .task-list-control .task-list-indicator::before {
-  border-radius: 0.25rem;
-  border: var(--ltc-border-width) solid var(--ltc-border-strong);
+.md-typeset .task-list-indicator::before {
+  border: var(--course-border-width) solid var(--course-border-strong);
+  border-radius: 0.28rem;
+  background-color: var(--course-surface);
 }
 
 .md-typeset [type="checkbox"]:checked + .task-list-indicator::before {
+  border-color: var(--md-accent-fg-color);
   background-color: var(--md-accent-fg-color);
-  border-color: var(--md-accent-fg-color);
 }
 
-/* --------------------------------------------------------------------------
-   7. General surface elevation for content body (dark mode especially)
-   -------------------------------------------------------------------------- */
+/* Homepage intro */
 
-[data-md-color-scheme="slate"] .md-main__inner {
-  background-color: var(--ltc-surface);
-  border-radius: var(--ltc-radius-lg);
-}
-
-/* --------------------------------------------------------------------------
-   8. Homepage hero
-   -------------------------------------------------------------------------- */
-
-.course-hero {
+.intro {
   position: relative;
-  margin: 0 0 2rem;
-  padding: 2.5rem 2rem;
-  border: var(--ltc-border-width) solid var(--ltc-border);
-  border-radius: var(--ltc-radius-lg);
-  text-align: center;
-  background: linear-gradient(
-    160deg,
-    var(--ltc-hero-grad-start),
-    var(--ltc-hero-grad-end)
-  );
+  isolation: isolate;
+  margin: 0 0 2.25rem;
+  padding: clamp(1.7rem, 5vw, 3.4rem);
+  border: var(--course-border-width) solid var(--course-border);
+  border-radius: var(--course-radius-lg);
+  background-color: var(--course-surface);
+  background-image: linear-gradient(var(--course-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--course-grid) 1px, transparent 1px),
+    radial-gradient(
+      circle at 85% 20%,
+      color-mix(in srgb, var(--md-accent-fg-color) 14%, transparent),
+      transparent 16rem
+    );
+  background-size: 1.5rem 1.5rem, 1.5rem 1.5rem, auto;
+  box-shadow: var(--course-shadow);
+  overflow: hidden;
 }
 
-.course-hero .course-hero__eyebrow {
-  display: inline-block;
-  margin-bottom: 0.75rem;
-  padding: 0.25rem 0.75rem;
+.intro::after {
+  position: absolute;
+  z-index: -1;
+  right: -4rem;
+  bottom: -5rem;
+  width: 13rem;
+  height: 13rem;
+  border: 1.5rem solid color-mix(in srgb, var(--md-accent-fg-color) 9%, transparent);
+  border-radius: 50%;
+  content: "";
+}
+
+.intro__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding: 0.35rem 0.7rem;
+  border: var(--course-border-width) solid var(--course-border-strong);
   border-radius: 999px;
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  background-color: color-mix(in srgb, var(--course-surface) 88%, transparent);
   color: var(--md-accent-fg-color);
-  background-color: var(--ltc-surface);
-  border: var(--ltc-border-width) solid var(--ltc-border);
+  font-family: var(--md-code-font-family);
+  font-size: 0.63rem;
+  font-weight: 700;
+  letter-spacing: 0.065em;
+  text-transform: uppercase;
 }
 
-.course-hero h1 {
-  margin: 0 0 0.5rem;
-  font-size: 2.1rem;
-  font-weight: 800;
-  letter-spacing: -0.02em;
+.intro h1 {
+  max-width: 12ch;
+  margin: 0 0 0.8rem;
+  padding: 0;
+  font-size: clamp(2.25rem, 7vw, 4.1rem);
+  line-height: 0.98;
+  letter-spacing: -0.055em;
 }
 
-.course-hero p {
-  max-width: 38em;
-  margin: 0 auto 1.5rem;
-  font-size: 1.05rem;
-  color: var(--md-default-fg-color--light);
+.intro h1::after,
+.intro .headerlink {
+  display: none;
 }
 
-.course-hero .course-hero__actions {
+.intro p {
+  max-width: 43rem;
+  margin: 0 0 1.6rem;
+  color: var(--course-muted);
+  font-size: clamp(0.92rem, 2vw, 1.05rem);
+  line-height: 1.65;
+}
+
+.intro__actions {
   display: flex;
-  gap: 0.75rem;
-  justify-content: center;
   flex-wrap: wrap;
+  gap: 0.65rem;
 }
 
-.course-hero .course-hero__actions .md-button {
-  border-radius: var(--ltc-radius);
+.intro__actions .md-button {
+  min-width: 8.5rem;
+  border-radius: var(--course-radius-sm);
+  text-align: center;
+  transition: border-color var(--course-ease), background-color var(--course-ease),
+    box-shadow var(--course-ease), transform var(--course-ease);
 }
 
-/* --------------------------------------------------------------------------
-   9. Module grid / cards
-   -------------------------------------------------------------------------- */
-
-.module-grid {
-  display: grid;
-  gap: 1rem;
-  margin: 2rem 0;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-}
-
-.module-grid .module-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  padding: 1.1rem 1.2rem;
-  border: var(--ltc-border-width) solid var(--ltc-border);
-  border-radius: var(--ltc-radius-lg);
-  background-color: var(--ltc-surface-raised);
-  box-shadow: var(--ltc-shadow);
-  text-decoration: none !important;
-  color: var(--md-default-fg-color) !important;
-  transition: transform var(--ltc-transition), border-color var(--ltc-transition),
-    box-shadow var(--ltc-transition);
-}
-
-.module-grid .module-card:hover {
+.intro__actions .md-button:hover {
   transform: translateY(-2px);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--md-accent-fg-color) 20%, transparent);
+}
+
+.intro__actions .md-button--primary {
   border-color: var(--md-accent-fg-color);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  background-color: var(--md-accent-fg-color);
+  color: var(--course-surface);
 }
 
-.module-grid .module-card__index {
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+/* Homepage syllabus cards */
+
+.syllabus-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 1.5rem 0 2.5rem;
+}
+
+.syllabus-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.9rem;
+  align-content: start;
+  min-height: 7.1rem;
+  padding: 1rem 1.05rem;
+  border: var(--course-border-width) solid var(--course-border);
+  border-radius: var(--course-radius);
+  background-color: var(--course-surface);
+  color: var(--course-ink) !important;
+  box-shadow: var(--course-shadow-sm);
+  text-decoration: none !important;
+  transition: border-color var(--course-ease), box-shadow var(--course-ease),
+    transform var(--course-ease);
+  overflow: hidden;
+}
+
+.syllabus-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0.18rem;
+  background-color: var(--md-accent-fg-color);
+  content: "";
+  opacity: 0;
+  transform: scaleY(0.35);
+  transition: opacity var(--course-ease), transform var(--course-ease);
+}
+
+.syllabus-card:hover {
+  border-color: color-mix(in srgb, var(--md-accent-fg-color) 55%, var(--course-border));
+  box-shadow: var(--course-shadow);
+  transform: translateY(-3px);
+}
+
+.syllabus-card:hover::before {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+.syllabus-card__index {
+  grid-row: 1 / 3;
+  min-width: 2.2rem;
   color: var(--md-accent-fg-color);
+  font-family: var(--md-code-font-family);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.035em;
+  line-height: 1.5;
+  text-transform: uppercase;
 }
 
-.module-grid .module-card__title {
-  font-size: 1rem;
-  font-weight: 700;
+.syllabus-card__title {
+  font-size: 0.92rem;
+  font-weight: 750;
+  letter-spacing: -0.015em;
   line-height: 1.35;
 }
 
-.module-grid .module-card__desc {
-  font-size: 0.8rem;
-  color: var(--md-default-fg-color--light);
+.syllabus-card__description {
+  color: var(--course-muted);
+  font-size: 0.72rem;
   line-height: 1.5;
 }
 
-/* Small screens: tighten hero padding */
-@media (max-width: 44em) {
-  .course-hero {
-    margin: 0 0 1.5rem;
-    padding: 1.75rem 1.25rem;
-  }
+/* Footer and interaction details */
 
-  .course-hero h1 {
-    font-size: 1.6rem;
+.md-footer {
+  border-top: var(--course-border-width) solid var(--course-border);
+  background-color: var(--md-primary-fg-color--dark);
+}
+
+:focus-visible {
+  outline: 0.14rem solid var(--md-accent-fg-color);
+  outline-offset: 0.15rem;
+}
+
+::selection {
+  background-color: color-mix(in srgb, var(--md-accent-fg-color) 28%, transparent);
+}
+
+@media screen and (min-width: 76.25em) {
+  .md-grid {
+    max-width: 79rem;
   }
 }
 
-/* No permalink anchor on the hero title */
-.course-hero .headerlink {
-  display: none;
+@media screen and (max-width: 60em) {
+  .md-main__inner {
+    margin-top: 1.2rem;
+  }
+
+  .md-typeset > :not(.intro):not(.syllabus-grid) {
+    max-width: none;
+  }
+}
+
+@media screen and (max-width: 44em) {
+  .intro {
+    margin-bottom: 1.6rem;
+    border-radius: var(--course-radius);
+  }
+
+  .intro h1 {
+    max-width: 10ch;
+  }
+
+  .syllabus-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .syllabus-card {
+    min-height: 0;
+  }
+
+  .md-typeset h1 {
+    font-size: 1.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+
+  .intro,
+  .syllabus-card,
+  .md-typeset .highlight,
+  .md-typeset blockquote,
+  .md-typeset table:not([class]) {
+    box-shadow: none;
+  }
 }
