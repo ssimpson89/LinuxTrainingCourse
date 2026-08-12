@@ -6,6 +6,8 @@ eBPF tracing, SELinux, and early userspace.
 
 - `content/` — the course modules in Markdown (the only source of truth)
 - `mkdocs.yml` — MkDocs Material site config (builds into `dist/`, not committed)
+- `hooks/wikilinks.py` — resolves Obsidian `[[wikilinks]]` to page slugs at build
+  time; targets that live in other tracks render as plain text
 
 ## Hosting on Cloudflare Pages
 
