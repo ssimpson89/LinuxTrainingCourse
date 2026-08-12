@@ -54,15 +54,8 @@
    -------------------------------------------------------------------------- */
 
 .md-typeset {
-  font-size: 0.72rem;
+  font-size: 0.8rem;
   line-height: 1.7;
-}
-
-.md-typeset p,
-.md-typeset ul,
-.md-typeset ol,
-.md-typeset dl {
-  max-width: var(--ltc-content-measure);
 }
 
 .md-typeset h1,
@@ -226,16 +219,16 @@
 
 .course-hero {
   position: relative;
-  margin: -1.2rem -1.2rem 2rem;
-  padding: 3.5rem 2rem 3rem;
-  border-radius: 0 0 var(--ltc-radius-lg) var(--ltc-radius-lg);
+  margin: 0 0 2rem;
+  padding: 2.5rem 2rem;
+  border: var(--ltc-border-width) solid var(--ltc-border);
+  border-radius: var(--ltc-radius-lg);
   text-align: center;
   background: linear-gradient(
     160deg,
     var(--ltc-hero-grad-start),
     var(--ltc-hero-grad-end)
   );
-  border-bottom: var(--ltc-border-width) solid var(--ltc-border);
 }
 
 .course-hero .course-hero__eyebrow {
@@ -332,11 +325,16 @@
 /* Small screens: tighten hero padding */
 @media (max-width: 44em) {
   .course-hero {
-    margin: -1rem -1rem 1.5rem;
-    padding: 2.25rem 1.25rem 2rem;
+    margin: 0 0 1.5rem;
+    padding: 1.75rem 1.25rem;
   }
 
   .course-hero h1 {
     font-size: 1.6rem;
   }
+}
+
+/* No permalink anchor on the hero title */
+.course-hero .headerlink {
+  display: none;
 }

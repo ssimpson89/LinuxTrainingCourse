@@ -1,7 +1,10 @@
-# Linux Training Course
+---
+title: Home
+---
 
 <div class="course-hero" markdown>
   <span class="course-hero__eyebrow">Linux Internals · Track 1</span>
+  <h1>Linux Training Course</h1>
   <p>
     Fourteen mechanism-first modules that build a coherent vertical model of a
     running Linux system, from the DAC access check the kernel runs on every
