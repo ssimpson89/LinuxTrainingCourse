@@ -249,6 +249,57 @@ lrwx------. 1 alex alex 64 Oct 14 10:02 255 -> /dev/pts/0
 
 (`$$` is the shell's own process ID. `/dev/pts/0` is your terminal.) Redirection (`>`, `<`, `2>`) and pipes (`|`), which you'll master in [module 02](02-shell-and-filesystem.md), are nothing more than rearranging these numbers before a program starts.
 
+### Practice: explore through files
+
+Try it right here before you touch your VM. Type each command and press Enter. If you get stuck, click **Hint** or **Show me**.
+
+<div class="terminal-sim" data-title="Everything is a file" markdown>
+
+<div class="task" data-expect="cat /proc/loadavg" data-hint="The kernel's load averages live in a file called loadavg under /proc." markdown>
+
+**Step 1.** Print the system's load averages straight from the kernel: read `/proc/loadavg`.
+
+```text
+0.08 0.03 0.01 1/187 4231
+```
+
+</div>
+
+<div class="task" data-expect="cat /proc/sys/kernel/hostname" data-hint="Kernel settings live under /proc/sys. The hostname is in the kernel directory." markdown>
+
+**Step 2.** The hostname is a kernel setting. Read it from `/proc/sys/kernel/hostname`.
+
+```text
+rocky-lab
+```
+
+</div>
+
+<div class="task" data-expect="ls -l /dev/null" data-match="ls -l?a? /dev/null" data-hint="Use ls with the long listing option on /dev/null." markdown>
+
+**Step 3.** Look at `/dev/null` with a long listing. What kind of file is it? (Check the first character.)
+
+```text
+crw-rw-rw-. 1 root root 1, 3 Oct 14 09:12 /dev/null
+```
+
+</div>
+
+<div class="task" data-expect="ls -l /proc/$$/fd||ls -l /proc/self/fd" data-hint="$$ expands to your shell's PID. Its open files are in /proc/<PID>/fd." markdown>
+
+**Step 4.** List your shell's open file descriptors using `$$`.
+
+```text
+lrwx------. 1 alex alex 64 Oct 14 10:02 0 -> /dev/pts/0
+lrwx------. 1 alex alex 64 Oct 14 10:02 1 -> /dev/pts/0
+lrwx------. 1 alex alex 64 Oct 14 10:02 2 -> /dev/pts/0
+lrwx------. 1 alex alex 64 Oct 14 10:02 255 -> /dev/pts/0
+```
+
+</div>
+
+</div>
+
 <div class="quiz" data-answer="2" markdown>
 
 You run `cat /proc/meminfo` and see lots of output, but `ls -l /proc/meminfo` says the file is 0 bytes. What's going on?
@@ -595,6 +646,60 @@ Look at that last line: `systemd` started `sshd`, which forked a session for you
 | `pstree -p` | The whole process family tree with PIDs |
 | `uname -r` | Running kernel version |
 | `cat /etc/rocky-release` | Rocky version |
+
+## Flashcards
+
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+What is a system call?
+
+A request from a program to the kernel, such as `openat`, `read`, `write`, `execve`. It's the only way across the wall into kernel space.
+
+</div>
+
+<div class="card" markdown>
+
+What do file descriptors 0, 1 and 2 mean?
+
+Standard input, standard output, and standard error. Every process starts with them open.
+
+</div>
+
+<div class="card" markdown>
+
+Why do files in `/proc` show 0 bytes?
+
+`/proc` is a virtual filesystem: the kernel generates the content when you read it, so nothing is stored.
+
+</div>
+
+<div class="card" markdown>
+
+`fork` vs `exec`?
+
+`fork` creates a new process (a copy of the parent). `exec` replaces the program running inside a process, keeping its PID.
+
+</div>
+
+<div class="card" markdown>
+
+Who is PID 1 on Rocky Linux?
+
+`systemd`. It starts and supervises every service, and every process descends from it.
+
+</div>
+
+<div class="card" markdown>
+
+Where do your config changes belong: `/usr` or `/etc`?
+
+`/etc`. Packages own `/usr` and overwrite it on update; `/etc` is yours.
+
+</div>
+
+</div>
 
 ## Recap
 

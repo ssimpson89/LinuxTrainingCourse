@@ -10,6 +10,8 @@
  *   .decision  – branching troubleshooting tree
  *   .widget-chmod  – permission bits <-> octal <-> symbolic calculator
  *   .widget-subnet – IPv4 CIDR calculator
+ *   .terminal-sim  – guided practice terminal that checks typed commands
+ *   .flashcards    – flip cards for recall practice
  *   module progress – "mark complete" button on module pages, ticks on home
  */
 
@@ -451,6 +453,182 @@
     render();
   }
 
+
+  /* ----------------------------------------------------------- terminal sim */
+
+  // Guided practice terminal. Each .task holds instructions, an expected
+  // command (data-expect, alternatives separated by "||", or data-match as a
+  // regular expression) and a code block with the output to print.
+  function initTerminal(root) {
+    if (!once(root, "terminal")) return;
+    var tasks = children(root, ".task");
+    if (!tasks.length) return;
+    var promptText = root.dataset.prompt || "[alex@rocky-lab ~]$ ";
+    var current = 0;
+
+    var head = el("div", "term__head");
+    var dots = el("span", "term__dots");
+    dots.append(el("i"), el("i"), el("i"));
+    head.append(dots, el("span", "term__title", root.dataset.title || "Practice terminal"));
+    var progress = el("span", "term__progress");
+    head.append(progress);
+
+    var brief = el("div", "term__brief");
+    var screen = el("div", "term__screen");
+    screen.setAttribute("aria-live", "polite");
+    var line = el("label", "term__line");
+    var ps1 = el("span", "term__ps1", promptText);
+    var input = el("input", "term__input");
+    input.setAttribute("autocomplete", "off");
+    input.setAttribute("autocapitalize", "off");
+    input.setAttribute("spellcheck", "false");
+    input.setAttribute("aria-label", "Type a command and press Enter");
+    line.append(ps1, input);
+    var screenWrap = el("div", "term__body");
+    screenWrap.append(screen, line);
+
+    var bar = el("div", "term__controls");
+    var hintBtn = el("button", "stepper__btn", "Hint");
+    var showBtn = el("button", "stepper__btn", "Show me");
+    var resetBtn = el("button", "stepper__btn", "Restart");
+    hintBtn.type = showBtn.type = resetBtn.type = "button";
+    bar.append(hintBtn, showBtn, resetBtn);
+
+    tasks.forEach(function (t) { brief.appendChild(t); });
+    root.append(head, brief, screenWrap, bar);
+
+    function expected(t) {
+      return (t.dataset.expect || "").split("||").map(function (c) { return norm(c); }).filter(Boolean);
+    }
+    function norm(c) { return c.trim().replace(/\s+/g, " "); }
+    function outputOf(t) {
+      var code = t.querySelector("pre code, code.output");
+      return code ? code.textContent.replace(/\n$/, "") : "";
+    }
+
+    function print(text, cls) {
+      var row = el("div", "term__row" + (cls ? " " + cls : ""));
+      row.textContent = text;
+      screen.appendChild(row);
+      screenWrap.scrollTop = screenWrap.scrollHeight;
+    }
+
+    function show(i) {
+      current = i;
+      tasks.forEach(function (t, j) {
+        t.classList.toggle("is-active", j === i);
+        t.classList.toggle("is-done", j < i);
+      });
+      var finished = i >= tasks.length;
+      root.classList.toggle("is-finished", finished);
+      progress.textContent = finished ? "✓ done" : (i + 1) + " / " + tasks.length;
+      input.disabled = finished;
+      hintBtn.disabled = showBtn.disabled = finished;
+      if (finished) print(root.dataset.done || "All done. Nice work!", "term__ok");
+    }
+
+    function run(cmd) {
+      var t = tasks[current];
+      print(promptText + cmd, "term__cmd");
+      if (!t) return;
+      var c = norm(cmd);
+      if (!c) return;
+      if (c === "clear") { screen.textContent = ""; return; }
+      var ok = expected(t).indexOf(c) !== -1;
+      if (!ok && t.dataset.match) {
+        try { ok = new RegExp("^(?:" + t.dataset.match + ")$").test(c); } catch (e) { ok = false; }
+      }
+      if (ok) {
+        var out = outputOf(t);
+        if (out) print(out);
+        show(current + 1);
+      } else {
+        print(t.dataset.wrong || "Not quite what this step needs. Try again, or click Hint.", "term__err");
+      }
+    }
+
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        var v = input.value;
+        input.value = "";
+        run(v);
+      }
+    });
+    screenWrap.addEventListener("click", function () { if (!input.disabled) input.focus({ preventScroll: true }); });
+    hintBtn.addEventListener("click", function () {
+      var t = tasks[current];
+      if (t) print("hint: " + (t.dataset.hint || "Read the step above carefully."), "term__hint");
+    });
+    showBtn.addEventListener("click", function () {
+      var t = tasks[current];
+      if (!t) return;
+      var answer = (t.dataset.expect || "").split("||")[0].trim();
+      input.value = answer;
+      input.focus({ preventScroll: true });
+    });
+    resetBtn.addEventListener("click", function () {
+      screen.textContent = "";
+      show(0);
+    });
+    show(0);
+  }
+
+  /* ------------------------------------------------------------- flashcards */
+
+  // Each .card: the first child is the front, everything else is the back.
+  function initFlashcards(root) {
+    if (!once(root, "flashcards")) return;
+    var cards = children(root, ".card");
+    cards.forEach(function (card) {
+      var front = el("div", "card__face card__front");
+      var back = el("div", "card__face card__back");
+      var first = card.firstElementChild;
+      if (!first) return;
+      front.appendChild(first);
+      while (card.firstChild) back.appendChild(card.firstChild);
+      var inner = el("div", "card__inner");
+      inner.append(front, back);
+      card.appendChild(inner);
+      card.tabIndex = 0;
+      card.setAttribute("role", "button");
+      card.setAttribute("aria-pressed", "false");
+      var flip = function () {
+        var on = card.classList.toggle("is-flipped");
+        card.setAttribute("aria-pressed", on ? "true" : "false");
+      };
+      card.addEventListener("click", function (e) {
+        if (e.target.closest("a")) return;
+        flip();
+      });
+      card.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); }
+      });
+    });
+    var hint = el("p", "flashcards__hint", "Click a card to flip it.");
+    root.insertBefore(hint, root.firstChild);
+  }
+
+  /* ---------------------------------------------------------- reading bar */
+
+  var readingBar;
+  function initReadingBar() {
+    if (!readingBar) {
+      readingBar = el("div", "reading-bar");
+      document.body.appendChild(readingBar);
+      var update = function () {
+        var h = document.documentElement;
+        var max = h.scrollHeight - h.clientHeight;
+        readingBar.style.transform = "scaleX(" + (max > 0 ? h.scrollTop / max : 0) + ")";
+      };
+      window.addEventListener("scroll", update, { passive: true });
+      window.addEventListener("resize", update);
+      readingBar.update = update;
+    }
+    readingBar.hidden = !moduleSlug();
+    readingBar.update();
+  }
+
   /* --------------------------------------------------------------- progress */
 
   function readProgress() {
@@ -517,7 +695,10 @@
     document.querySelectorAll(".decision").forEach(initDecision);
     document.querySelectorAll(".widget-chmod").forEach(initChmod);
     document.querySelectorAll(".widget-subnet").forEach(initSubnet);
+    document.querySelectorAll(".terminal-sim").forEach(initTerminal);
+    document.querySelectorAll(".flashcards").forEach(initFlashcards);
     initProgress();
+    initReadingBar();
   }
 
   if (typeof window.document$ !== "undefined" && window.document$.subscribe) {

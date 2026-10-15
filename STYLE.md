@@ -104,6 +104,10 @@ Use `!!! pitfall` blocks or a table: symptom → cause → fix.
 
 A table of the commands from this module: command | what it does.
 
+## Flashcards
+
+6 to 10 `.flashcards` cards (see below).
+
 ## Recap
 
 !!! recap "Key takeaways"
@@ -120,8 +124,8 @@ A table of the commands from this module: command | what it does.
 ````
 
 Target length: 500 to 900 lines of Markdown per module. Aim for at least
-**3 diagrams** (mermaid and/or `.layers`/`.stepper`), **3 to 5 quizzes**, and
-**3 or more labs** per module. More examples beat more prose.
+**3 diagrams** (mermaid and/or `.layers`/`.stepper`), **3 to 5 quizzes**,
+**1 practice terminal**, a **flashcards** set, and **3 or more labs** per module. More examples beat more prose.
 
 ## Formatting conventions
 
@@ -379,6 +383,55 @@ end-points (shown highlighted).
 <div class="node" data-id="dns" markdown>
 
 The network works, so names must be the problem. Check `/etc/resolv.conf`…
+
+</div>
+
+</div>
+````
+
+#### Practice terminal: type real commands
+
+A simulated terminal that checks what the reader types. Best for drilling
+commands right after you teach them (one or two per module). Each `.task`
+holds the instruction, `data-expect` (the accepted command; separate
+alternatives with `||`), an optional `data-match` regular expression for
+looser matching, a `data-hint`, and a `text` code block with the output to
+print on success (hidden until then). `data-prompt` on the container changes
+the prompt (default `[alex@rocky-lab ~]$ `).
+
+````markdown
+<div class="terminal-sim" data-title="Find the culprit" markdown>
+
+<div class="task" data-expect="systemctl status httpd||systemctl status httpd.service" data-hint="Ask systemctl for the status of the httpd unit." markdown>
+
+**Step 1.** Check whether the web server is running.
+
+```text
+× httpd.service - The Apache HTTP Server
+     Active: failed (Result: exit-code) since …
+```
+
+</div>
+
+</div>
+````
+
+Keep it to 3 to 6 tasks. Accept every reasonable spelling of a command
+(`ls -l` vs `ls -la`, `.service` suffix or not) with `||` or `data-match`.
+
+#### Flashcards: recall practice
+
+Put a set of 6 to 10 cards in a `## Flashcards` section just before the
+Recap. The first paragraph of each card is the front, the rest is the back.
+
+````markdown
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+What does `systemctl mask` do?
+
+Links the unit to `/dev/null` so nothing, not even a dependency, can start it.
 
 </div>
 
