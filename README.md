@@ -1,13 +1,18 @@
-# LinuxTrainingCourse
+# Rocky Linux Deep Dive
 
-Linux Internals training track: 14 mechanism-first modules covering a running
-Linux system from permissions and PAM through the kernel, namespaces/cgroups,
-eBPF tracing, SELinux, and early userspace.
+An easy-to-follow, hands-on deep dive into how Rocky Linux really works: 21
+modules that go from "how does a command run?" to boot, storage, networking,
+SELinux, containers, and performance, with interactive diagrams, checkpoint
+quizzes, and self-cleaning labs for a throwaway Rocky Linux 10 VM.
 
-- `content/` — the course modules in Markdown (the only source of truth)
-- `mkdocs.yml` — MkDocs Material site config (builds into `dist/`, not committed)
-- `hooks/wikilinks.py` — resolves Obsidian `[[wikilinks]]` to page slugs at build
-  time; targets that live in other tracks render as plain text
+- `content/`: the course, in Markdown (the only source of truth)
+- `STYLE.md`: the authoring guide. Read it before writing or editing a module.
+- `content/javascripts/widgets.js` + `content/stylesheets/widgets.css`: the
+  interactive widgets (stepper, layers, quiz, decision tree, chmod and subnet
+  calculators, progress tracking)
+- `hooks/wikilinks.py`: resolves `[[wikilinks]]` and `[[man:name(N)]]` man page badges
+- `includes/abbreviations.md`: hover tooltips for acronyms, applied site-wide
+- `mkdocs.yml`: MkDocs Material site config (builds into `dist/`, not committed)
 
 ## Hosting on Cloudflare Pages
 
@@ -24,5 +29,6 @@ Cloudflare builds the site on every push:
 ```
 pip install -r requirements.txt
 mkdocs serve
-
 ```
+
+Run `mkdocs build --strict` before pushing; it fails on broken links.
