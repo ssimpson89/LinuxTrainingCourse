@@ -1,6 +1,6 @@
 ---
 title: SELinux
-description: SELinux without fear. How labels and type enforcement contain compromised services, and how to read denials and fix them properly instead of turning SELinux off.
+description: SELinux without fear. Badges, stickers and a rulebook. Learn the one idea behind SELinux, read a denial as a plain sentence, and fix the three problems that cause almost every SELinux error.
 ---
 
 # 16 · SELinux
@@ -11,30 +11,58 @@ description: SELinux without fear. How labels and type enforcement contain compr
   <li>Builds on: 04 · Permissions and ACLs, 07 · systemd and Services</li>
 </ul>
 
-You move a web page into `/var/www/html`, the permissions are `644`, Apache runs fine, and the browser says **403 Forbidden**. Someone on a forum says "just run `setenforce 0`", and it works. Please don't. SELinux just stopped something it was built to stop, and the real fix is one command. This module takes the fear out of SELinux: you will learn what it protects, how it decides, and how to read its messages so that the fix is quick, correct and small.
+You move a web page into `/var/www/html`, the permissions are `644`, Apache runs fine, and the browser says **403 Forbidden**. Someone on a forum says "just run `setenforce 0`", and it works. Please don't. SELinux just stopped something it was built to stop, and the real fix is one command.
+
+SELinux has a reputation for being hard. It isn't, once you see the one idea underneath it. This module gives you that idea first, then shows you how to read SELinux's error messages as plain sentences, and then walks through the three fixes that solve almost every real problem.
 
 !!! abstract "What you'll learn"
-    - Explain why normal Unix permissions cannot contain a compromised service, and how SELinux can.
-    - Read an SELinux **context** and find the **type** that matters.
-    - Describe how an access check works: permissions first, then SELinux policy.
-    - Switch modes safely, including making one service permissive while the rest stays enforcing.
-    - Fix the three most common problems: wrong file labels, a boolean that is off, and an unlabeled port.
-    - Read an AVC denial, use `audit2why`, and know why blindly running `audit2allow` is a bad idea.
-    - Work out quickly whether a problem is SELinux at all.
+    - Explain SELinux in one sentence: badges, stickers and a rulebook.
+    - Find the one part of a label that matters (the **type**) and ignore the rest.
+    - Turn any SELinux denial into a plain English sentence, and tell from that sentence what is wrong.
+    - Fix the three problems behind almost every denial: a wrong file label, a switch (boolean) that is off, and an unlabeled port.
+    - Debug one service in permissive mode while the rest of the system stays protected.
+    - Know why `setenforce 0` and blindly running `audit2allow` are the wrong fixes.
 
 ## The big picture
 
-### Why permissions are not enough
+### SELinux in one sentence
 
-Classic Unix permissions (owner, group, other, plus ACLs) are called **DAC**, for **discretionary access control**. "Discretionary" means the *owner* of a file decides who can use it. And every program runs with the full rights of the user who started it.
+Here is the whole idea:
 
-Now imagine your web server has a bug. An attacker sends a crafted request and gets to run commands as the `apache` user. With DAC alone, what can they do? Anything `apache` can do: read every world-readable file on the system (`/etc/passwd`, users' home directories with sloppy permissions, other apps' config files), write wherever `apache` can write, connect out to any host to download more tools, and listen on any high port. Permissions were designed to separate *users* from each other, not to limit what a *program* is allowed to do.
+> **Every process wears a badge. Every file and port wears a sticker. A rulebook lists which badges may touch which stickers, and anything not in the rulebook is refused.**
 
-**SELinux** (Security-Enhanced Linux) adds **MAC**, **mandatory access control**. Mandatory means the rules come from a central **policy** loaded into the kernel, and no user (not even the file owner, and not even root in most cases) can wave them away. The policy says, in effect: "the web server process may read web content, write its logs, and listen on web ports. Nothing else." The compromised web server is now locked in a small box.
+That's it. Everything else in this module is detail around that sentence.
+
+- The **badge** on a process is called its **domain**. The web server's badge says `httpd_t`. The SSH server's says `sshd_t`.
+- The **sticker** on a file, directory or port is called its **type**. Web pages have the sticker `httpd_sys_content_t`. Files in home directories have `user_home_t`. The password file has `shadow_t`.
+- The **rulebook** is the **policy**. It has rules like "`httpd_t` may read `httpd_sys_content_t` files". It comes with Rocky, already written for hundreds of services.
+
+Badges and stickers are both written the same way (a name ending in `_t`, for "type"), so you'll often hear both just called "types". Together, a badge or sticker plus some extra fields is called a **label** or **security context**.
+
+```mermaid
+flowchart LR
+    P["httpd process<br/>badge: httpd_t"] --> R{"Rulebook<br/>(policy)"}
+    R -- "rule exists" --> A["/var/www/html/index.html<br/>sticker: httpd_sys_content_t<br/>✔ allowed"]
+    R -- "no rule" --> B["/home/alice/notes.txt<br/>sticker: user_home_t<br/>✘ denied"]
+    R -- "no rule" --> C["/etc/shadow<br/>sticker: shadow_t<br/>✘ denied"]
+```
+
+!!! analogy "Think of it like an office building"
+    Every employee wears a badge that says what job they do: "kitchen staff", "IT", "accounting". Every door has a sticker that says what's behind it: "kitchen", "server room", "payroll files". The building's security system has a list: "kitchen staff may open kitchen doors", "IT may open server room doors". When you tap your badge, the reader checks the list. Not on the list? The door stays shut, no matter who you are or how politely you ask.
+
+    Where the analogy breaks: in real buildings a manager can override the reader. In SELinux, the rulebook is loaded into the kernel and even root follows it (unless root changes the rulebook itself).
+
+### Why we need it: permissions protect users, not programs
+
+You already know normal Unix permissions (owner, group, other, plus ACLs) from [module 04](04-permissions-and-acls.md). They're called **DAC**, for **discretionary access control**, because the file's owner decides who can use it. And every program runs with *all* the rights of the user who started it.
+
+Now imagine your web server has a bug. An attacker sends a crafted request and gets to run commands as the `apache` user. With DAC alone, they can do anything `apache` can: read every world-readable file on the system, write wherever `apache` can write, connect out to any host to download more tools, and listen on any high port. Permissions were designed to keep *users* apart, not to limit what a *program* may do.
+
+SELinux adds **MAC**, **mandatory access control**. "Mandatory" means the rulebook decides, not the file owner. The web server's badge only opens the doors a web server needs: web content, its logs, web ports. So the hijacked web server is stuck in a very small room.
 
 ```mermaid
 flowchart TB
-    A["Attacker exploits httpd"] --> B["Runs code as user apache,<br/>SELinux domain httpd_t"]
+    A["Attacker exploits httpd"] --> B["Runs code as user apache,<br/>badge httpd_t"]
     B --> C["Read /var/www/html<br/>(httpd_sys_content_t)"]
     B --> D["Read /home/alice/.ssh<br/>(ssh_home_t)"]
     B --> E["Connect out to port 4444"]
@@ -45,89 +73,150 @@ flowchart TB
     F --> F2["Denied by DAC and SELinux"]
 ```
 
-!!! analogy "Think of it like hotel keycards"
-    DAC is like the lock on each room door, which the guest controls. SELinux is the hotel's keycard system: every card (process) is programmed for a role, like "housekeeping, floors 2 to 4" or "kitchen staff". Even if someone steals a kitchen card, it will not open the guest rooms, because the central system says kitchen cards don't open guest rooms. Where the analogy breaks: in SELinux, *both* checks must pass. Having the right keycard does not help if the door's own lock (DAC) says no.
+Both checks must pass. Normal permissions are checked first; if they say no, the answer is no. If they say yes, SELinux gets a second veto. **SELinux can only take access away. It never gives access that permissions deny.**
 
-On Rocky Linux, SELinux is **enabled and enforcing by default**, with the **targeted** policy. "Targeted" means the policy confines the network-facing and system services (web server, DNS, SSH, databases, containers and hundreds more), while ordinary logged-in users run mostly **unconfined**.
+On Rocky Linux, SELinux is **on and enforcing by default**, using the **targeted** policy. "Targeted" means the rulebook confines network-facing and system services (web servers, DNS, SSH, databases, containers and hundreds more), while you, a logged-in human, run mostly unconfined.
 
 ```console
-$ sestatus
-SELinux status:                 enabled
-SELinuxfs mount:                /sys/fs/selinux
-SELinux root directory:         /etc/selinux
-Loaded policy name:             targeted
-Current mode:                   enforcing
-Mode from config file:          enforcing
-Policy MLS status:              enabled
-Policy deny_unknown status:     allowed
-Memory protection checking:     actual (secure)
-Max kernel policy version:      33
+$ getenforce
+Enforcing
 ```
 
-## Labels: everything gets a context
+### The good news: three fixes cover almost everything
 
-SELinux makes decisions by comparing **labels**. Every process and every object (file, directory, port, socket, device) has one. A label is also called a **security context** and has four colon-separated fields:
+When SELinux blocks something legitimate, the cause is nearly always one of three things. Learn these and you can fix the vast majority of SELinux problems you'll ever meet.
 
-```text
-system_u:object_r:httpd_sys_content_t:s0
-   │        │             │            │
-  user     role          type        level
+| What's wrong | In badge-and-sticker terms | The fix |
+|---|---|---|
+| **1. A file has the wrong label** | The file is wearing the wrong sticker (a web page with a home-directory sticker) | `restorecon` puts the right sticker back. For a new location, teach SELinux with `semanage fcontext` first. |
+| **2. A boolean is off** | The rulebook has an optional rule, but its switch is off ("may the web server talk to a database?") | `setsebool -P <name> on` |
+| **3. A port has no label** | The service wants a port that doesn't wear its sticker (Apache on port 3131) | `semanage port -a` gives the port the right sticker |
+
+And there's one simple process to find out which of the three you have:
+
+```mermaid
+flowchart TB
+    S["Something fails with<br/>'Permission denied' or 403"] --> A["1. Find the denial<br/>sudo ausearch -m AVC -ts recent"]
+    A --> B["2. Read it as a sentence<br/>'BADGE was denied ACTION on a THING with STICKER'"]
+    B --> C{"3. Which part is wrong?"}
+    C -- "The sticker on a file" --> F1["Fix 1: relabel<br/>restorecon"]
+    C -- "The action is optional,<br/>and you want it" --> F2["Fix 2: boolean<br/>setsebool -P"]
+    C -- "A port has the<br/>wrong sticker" --> F3["Fix 3: label the port<br/>semanage port -a"]
 ```
 
-- **user**: an SELinux user (not your Linux login). `system_u` for system things, `unconfined_u` for normal logins.
-- **role**: used for role-based access. Files are always `object_r`. Processes are usually `system_r` or `unconfined_r`.
-- **type**: the important one. Almost every rule in the targeted policy is about types. A process's type is also called its **domain**.
-- **level**: for MLS/MCS (multi-level and multi-category security). On Rocky it is usually `s0`, plus **categories** like `s0:c123,c456` that isolate containers and VMs from each other.
+The rest of the module teaches each step. You'll see the labels for yourself, learn to read a denial, then practise each fix.
 
-For day-to-day work, **read the third field and ignore the rest**. Most commands take a `-Z` option to show labels:
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **label** / **context** | The full SELinux tag on something, like `system_u:object_r:httpd_sys_content_t:s0` |
+| **type** | The important part of a label (the third field). On files and ports it's the "sticker" |
+| **domain** | The type of a *process*, its "badge". `httpd_t`, `sshd_t` |
+| **policy** | The rulebook, loaded into the kernel |
+| **AVC denial** | SELinux's log message when it refuses something. AVC is the name of SELinux's decision cache |
+| **boolean** | An on/off switch for an optional set of rules |
+| **enforcing** / **permissive** | Blocking and logging / only logging |
+
+## Seeing labels: everything wears one
+
+Most commands you already know take a **`-Z`** option that shows labels. Try it.
+
+**Files:**
 
 ```console
 $ ls -Z /var/www/html/index.html /etc/shadow /home/alice/notes.txt
        system_u:object_r:httpd_sys_content_t:s0 /var/www/html/index.html
             system_u:object_r:shadow_t:s0 /etc/shadow
  unconfined_u:object_r:user_home_t:s0 /home/alice/notes.txt
+```
+
+**Processes:**
+
+```console
 $ ps -eZ | grep -E 'httpd|sshd|chronyd' | head -4
 system_u:system_r:httpd_t:s0        1450 ?        00:00:00 httpd
 system_u:system_r:sshd_t:s0-s0:c0.c1023 1023 ? 00:00:00 sshd
 system_u:system_r:chronyd_t:s0       812 ?        00:00:00 chronyd
+```
+
+**Yourself:**
+
+```console
 $ id -Z
 unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
-$ ss -ltnZ | grep ':22 '
-LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=1023,proc_ctx=system_u:system_r:sshd_t:s0-s0:c0.c1023,fd=3))
 ```
 
-The labels on files are stored in **extended attributes** on disk (the `security.selinux` attribute). That is important later: copying a file with a tool that does not preserve extended attributes loses its label.
-
-You can prove it by reading the raw attribute. `ls -Z` is just a pretty way of showing this:
+**Ports:**
 
 ```console
-$ getfattr -n security.selinux -d /var/www/html/index.html
-getfattr: Removing leading '/' from absolute path names
-# file: var/www/html/index.html
-security.selinux="system_u:object_r:httpd_sys_content_t:s0"
+$ sudo semanage port -l | grep -w http_port_t
+http_port_t                    tcp      80, 81, 443, 488, 8008, 8009, 8443, 9000
+http_port_t                    udp      80, 443
 ```
 
-A process's label lives in the kernel, not on disk, and is visible under `/proc`:
+A label has four fields separated by colons. **Only the third one matters day to day**:
 
-```console
-$ sudo cat /proc/$(pgrep -o httpd)/attr/current; echo
-system_u:system_r:httpd_t:s0
+```text
+system_u:object_r:httpd_sys_content_t:s0
+                  ^^^^^^^^^^^^^^^^^^^
+                  the type: read this, ignore the rest
 ```
 
-## Type enforcement: rules for who can touch what
+So in the output above: the web page wears `httpd_sys_content_t`, the password file wears `shadow_t`, Alice's notes wear `user_home_t`, the web server's badge is `httpd_t`, and you are `unconfined_t` (no restrictions to speak of). Ports 80 and 443 wear `http_port_t`.
 
-**Type enforcement** (TE) is the core of SELinux. The policy is a big list of `allow` rules of the form:
+Type names are designed to be read. `httpd_sys_content_t` is "web server system content". `httpd_log_t` is "web server logs". `ssh_port_t` is "SSH port". When you see a type, say it out loud and it usually explains itself.
+
+!!! example "Try it"
+    On your VM, run `ls -Z ~` and `ls -Z /etc/hosts /etc/shadow`. Your home files wear `user_home_t` (and dotfiles may have more specific types, like `ssh_home_t` on `~/.ssh`). `/etc/hosts` wears `net_conf_t`. Different stickers for different kinds of data.
+
+??? question "For the curious: the other three fields"
+    ```text
+    system_u:object_r:httpd_sys_content_t:s0
+       │        │             │            │
+      user     role          type        level
+    ```
+
+    - **user**: an SELinux user, not your Linux login. `system_u` for system things, `unconfined_u` for normal logins.
+    - **role**: used for role-based access. Files are always `object_r`. Processes are usually `system_r` or `unconfined_r`.
+    - **type**: the badge or sticker. Almost every rule in the targeted policy is written in terms of types.
+    - **level**: for MLS/MCS (multi-level and multi-category security). On Rocky it is usually `s0`, plus **categories** like `s0:c123,c456` that keep containers and VMs apart from each other (see "SELinux and containers" below).
+
+??? question "Under the hood: where labels are stored"
+    A file's label is stored on disk in an **extended attribute** called `security.selinux`. `ls -Z` is just a friendly way of showing it:
+
+    ```console
+    $ getfattr -n security.selinux -d /var/www/html/index.html
+    getfattr: Removing leading '/' from absolute path names
+    # file: var/www/html/index.html
+    security.selinux="system_u:object_r:httpd_sys_content_t:s0"
+    ```
+
+    This matters later: a backup or copy tool that doesn't preserve extended attributes loses the sticker. A process's label lives in the kernel instead, and is visible under `/proc`:
+
+    ```console
+    $ sudo cat /proc/$(pgrep -o httpd)/attr/current; echo
+    system_u:system_r:httpd_t:s0
+    ```
+
+    Even sockets show labels: `ss -ltnZ` adds the owning process's context to each listening socket.
+
+## How SELinux decides
+
+### The rulebook is a list of "allow" rules
+
+Every rule in the policy reads like a sentence:
 
 ```text
 allow   httpd_t   httpd_sys_content_t : file  { read open getattr map };
-        domain    target type           class   permissions
+        badge     sticker               class   actions
 ```
 
-Read it as: "a process in domain `httpd_t` may `read`, `open`, `getattr` and `map` objects of class `file` that have type `httpd_sys_content_t`." The **class** says what kind of object (file, dir, tcp_socket, process…), and the permissions are specific to that class.
+"A process with badge `httpd_t` may `read`, `open`, `getattr` and `map` **files** with sticker `httpd_sys_content_t`." The **class** says what kind of thing (file, dir, tcp_socket, process…), and the actions (called **permissions**) depend on the class.
 
-The golden rule: **anything not explicitly allowed is denied.** There is no rule letting `httpd_t` read `user_home_t` files, so it cannot, no matter what `chmod` says.
+The golden rule: **if no rule allows it, it's denied.** There's no rule letting `httpd_t` read `user_home_t` files, so the web server can't read your home directory, whatever `chmod` says.
 
-You can search the loaded policy with `sesearch` (from `setools-console`):
+You can ask the rulebook directly with `sesearch` (package `setools-console`):
 
 ```console
 $ sesearch --allow -s httpd_t -t httpd_sys_content_t -c file
@@ -137,10 +226,31 @@ $ sesearch --allow -s httpd_t -t user_home_t -c file
 $
 ```
 
-The second search returns nothing: no rule, so no access (unless a boolean adds one, as you will see).
+The second search returns nothing. No rule, no access.
+
+### How a process gets its badge
+
+You never assign badges by hand. They come from a **type transition** rule: "when a process with badge A runs a program with sticker B, the new process gets badge C". systemd runs as `init_t`. The Apache binary `/usr/sbin/httpd` wears `httpd_exec_t`. So when systemd starts Apache, the new process gets `httpd_t`.
+
+```mermaid
+flowchart LR
+    S["systemd<br/>badge init_t"] -- "runs /usr/sbin/httpd<br/>(sticker httpd_exec_t)" --> H["httpd<br/>badge httpd_t"]
+```
+
+That's also why starting a service by hand from your shell can behave differently from `systemctl start`: from your unconfined shell, the transition may not happen, so the process runs with your badge instead of the service's. Always test services with `systemctl`.
+
+??? question "Under the hood: your own app is probably not confined at all"
+    The targeted policy only confines programs it has rules for. So what happens when systemd starts *your* service, say `/opt/myapp/bin/myapp`? That binary has a generic sticker (`usr_t` under `/opt`, `bin_t` under `/usr/local/bin`). The policy has a catch-all for this case: systemd running a generic binary gives it the badge **`unconfined_service_t`**, which has almost no restrictions.
+
+    ```console
+    $ ps -eZ | grep myapp
+    system_u:system_r:unconfined_service_t:s0 4410 ?    00:00:02 myapp
+    ```
+
+    That is why third-party software "just works" under SELinux, and also why it gets no protection from it. `ps -eZ | grep unconfined_service_t` lists every service running unconfined. To confine one, `sepolicy generate --init /opt/myapp/bin/myapp` (package `policycoreutils-devel`) writes a starting policy. Iterating on it is a project, not a quick fix, but for an internet-facing app it is worth it.
 
 ??? question "For the curious: where does the policy live?"
-    The policy is compiled from hundreds of **modules** (one per service, roughly) stored under `/var/lib/selinux/targeted/`. At boot, the combined binary policy in `/etc/selinux/targeted/policy/` is loaded into the kernel, which exposes it under `/sys/fs/selinux/`. `semodule -l` lists the modules, and `seinfo` (from `setools-console`) prints counts of types, rules and booleans in the loaded policy:
+    The policy is built from hundreds of **modules** (roughly one per service) stored under `/var/lib/selinux/targeted/`. At boot the combined binary policy in `/etc/selinux/targeted/policy/` is loaded into the kernel, which exposes it under `/sys/fs/selinux/`. `semodule -l` lists the modules, and `seinfo` (from `setools-console`) prints counts of types, rules and booleans:
 
     ```console
     $ sudo semodule -l | grep -E '^(apache|container|ssh)$'
@@ -151,35 +261,23 @@ The second search returns nothing: no rule, so no access (unless a boolean adds 
     file_contexts  file_contexts.bin  file_contexts.homedirs  file_contexts.homedirs.bin  file_contexts.local  file_contexts.subs  file_contexts.subs_dist  media
     ```
 
-    Run `seinfo` yourself: the policy has thousands of types and tens of thousands of allow rules. `file_contexts` is the shipped path-to-label database that `restorecon` and `matchpathcon` read; `file_contexts.local` is where your `semanage fcontext` rules end up. You never edit these files directly: `semanage` writes them and rebuilds the policy.
-
-**How does a process get its domain?** Through **type transitions**: rules that say "when a process in domain A executes a file of type B, the new process runs in domain C". systemd runs in `init_t`; when it executes `/usr/sbin/httpd` (type `httpd_exec_t`), the new process enters `httpd_t`. That is why starting a service by hand from your shell can behave differently from starting it with `systemctl`: from an unconfined shell, the transition may not happen.
-
-??? question "Under the hood: your own app is probably not confined at all"
-    The targeted policy only confines programs it has a policy for. So what happens when systemd starts *your* service, say `/opt/myapp/bin/myapp`? That binary has a generic type (`usr_t` under `/opt`, `bin_t` under `/usr/local/bin`). The policy has a catch-all transition for exactly this case: systemd executing a generic binary lands it in **`unconfined_service_t`**, a domain with almost no restrictions.
-
-    ```console
-    $ ps -eZ | grep myapp
-    system_u:system_r:unconfined_service_t:s0 4410 ?    00:00:02 myapp
-    ```
-
-    That is why third-party software "just works" under SELinux, and also why it gets no protection from it. Audit your servers for it: `ps -eZ | grep unconfined_service_t` lists every service running unconfined. To confine one, generate a starting policy with `sepolicy generate --init /opt/myapp/bin/myapp` (package `policycoreutils-devel`), which writes a `.te`, `.fc` and build script. Running it in permissive first and iterating on the denials is a project, not a quick fix, but for an internet-facing app it is worth it.
+    `file_contexts` is the shipped path-to-label list that `restorecon` and `matchpathcon` read; `file_contexts.local` is where your `semanage fcontext` rules end up. You never edit these files directly: `semanage` writes them and rebuilds the policy.
 
 ### What happens on every access
 
-Here is the order of checks when a process opens a file. Click through it.
+Here's the order of checks when a process opens a file. Click through it.
 
 <div class="stepper" markdown>
 
 <div class="step" data-title="The system call" markdown>
 
-`httpd` (running as user `apache`, domain `httpd_t`) calls `open("/var/www/html/index.html", O_RDONLY)`. The kernel must decide whether to allow it.
+`httpd` (running as user `apache`, badge `httpd_t`) calls `open("/var/www/html/index.html", O_RDONLY)`. The kernel must decide whether to allow it.
 
 </div>
 
-<div class="step" data-title="DAC first" markdown>
+<div class="step" data-title="Permissions first" markdown>
 
-The kernel checks normal permissions and ACLs: is `apache` the owner, in the group, or covered by "other" with read permission? If **no**, the call fails with `Permission denied` right here and SELinux is never asked. No AVC message is logged.
+The kernel checks normal permissions and ACLs: is `apache` the owner, in the group, or covered by "other" with read permission? If **no**, the call fails with `Permission denied` right here and SELinux is never asked. No SELinux message is logged.
 
 ```console
 $ ls -l /var/www/html/index.html
@@ -190,23 +288,23 @@ The trailing `.` after the mode means the file has an SELinux label.
 
 </div>
 
-<div class="step" data-title="SELinux hook" markdown>
+<div class="step" data-title="SELinux gets a veto" markdown>
 
-DAC said yes, so the kernel calls the SELinux security hook. SELinux gathers the **source** context (the process: `httpd_t`), the **target** context (the file: `httpd_sys_content_t`), the **class** (`file`) and the **permission** (`read`, `open`).
+Permissions said yes, so the kernel asks SELinux. SELinux looks at four things: the badge (`httpd_t`), the sticker (`httpd_sys_content_t`), the class (`file`) and the action (`read`, `open`).
 
 </div>
 
-<div class="step" data-title="Ask the cache (AVC)" markdown>
+<div class="step" data-title="Check the rulebook (cached)" markdown>
 
-Decisions are cached in the **AVC** (access vector cache), so most checks take nanoseconds. On a miss, SELinux looks up the policy and caches the answer. This is why SELinux denial messages are called "AVC denials".
+Answers are cached in the **AVC** (access vector cache), so most checks take nanoseconds. On a miss, SELinux looks up the policy and caches the answer. That cache is why SELinux's error messages are called "AVC denials".
 
 </div>
 
 <div class="step" data-title="Allow or deny" markdown>
 
-If an `allow` rule matches, the `open()` succeeds. If not:
+If a rule matches, the `open()` succeeds. If not:
 
-- In **enforcing** mode, the call fails with `EACCES` (`Permission denied`) and an AVC denial is written to the audit log.
+- In **enforcing** mode, the call fails with `Permission denied` and an AVC denial is written to the audit log.
 - In **permissive** mode, the call *succeeds*, but the same AVC denial is still logged.
 
 </div>
@@ -220,7 +318,7 @@ scontext=system_u:system_r:httpd_t:s0
 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
 ```
 
-From the application's side, a DAC denial and an SELinux denial look identical: `Permission denied`. The audit log is how you tell them apart.
+To the application, a permissions denial and an SELinux denial look identical: `Permission denied`. The audit log is how you tell them apart.
 
 </div>
 
@@ -231,216 +329,23 @@ From the application's side, a DAC denial and an SELinux denial look identical: 
 A file is mode `600` owned by `root`, and labeled `httpd_sys_content_t`. `httpd` (user `apache`) tries to read it. What happens, and is an AVC denial logged?
 
 - Allowed, because the SELinux type is correct
-- Denied by DAC; no AVC is logged because SELinux is never consulted
+- Denied by normal permissions; no AVC is logged because SELinux is never asked
 - Denied by SELinux; an AVC is logged
-- Allowed, because SELinux overrides DAC
+- Allowed, because SELinux overrides normal permissions
 
-Right. DAC is checked first and already says no (`apache` is "other", which has no permissions). SELinux can only ever *further restrict* access; it never grants what DAC denied.
-
-</div>
-
-## Modes: enforcing, permissive, disabled
-
-SELinux has three modes:
-
-- **Enforcing**: denials are blocked and logged. The default and the only mode you want in production.
-- **Permissive**: denials are logged but *not* blocked. A diagnostic mode.
-- **Disabled**: SELinux is not running at all. Files created while disabled get no labels.
-
-```console
-$ getenforce
-Enforcing
-$ sudo setenforce 0          # permissive until reboot
-$ getenforce
-Permissive
-$ sudo setenforce 1          # back to enforcing
-```
-
-The boot-time mode is set in `/etc/selinux/config`:
-
-```ini title="/etc/selinux/config"
-SELINUX=enforcing
-SELINUXTYPE=targeted
-```
-
-### Better than global permissive: one permissive domain
-
-Switching the whole machine to permissive turns off protection for *every* service. If you need to debug one service, make only its domain permissive:
-
-```console
-$ sudo semanage permissive -a httpd_t
-$ sudo semanage permissive -l
-
-Customized Permissive Types
-
-httpd_t
-$ sudo semanage permissive -d httpd_t
-```
-
-Everything else stays enforcing, and `httpd_t` denials are logged with `permissive=1` so you can collect them all in one go.
-
-??? question "Under the hood: why permissive mode logs each denial only once"
-    In enforcing mode, a denied access is denied (and usually logged) every time. In permissive mode, after logging a denial the kernel records that access in the AVC as allowed, so the *same* source, target, class and permission is not reported again. You get one line per distinct problem instead of a flood.
-
-    Two consequences. First, a permissive run gives you a compact, complete list of what the application needs, which is exactly the input `audit2allow` wants. Second, if you fix something and retest in permissive mode, an old denial will not reappear even if your fix did not work. Reloading the policy (for example `sudo semodule -R`) or a reboot clears the cache.
-
-!!! warning "Do not disable SELinux"
-    Since Rocky 9, setting `SELINUX=disabled` in `/etc/selinux/config` is no longer the supported way to turn SELinux off; the supported way is the `selinux=0` kernel argument. Either way, disabling is almost always the wrong answer. While SELinux is disabled, new files get no labels, so turning it back on later forces a full **relabel** of every file at boot (`/.autorelabel`), which can take a long time on big filesystems. If you must, use permissive mode, and better still, a permissive domain.
-
-## File labels: where they come from and how to fix them
-
-Most SELinux problems in real life are **wrong file labels**. To fix them, you need to know where labels come from.
-
-1. **The file context database.** The policy contains a list of path patterns and the label each should have. `semanage fcontext -l` shows it.
-2. **Inheritance.** A newly *created* file normally gets the type of the directory it is created in (or a type set by a transition rule, for example files `httpd` creates in `/var/log/httpd`).
-3. **Explicit relabeling.** `restorecon` sets a file's label to whatever the database says it should be. `chcon` sets a label by hand, temporarily.
-
-```console
-$ sudo semanage fcontext -l | grep '^/var/www(/'
-/var/www(/.*)?                                     all files          system_u:object_r:httpd_sys_content_t:s0
-$ matchpathcon /var/www/html/index.html
-/var/www/html/index.html	system_u:object_r:httpd_sys_content_t:s0
-```
-
-`matchpathcon` answers "what *should* this path be labeled?" without changing anything. `restorecon -nv` does the same for a whole tree as a dry run.
-
-### The `mv` vs `cp` trap
-
-This is the classic. You write a page in your home directory and move it into the web root:
-
-```mermaid
-flowchart TB
-    subgraph home["/home/alice"]
-        F1["page.html<br/>user_home_t"]
-    end
-    subgraph web["/var/www/html"]
-        M["page.html via mv<br/>still user_home_t<br/>403 Forbidden"]
-        C["page.html via cp<br/>new file: httpd_sys_content_t<br/>200 OK"]
-    end
-    F1 -- "mv: same inode, label travels with it" --> M
-    F1 -- "cp: new file, inherits directory's type" --> C
-```
-
-- **`mv`** (within one filesystem) just renames the file. The inode and its label move along unchanged, so the file keeps `user_home_t`, and `httpd_t` cannot read it.
-- **`cp`** creates a *new* file, which gets the label for its new location. (Unless you use `cp -a` or `--preserve=context`, which deliberately copies the old label.)
-
-The fix in either case is `restorecon`:
-
-```console
-$ ls -Z /var/www/html/page.html
-unconfined_u:object_r:user_home_t:s0 /var/www/html/page.html
-$ sudo restorecon -v /var/www/html/page.html
-Relabeled /var/www/html/page.html from unconfined_u:object_r:user_home_t:s0 to unconfined_u:object_r:httpd_sys_content_t:s0
-```
-
-The same thing happens when you restore from a backup made without extended attributes, or extract a tarball without `--selinux`. When in doubt, `restorecon -Rv` the directory.
-
-### Teaching SELinux about a new location
-
-When you serve content from a non-standard place like `/srv/site`, the database has no rule for it, so files get a generic type (`var_t` or `default_t`) that `httpd_t` cannot read. Add a rule with `semanage fcontext`, then apply it with `restorecon`:
-
-```console
-$ sudo semanage fcontext -a -t httpd_sys_content_t '/srv/site(/.*)?'
-$ sudo restorecon -Rv /srv/site
-Relabeled /srv/site from unconfined_u:object_r:var_t:s0 to unconfined_u:object_r:httpd_sys_content_t:s0
-Relabeled /srv/site/index.html from unconfined_u:object_r:var_t:s0 to unconfined_u:object_r:httpd_sys_content_t:s0
-$ sudo semanage fcontext -l -C
-SELinux fcontext                                   type               Context
-
-/srv/site(/.*)?                                    all files          system_u:object_r:httpd_sys_content_t:s0
-```
-
-`-C` lists only your local customizations. The pattern `'/srv/site(/.*)?'` is a regular expression meaning "the directory and everything under it". Quote it, or the shell may mangle it.
-
-??? question "Under the hood: equivalence rules and what restorecon leaves alone"
-    If a new location should be labeled *exactly like* an existing one (a second web root, `/home` moved to `/data/home`), an **equivalence rule** is better than copying patterns. It tells the labeling database "treat this path as if it were that path", including every sub-rule underneath:
-
-    ```console
-    $ sudo semanage fcontext -a -e /var/www /srv/www
-    $ matchpathcon /srv/www/cgi-bin/app.cgi
-    /srv/www/cgi-bin/app.cgi	system_u:object_r:httpd_sys_script_exec_t:s0
-    ```
-
-    Two `restorecon` details that surprise people. By default it only fixes the **type** and leaves the SELinux user (`unconfined_u` vs `system_u`) alone; `restorecon -F` forces the whole context. And some types are **customizable** (listed in `/etc/selinux/targeted/contexts/customizable_types`): `restorecon` will not overwrite them without `-F`, because an admin presumably set them on purpose. To relabel an entire system at the next boot, run `sudo fixfiles -F onboot` (or `sudo touch /.autorelabel`) and reboot.
-
-Pick the type that matches what the service should do. For the web server: `httpd_sys_content_t` for read-only content, `httpd_sys_rw_content_t` for directories the app writes to (uploads, caches), `httpd_log_t` for logs. Find the types a policy offers with `man httpd_selinux` (install `selinux-policy-doc` for these per-service man pages).
-
-!!! pitfall "`chcon` is temporary"
-    `chcon -t httpd_sys_content_t file` changes the label right now and appears to fix things. But the database still says something else, so the next `restorecon` (or a full relabel) silently reverts it, and the outage comes back weeks later. Use `chcon` only for quick experiments; use `semanage fcontext` + `restorecon` for anything real.
-
-<div class="quiz" data-answer="3" markdown>
-
-You ran `sudo mv ~/report.pdf /var/www/html/` and the web server returns 403. Permissions are `644`. What is the best fix?
-
-- `sudo setenforce 0`
-- `sudo chmod 777 /var/www/html/report.pdf`
-- `sudo restorecon -v /var/www/html/report.pdf`
-- `sudo semanage fcontext -a -t httpd_sys_content_t /var/www/html/report.pdf`
-
-Right. The database already knows what files under `/var/www` should be labeled; the file just kept its old home-directory label because `mv` preserves it. `restorecon` resets it to the correct type. A new `fcontext` rule is only needed for locations the policy does not already know.
+Right. Permissions are checked first and already say no (`apache` is "other", which has no permissions). SELinux can only ever *take away* access; it never grants what permissions deny.
 
 </div>
 
-## Booleans: switches built into the policy
+## Reading a denial as a sentence
 
-Some behaviours are legitimate for some sites and dangerous for others. Should the web server be allowed to make outbound network connections (to talk to an API or a remote database)? Should it read users' `~/public_html`? The policy authors wrote those rules in advance and put them behind **booleans**: on/off switches you can flip without writing any policy.
+This is the most useful skill in the whole module. SELinux denials look scary, but every one of them fits the same sentence:
 
-```console
-$ getsebool -a | grep ^httpd_can_network
-httpd_can_network_connect --> off
-httpd_can_network_connect_cobbler --> off
-httpd_can_network_connect_db --> off
-httpd_can_network_memcache --> off
-httpd_can_network_redis --> off
-httpd_can_network_relay --> off
-$ sudo semanage boolean -l | grep httpd_can_network_connect_db
-httpd_can_network_connect_db   (off  ,  off)  Allow httpd to can network connect db
-$ sudo setsebool -P httpd_can_network_connect_db on
-$ getsebool httpd_can_network_connect_db
-httpd_can_network_connect_db --> on
-```
+> **"`<badge>` was denied `<action>` on a `<class>` wearing `<sticker>`."**
 
-The `(off , off)` columns are the current value and the default. **Always use `-P`** (persistent) unless you are only testing. Without it, the change is lost at reboot and the problem returns.
+### Finding denials
 
-Choose the narrowest boolean. A PHP app that talks to PostgreSQL needs `httpd_can_network_connect_db`, not the much broader `httpd_can_network_connect` (any port). Other common ones: `httpd_use_nfs`, `httpd_enable_homedirs`, `samba_enable_home_dirs`, `use_nfs_home_dirs`, `container_manage_cgroup`.
-
-## Ports: which domains may use which ports
-
-Ports have labels too. `httpd_t` may listen on ports labeled `http_port_t`, `sshd_t` on `ssh_port_t`, and so on. That stops a compromised service from opening a backdoor on a random port, and it explains why moving a service to a new port fails even after you open the firewall.
-
-```console
-$ sudo semanage port -l | grep -E '^(http_port_t|ssh_port_t) '
-http_port_t                    tcp      80, 81, 443, 488, 8008, 8009, 8443, 9000
-http_port_t                    udp      80, 443
-ssh_port_t                     tcp      22
-$ sudo semanage port -a -t http_port_t -p tcp 3131
-$ sudo semanage port -l -C
-SELinux Port Type              Proto    Port Number
-
-http_port_t                    tcp      3131
-```
-
-If a port already belongs to another type, `-a` fails with "already defined"; use `-m` (modify) instead. Remove your addition with `semanage port -d -t http_port_t -p tcp 3131`.
-
-!!! tip "Moving SSH to another port"
-    You need three things: `Port 2222` in an sshd drop-in, `sudo semanage port -a -t ssh_port_t -p tcp 2222`, and a firewall rule ([module 12](12-firewalld.md)). Miss the SELinux step and `sshd` fails to start with "Bind to port 2222 … failed: Permission denied".
-
-<div class="quiz" data-answer="3" markdown>
-
-You changed PostgreSQL to listen on port 5433, opened it in firewalld, and now `postgresql.service` fails with "could not bind … Permission denied". `ausearch` shows `denied { name_bind }` with `tcontext=…unreserved_port_t`. What is the fix?
-
-- `sudo setsebool -P postgresql_can_bind on`
-- `sudo restorecon -Rv /var/lib/pgsql`
-- `sudo semanage port -a -t postgresql_port_t -p tcp 5433`
-- `sudo chcon -t postgresql_port_t /etc/services`
-
-Right. The port has the generic `unreserved_port_t` type. Labeling it `postgresql_port_t` lets `postgresql_t` bind to it. Files are not involved, and there is no such boolean.
-
-</div>
-
-## Reading AVC denials
-
-When SELinux blocks something, it writes an **AVC record** to the audit log, `/var/log/audit/audit.log`, through `auditd`. Do not grep that file by hand; use `ausearch`:
+Denials go to the audit log, `/var/log/audit/audit.log`. Don't grep it by hand; use `ausearch` right after you reproduce the problem:
 
 ```console
 $ sudo ausearch -m AVC -ts recent
@@ -451,25 +356,71 @@ type=SYSCALL msg=audit(1792058601.448:1021): arch=c000003e syscall=257 success=n
 type=AVC msg=audit(1792058601.448:1021): avc:  denied  { read } for  pid=1452 comm="httpd" name="page.html" dev="vda4" ino=3412290 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
 ```
 
-`-ts recent` means the last 10 minutes; `-ts today` and `-ts boot` also work. Add `-c httpd` to filter by command, and `-i` to translate numbers into names (it decodes the hex `proctitle` into the real command line, `/usr/sbin/httpd -DFOREGROUND`). Here is how to read the AVC line:
+`-m AVC` picks SELinux denials and `-ts recent` means the last 10 minutes (`-ts today` and `-ts boot` also work). Add `-c httpd` to filter by program. Ignore the `PROCTITLE` and `SYSCALL` lines for now; the `type=AVC` line is the one you want.
 
-| Field | Value | Meaning |
+### Pulling out the five words
+
+You only need five pieces of that long line:
+
+```text
+avc:  denied  { read } for … comm="httpd" name="page.html" …
+                 ▲               ▲             ▲
+              ACTION           WHO         WHAT (name)
+
+scontext=system_u:system_r:httpd_t:s0  tcontext=unconfined_u:object_r:user_home_t:s0  tclass=file
+                           ▲                                          ▲                       ▲
+                     BADGE (source)                          STICKER (target)             CLASS
+```
+
+| Field | In this example | Meaning |
 |---|---|---|
-| `denied { read }` | `read` | The permission that was refused |
-| `comm`, `exe` | `httpd` | The program that tried |
-| `name`, `ino` | `page.html` | The object it tried to access |
-| `scontext` | `httpd_t` | The **source** domain (who) |
-| `tcontext` | `user_home_t` | The **target** type (what) |
-| `tclass` | `file` | The kind of object |
-| `permissive` | `0` | `0` = actually blocked, `1` = only logged |
+| `denied { … }` | `read` | The **action** that was refused |
+| `scontext` (3rd field) | `httpd_t` | The **badge**: who tried. "s" for source |
+| `tcontext` (3rd field) | `user_home_t` | The **sticker**: what they tried to touch. "t" for target |
+| `tclass` | `file` | What kind of thing it was |
+| `comm`, `name` | `httpd`, `page.html` | The program and the file name, to help you find it |
+| `permissive` | `0` | `0` = really blocked, `1` = only logged |
 
-Say it as a sentence: "**httpd_t** was denied **read** on a **file** of type **user_home_t**." Then ask: is the *source* right (is it really the web server?), and is the *target* type right (should a web page be `user_home_t`)? Here the target is wrong, so the fix is a relabel.
+Now say it as a sentence: "**`httpd_t` was denied `read` on a `file` wearing `user_home_t`.**"
 
-If `auditd` is not running, denials go to the kernel log instead: `journalctl -k --grep='avc:  denied'`.
+Then ask one question: **does that make sense?** Should the web server read a file with a *home directory* sticker? No. Should a web page in `/var/www/html` be wearing a home-directory sticker? Also no. The sticker is wrong. That's fix 1, a relabel. You've diagnosed the problem without touching anything.
+
+### Practise: translate three denials
+
+Read each denial, say the sentence, and decide which fix it needs before opening the answer.
+
+**Denial A:**
+
+```text
+avc:  denied  { name_bind } for  pid=3310 comm="httpd" src=3131 scontext=system_u:system_r:httpd_t:s0 tcontext=system_u:object_r:unreserved_port_t:s0 tclass=tcp_socket permissive=0
+```
+
+??? success "Answer A"
+    "`httpd_t` was denied `name_bind` (listening) on a `tcp_socket` wearing `unreserved_port_t`." The web server tried to listen on port 3131 (`src=3131`), and that port wears the generic "nobody's port" sticker, not `http_port_t`. **Fix 3: label the port** with `sudo semanage port -a -t http_port_t -p tcp 3131`.
+
+**Denial B:**
+
+```text
+avc:  denied  { name_connect } for  pid=2207 comm="php-fpm" dest=5432 scontext=system_u:system_r:httpd_t:s0 tcontext=system_u:object_r:postgresql_port_t:s0 tclass=tcp_socket permissive=0
+```
+
+??? success "Answer B"
+    "`httpd_t` was denied `name_connect` (connecting out) to a `tcp_socket` wearing `postgresql_port_t`." Your PHP app (PHP-FPM runs with the web server's badge) tried to connect to PostgreSQL on port 5432. The port's sticker is *correct*: it really is the PostgreSQL port. What's missing is permission for web apps to talk to databases, which is optional because many web servers should never do it. **Fix 2: a boolean**, `sudo setsebool -P httpd_can_network_connect_db on`.
+
+**Denial C:**
+
+```text
+avc:  denied  { getattr } for  pid=1452 comm="httpd" path="/srv/site/index.html" dev="vda4" ino=3412411 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:var_t:s0 tclass=file permissive=0
+```
+
+??? success "Answer C"
+    "`httpd_t` was denied `getattr` (looking at) a `file` wearing `var_t`." `var_t` is the generic sticker for "something under `/var` or another place SELinux knows nothing about". The files in `/srv/site` are web content but SELinux has no rule saying so. **Fix 1, the "new location" version:** teach SELinux with `semanage fcontext`, then `restorecon`.
+
+Notice the pattern. **A generic or wrong-looking sticker** (`user_home_t`, `var_t`, `default_t`, `unreserved_port_t`) on something the service legitimately uses means a labeling fix. **A correct sticker** but a missing permission means look for a boolean.
 
 ### setroubleshoot: denials in plain English
 
-The `setroubleshoot-server` package analyses each denial and writes a friendly summary to the journal, with suggested fixes:
+If you'd rather have a computer do the translation, install `setroubleshoot-server`. It analyses each denial and writes a summary with suggested fixes to the journal:
 
 ```console
 $ sudo dnf install -y setroubleshoot-server
@@ -487,14 +438,204 @@ Then you can run restorecon. …
 …
 ```
 
-The suggestions are ranked by confidence. Read them critically: the top suggestion is usually right, but the last one is almost always "generate a local policy module", which is rarely what you want.
+The suggestions are ranked by confidence. The top one is usually right. The last one is almost always "generate a local policy module", which is rarely what you want.
 
 !!! note "The denial you cannot see"
-    Some harmless denials are marked **dontaudit** in the policy, so they are blocked but never logged (to avoid noise). If you are sure something is being blocked but `ausearch` shows nothing, temporarily turn off dontaudit rules with `sudo semodule -DB`, reproduce the problem, read the new denials, then restore them with `sudo semodule -B`.
+    If `auditd` isn't running, denials go to the kernel log instead: `journalctl -k --grep='avc:  denied'`. And some harmless denials are marked **dontaudit** in the policy, so they're blocked but never logged (to avoid noise). If you're sure something is blocked but `ausearch` shows nothing, temporarily turn off dontaudit rules with `sudo semodule -DB`, reproduce the problem, read the new denials, then restore them with `sudo semodule -B`.
 
-## audit2why, audit2allow, and custom modules
+## Fix 1: the file has the wrong label
 
-**`audit2why`** reads denials and explains *why* they happened: a missing allow rule, a boolean that would allow it, or a constraint.
+Most real SELinux problems are files wearing the wrong sticker. To fix them, you need to know where stickers come from.
+
+1. **A list of paths and labels.** The policy includes a list of path patterns and the sticker each should have: "anything under `/var/www` gets `httpd_sys_content_t`". `semanage fcontext -l` shows it.
+2. **New files copy their folder.** A newly *created* file normally gets the sticker of the directory it's created in.
+3. **`restorecon`** sets a file's sticker to whatever the list says it should be.
+
+```console
+$ sudo semanage fcontext -l | grep '^/var/www(/'
+/var/www(/.*)?                                     all files          system_u:object_r:httpd_sys_content_t:s0
+$ matchpathcon /var/www/html/index.html
+/var/www/html/index.html	system_u:object_r:httpd_sys_content_t:s0
+```
+
+`matchpathcon` answers "what *should* this path wear?" without changing anything. `restorecon -nv` does the same for a whole tree as a dry run.
+
+### Example: the `mv` trap
+
+This is the classic. You write a page in your home directory and move it into the web root:
+
+```mermaid
+flowchart TB
+    subgraph home["/home/alice"]
+        F1["page.html<br/>user_home_t"]
+    end
+    subgraph web["/var/www/html"]
+        M["page.html via mv<br/>still user_home_t<br/>403 Forbidden"]
+        C["page.html via cp<br/>new file: httpd_sys_content_t<br/>200 OK"]
+    end
+    F1 -- "mv: same file, sticker comes along" --> M
+    F1 -- "cp: new file, gets the folder's sticker" --> C
+```
+
+- **`mv`** (within one filesystem) just renames the file. It's the same file, still wearing its `user_home_t` sticker, and `httpd_t` can't read that.
+- **`cp`** creates a *new* file, which gets the sticker for its new location. (Unless you use `cp -a` or `--preserve=context`, which deliberately copies the old sticker.)
+
+The fix is one command, `restorecon`:
+
+```console
+$ ls -Z /var/www/html/page.html
+unconfined_u:object_r:user_home_t:s0 /var/www/html/page.html
+$ sudo restorecon -v /var/www/html/page.html
+Relabeled /var/www/html/page.html from unconfined_u:object_r:user_home_t:s0 to unconfined_u:object_r:httpd_sys_content_t:s0
+```
+
+The same thing happens when you restore from a backup made without extended attributes, or extract a tarball without `--selinux`. When in doubt, `sudo restorecon -Rv` the directory. It's always safe: it only puts back the stickers the policy says should be there.
+
+### Example: serving files from a new location
+
+When you serve content from somewhere SELinux has never heard of, like `/srv/site`, the list has no rule for it, so files get a generic sticker (`var_t` or `default_t`) that `httpd_t` can't read. `restorecon` alone won't help, because as far as the list knows, `var_t` *is* correct.
+
+So first teach SELinux the rule, then apply it:
+
+```console
+$ sudo semanage fcontext -a -t httpd_sys_content_t '/srv/site(/.*)?'
+$ sudo restorecon -Rv /srv/site
+Relabeled /srv/site from unconfined_u:object_r:var_t:s0 to unconfined_u:object_r:httpd_sys_content_t:s0
+Relabeled /srv/site/index.html from unconfined_u:object_r:var_t:s0 to unconfined_u:object_r:httpd_sys_content_t:s0
+$ sudo semanage fcontext -l -C
+SELinux fcontext                                   type               Context
+
+/srv/site(/.*)?                                    all files          system_u:object_r:httpd_sys_content_t:s0
+```
+
+Two steps, always in this order: **`semanage fcontext` writes the rule, `restorecon` applies it.** `-C` lists only your own additions. The pattern `'/srv/site(/.*)?'` is a regular expression meaning "the directory and everything under it". Quote it, or the shell may mangle it.
+
+**Which sticker should you pick?** Choose the one that matches what the service does with the files. For the web server: `httpd_sys_content_t` for read-only content, `httpd_sys_rw_content_t` for directories the app writes to (uploads, caches), `httpd_log_t` for logs. Every confined service has a man page listing its types: `man httpd_selinux`, `man samba_selinux` and so on (install `selinux-policy-doc` for these).
+
+!!! pitfall "`chcon` is temporary"
+    `chcon -t httpd_sys_content_t file` changes the sticker right now and appears to fix things. But the list still says something else, so the next `restorecon` (or a full relabel) silently puts the old sticker back, and the outage returns weeks later. Use `chcon` only for quick experiments. For anything real, use `semanage fcontext` + `restorecon`.
+
+??? question "Under the hood: equivalence rules and what restorecon leaves alone"
+    If a new location should be labeled *exactly like* an existing one (a second web root, `/home` moved to `/data/home`), an **equivalence rule** is better than copying patterns. It tells SELinux "treat this path as if it were that path", including every sub-rule underneath:
+
+    ```console
+    $ sudo semanage fcontext -a -e /var/www /srv/www
+    $ matchpathcon /srv/www/cgi-bin/app.cgi
+    /srv/www/cgi-bin/app.cgi	system_u:object_r:httpd_sys_script_exec_t:s0
+    ```
+
+    Two `restorecon` details that surprise people. By default it only fixes the **type** and leaves the SELinux user (`unconfined_u` vs `system_u`) alone; `restorecon -F` forces the whole context. And some types are **customizable** (listed in `/etc/selinux/targeted/contexts/customizable_types`): `restorecon` won't overwrite them without `-F`, because an admin presumably set them on purpose. To relabel an entire system at the next boot, run `sudo fixfiles -F onboot` (or `sudo touch /.autorelabel`) and reboot.
+
+<div class="quiz" data-answer="3" markdown>
+
+You ran `sudo mv ~/report.pdf /var/www/html/` and the web server returns 403. Permissions are `644`. What is the best fix?
+
+- `sudo setenforce 0`
+- `sudo chmod 777 /var/www/html/report.pdf`
+- `sudo restorecon -v /var/www/html/report.pdf`
+- `sudo semanage fcontext -a -t httpd_sys_content_t /var/www/html/report.pdf`
+
+Right. SELinux already knows what files under `/var/www` should wear; the file just kept its old home-directory sticker because `mv` keeps it. `restorecon` puts the right one back. A new `fcontext` rule is only needed for locations SELinux doesn't already know.
+
+</div>
+
+## Fix 2: a boolean is off
+
+Some behaviour is fine on one server and dangerous on another. Should the web server be allowed to connect to a database? To read users' `~/public_html`? To use files on NFS? The policy authors wrote these rules in advance and put each set behind an on/off switch called a **boolean**. You flip the switch; you don't write any policy.
+
+### Example: a web app that can't reach its database
+
+Your PHP app shows "could not connect to server: Permission denied", even though PostgreSQL is running and the firewall is open. You find this denial (it's Denial B from earlier):
+
+```text
+avc:  denied  { name_connect } for  pid=2207 comm="php-fpm" dest=5432 scontext=system_u:system_r:httpd_t:s0 tcontext=system_u:object_r:postgresql_port_t:s0 tclass=tcp_socket permissive=0
+```
+
+The sentence: "`httpd_t` was denied connecting to a port wearing `postgresql_port_t`." Nothing is mislabeled. The web server simply isn't allowed to connect to databases until you say so. `audit2why` (more on it below) confirms it and names the switches:
+
+```console
+$ sudo ausearch -m AVC -ts recent -c php-fpm | audit2why
+…
+	Was caused by:
+	One of the following booleans was set incorrectly.
+	Description:
+	Allow httpd to can network connect db
+
+	Allow access by executing:
+	# setsebool -P httpd_can_network_connect_db 1
+	Description:
+	Allow httpd to can network connect
+
+	Allow access by executing:
+	# setsebool -P httpd_can_network_connect 1
+```
+
+It offers two switches. **Pick the narrowest one.** `httpd_can_network_connect_db` allows connecting to database ports only. `httpd_can_network_connect` allows connecting to *any* port, which is far more than your app needs. So:
+
+```console
+$ getsebool -a | grep ^httpd_can_network
+httpd_can_network_connect --> off
+httpd_can_network_connect_cobbler --> off
+httpd_can_network_connect_db --> off
+httpd_can_network_memcache --> off
+httpd_can_network_redis --> off
+httpd_can_network_relay --> off
+$ sudo setsebool -P httpd_can_network_connect_db on
+$ sudo semanage boolean -l | grep httpd_can_network_connect_db
+httpd_can_network_connect_db   (on   ,  off)  Allow httpd to can network connect db
+```
+
+The `(on , off)` columns are "current value" and "default". **Always use `-P`** (persistent). Without it the switch flips back at reboot and the problem returns.
+
+Some other common booleans: `httpd_use_nfs` (web content on NFS), `httpd_enable_homedirs` (serve `~/public_html`), `samba_enable_home_dirs`, `use_nfs_home_dirs`, `container_manage_cgroup`. To browse what exists for a service, `getsebool -a | grep <service>`, or read its `man <service>_selinux` page.
+
+## Fix 3: the port has no label
+
+Ports wear stickers too. `httpd_t` may listen on ports wearing `http_port_t`, `sshd_t` on `ssh_port_t`, and so on. This stops a hijacked service from opening a backdoor on some random port. It's also why moving a service to a new port fails even after you open the firewall.
+
+### Example: Apache on port 3131
+
+You add `Listen 3131` to Apache's config and restart it. It fails to start:
+
+```text
+(13)Permission denied: AH00072: make_sock: could not bind to address [::]:3131
+```
+
+The denial is Denial A from earlier: "`httpd_t` was denied `name_bind` on a `tcp_socket` wearing `unreserved_port_t`". Port 3131 wears the generic sticker for ports nobody has claimed. Give it the web sticker:
+
+```console
+$ sudo semanage port -l | grep -E '^(http_port_t|ssh_port_t) '
+http_port_t                    tcp      80, 81, 443, 488, 8008, 8009, 8443, 9000
+http_port_t                    udp      80, 443
+ssh_port_t                     tcp      22
+$ sudo semanage port -a -t http_port_t -p tcp 3131
+$ sudo semanage port -l -C
+SELinux Port Type              Proto    Port Number
+
+http_port_t                    tcp      3131
+```
+
+Restart Apache and it binds. If a port already wears another service's sticker, `-a` fails with "already defined"; use `-m` (modify) instead. Remove your addition with `semanage port -d -t http_port_t -p tcp 3131`.
+
+!!! tip "Moving SSH to another port"
+    You need three things: `Port 2222` in an sshd drop-in, `sudo semanage port -a -t ssh_port_t -p tcp 2222`, and a firewall rule ([module 12](12-firewalld.md)). Miss the SELinux step and `sshd` fails to start with "Bind to port 2222 … failed: Permission denied".
+
+<div class="quiz" data-answer="3" markdown>
+
+You changed PostgreSQL to listen on port 5433, opened it in firewalld, and now `postgresql.service` fails with "could not bind … Permission denied". `ausearch` shows `denied { name_bind }` with `tcontext=…unreserved_port_t`. What is the fix?
+
+- `sudo setsebool -P postgresql_can_bind on`
+- `sudo restorecon -Rv /var/lib/pgsql`
+- `sudo semanage port -a -t postgresql_port_t -p tcp 5433`
+- `sudo chcon -t postgresql_port_t /etc/services`
+
+Right. The port wears the generic `unreserved_port_t` sticker. Labeling it `postgresql_port_t` lets `postgresql_t` listen on it. Files aren't involved, and there's no such boolean.
+
+</div>
+
+## When none of the three fit: audit2why and audit2allow
+
+**`audit2why`** reads denials and explains *why* they happened: a missing allow rule, or a boolean that would allow it. It's useful, but it has a blind spot. Watch what it says about the `mv` trap from Fix 1:
 
 ```console
 $ sudo ausearch -m AVC -ts recent | audit2why
@@ -509,9 +650,9 @@ type=AVC msg=audit(1792058601.448:1021): avc:  denied  { read } for  pid=1452 co
 	# setsebool -P httpd_read_user_content 1
 ```
 
-Notice what just happened. `audit2why` found a boolean that *would* make the error go away: let the web server read every user's home files. That is technically a fix, and completely the wrong one. The file is simply mislabeled. **Tools tell you what would allow the access; only you can decide whether the access should happen.**
+It found a switch that *would* make the error go away: let the web server read every user's home files. That works, and it's completely the wrong fix. The file is simply wearing the wrong sticker. **Tools tell you what would allow the access. Only you can decide whether the access should happen.** That's why you read the denial as a sentence first.
 
-**`audit2allow`** goes one step further and writes policy rules that allow whatever was denied:
+**`audit2allow`** goes one step further and writes rules that allow whatever was denied:
 
 ```console
 $ sudo ausearch -m AVC -ts recent | audit2allow
@@ -522,13 +663,13 @@ $ sudo ausearch -m AVC -ts recent | audit2allow
 allow httpd_t user_home_t:file read;
 ```
 
-Loading that rule would let the web server read *every* `user_home_t` file on the system, which is exactly the attack the opening story described. That is why blindly running `audit2allow -M` and loading the result is the SELinux equivalent of `chmod 777`.
+Loading that rule would let the web server read *every* `user_home_t` file on the system, which is exactly the attack from the start of the module. Blindly running `audit2allow -M` and loading the result is the SELinux version of `chmod 777`.
 
-Work through the fixes in this order:
+So always work through the fixes in this order:
 
-1. **Is the label wrong?** Fix it with `restorecon`, or `semanage fcontext` + `restorecon` for new locations.
-2. **Is it a supported variation?** Find and set the narrowest boolean.
-3. **Is it a port?** Use `semanage port`.
+1. **Is a sticker wrong?** `restorecon`, or `semanage fcontext` + `restorecon` for new locations.
+2. **Is it an optional behaviour you want?** Set the narrowest boolean.
+3. **Is it a port?** `semanage port`.
 4. **Only then**, if the application really does something the policy never anticipated, write a small custom module.
 
 <div class="quiz" data-answer="2" markdown>
@@ -539,13 +680,13 @@ Work through the fixes in this order:
 - Label the directory properly with `semanage fcontext` and `restorecon`, because the rule would let httpd read every `var_t` file
 - Switch to permissive mode, since the app clearly needs the access
 
-Right. A rule on a broad, generic type like `var_t` is the signature of a labeling problem. Give the files a web content type and the existing policy allows the access.
+Right. A rule on a broad, generic sticker like `var_t` is the signature of a labeling problem. Give the files a web content sticker and the existing policy allows the access.
 
 </div>
 
 ### A custom policy module, as a last resort
 
-If you have exhausted the options above, build a module from the denials, *read it*, and keep it as small as possible:
+If you've ruled out the three fixes, build a module from the denials, *read it*, and keep it as small as possible:
 
 ```console
 $ sudo ausearch -m AVC -c myapp -ts today | audit2allow -M myapp_local
@@ -572,9 +713,59 @@ myapp_local
 $ sudo semodule -r myapp_local       # remove it again
 ```
 
-The `.te` file is the human-readable source; review every line. If a rule targets a broad type like `var_lib_t`, `etc_t` or `user_home_t`, stop: you are probably looking at a labeling problem. Keep the `.te` file in version control so the module can be rebuilt.
+The `.te` file is the human-readable source; review every line. If a rule targets a broad sticker like `var_lib_t`, `etc_t` or `user_home_t`, stop: you're probably looking at a labeling problem. Keep the `.te` file in version control so the module can be rebuilt.
+
+## Modes: enforcing, permissive, disabled
+
+SELinux has three modes:
+
+- **Enforcing**: denials are blocked and logged. The default, and the only mode you want in production.
+- **Permissive**: denials are logged but *not* blocked. A diagnostic mode: "tell me everything you would have blocked".
+- **Disabled**: SELinux isn't running at all. Files created while disabled get no stickers.
+
+```console
+$ getenforce
+Enforcing
+$ sudo setenforce 0          # permissive until reboot
+$ getenforce
+Permissive
+$ sudo setenforce 1          # back to enforcing
+```
+
+The boot-time mode is set in `/etc/selinux/config`:
+
+```ini title="/etc/selinux/config"
+SELINUX=enforcing
+SELINUXTYPE=targeted
+```
+
+### Better than `setenforce 0`: one permissive domain
+
+`setenforce 0` turns off protection for *every* service on the machine, and it's easy to forget to turn it back on. If you need to debug one service, make only its badge permissive:
+
+```console
+$ sudo semanage permissive -a httpd_t
+$ sudo semanage permissive -l
+
+Customized Permissive Types
+
+httpd_t
+$ sudo semanage permissive -d httpd_t
+```
+
+Everything else stays enforcing, and `httpd_t` denials are logged with `permissive=1` so you can collect them all in one go.
+
+??? question "Under the hood: why permissive mode logs each denial only once"
+    In enforcing mode, a denied access is denied (and usually logged) every time. In permissive mode, after logging a denial the kernel records that access in the AVC as allowed, so the *same* badge, sticker, class and action isn't reported again. You get one line per distinct problem instead of a flood.
+
+    Two consequences. First, a permissive run gives you a compact, complete list of what the application needs, which is exactly what `audit2allow` wants. Second, if you fix something and retest in permissive mode, an old denial won't reappear even if your fix didn't work. Reloading the policy (for example `sudo semodule -R`) or a reboot clears the cache.
+
+!!! warning "Do not disable SELinux"
+    Since Rocky 9, setting `SELINUX=disabled` in `/etc/selinux/config` is no longer the supported way to turn SELinux off; the supported way is the `selinux=0` kernel argument. Either way, disabling is almost always the wrong answer. While SELinux is disabled, new files get no stickers, so turning it back on later forces a full **relabel** of every file at boot (`/.autorelabel`), which can take a long time on big filesystems. If you must, use permissive mode, and better still, a permissive domain.
 
 ### Practice: the 403 drill
+
+Put the whole process together: confirm SELinux is on, look at the sticker, read the denial, fix, test.
 
 <div class="terminal-sim" data-title="Fix a 403 the right way" data-prompt="[alex@web01 ~]$ " markdown>
 
@@ -612,7 +803,7 @@ type=AVC msg=audit(1792058601.448:1021): avc:  denied  { read } for  pid=1452 co
 
 <div class="task" data-expect="sudo restorecon -v /var/www/html/page.html" data-match="(sudo )?restorecon (-v |-Rv |-vR |-R -v |-v -R )?/var/www/html(/page.html|/)?" data-hint="restorecon resets a file to the label the policy database says it should have. Add -v to see what changed." markdown>
 
-**Step 4.** The type is wrong for web content. Reset the file's label to the policy default.
+**Step 4.** "`httpd_t` was denied read on a file wearing `user_home_t`": the sticker is wrong. Put the right one back.
 
 ```text
 Relabeled /var/www/html/page.html from unconfined_u:object_r:user_home_t:s0 to unconfined_u:object_r:httpd_sys_content_t:s0
@@ -634,7 +825,9 @@ Relabeled /var/www/html/page.html from unconfined_u:object_r:user_home_t:s0 to u
 
 ## SELinux and containers
 
-Containers are where SELinux earns its keep on modern hosts. Podman runs container processes in the **`container_t`** domain, and each container gets a unique pair of **MCS categories**, such as `s0:c412,c837`. Container files are labeled `container_file_t` with the same categories. A process in one container cannot touch another container's files, because the categories do not match, even though both have the same type and, often, the same UID.
+Containers are where SELinux earns its keep on modern hosts. Podman gives every container process the badge **`container_t`**, and container files wear `container_file_t`. That alone would let one container read another's files, since they share the same badge and sticker. So each container also gets a unique pair of **categories** in the fourth field of its label, such as `s0:c412,c837`. A process can only touch files whose categories match its own.
+
+Think of it as the same badge with a different room number printed on it.
 
 ```console
 $ podman run -d --name web1 docker.io/library/nginx
@@ -643,9 +836,9 @@ system_u:system_r:container_t:s0:c412,c837 23011 ? 00:00:00 nginx
 system_u:system_r:container_t:s0:c412,c837 23040 ? 00:00:00 nginx
 ```
 
-When you mount a host directory into a container, its files usually have a host type like `user_home_t` or `var_t`, which `container_t` may not touch. Podman can relabel the directory for you with a volume option:
+When you mount a host directory into a container, its files usually wear a host sticker like `user_home_t` or `var_t`, which `container_t` may not touch. Podman can relabel the directory for you with a volume option:
 
-- **`:Z`** (uppercase): relabel the content as private to *this* container (with its categories). Other containers cannot use it.
+- **`:Z`** (uppercase): relabel the content as private to *this* container (with its categories). Other containers can't use it.
 - **`:z`** (lowercase): relabel as shared, usable by all containers.
 
 ```console
@@ -661,7 +854,7 @@ More on how containers are built from namespaces, cgroups and SELinux in [Contai
 
 ## Is it SELinux? A decision tree
 
-When something fails with "Permission denied" (or a service fails to start, or a page returns 403), use this tree before touching any setting.
+When something fails with "Permission denied" (or a service won't start, or a page returns 403), use this tree before touching any setting.
 
 <div class="decision" markdown>
 
@@ -683,7 +876,7 @@ When something fails with "Permission denied" (or a service fails to start, or a
 
 <div class="node" data-id="notselinux" markdown>
 
-**It is not SELinux.** Check the usual suspects: DAC permissions and ownership along the whole path (`namei -l /path`), ACLs, the firewall, the application's own config, and its logs (`journalctl -u <service>`).
+**It is not SELinux.** Check the usual suspects: permissions and ownership along the whole path (`namei -l /path`), ACLs, the firewall, the application's own config, and its logs (`journalctl -u <service>`).
 
 </div>
 
@@ -695,35 +888,35 @@ When something fails with "Permission denied" (or a service fails to start, or a
 
 <div class="node" data-id="avc" markdown>
 
-**Look at the `tcontext` type. Is it the type this file, directory or port *should* have?** Compare with `matchpathcon <path>` or the service's man page (`man httpd_selinux`).
+**Say the sentence, then look at the sticker (`tcontext` type). Is it the sticker this file, directory or port *should* wear?** Compare with `matchpathcon <path>` or the service's man page (`man httpd_selinux`).
 
-<button data-goto="label">No, the label looks wrong</button> <button data-goto="labelok">Yes, the label is right</button>
+<button data-goto="label">No, the sticker looks wrong</button> <button data-goto="labelok">Yes, the sticker is right</button>
 
 </div>
 
 <div class="node" data-id="label" markdown>
 
-**Fix the label.** If `matchpathcon` already gives the right type: `sudo restorecon -Rv <path>`. If the location is new to the policy: `sudo semanage fcontext -a -t <type> '<path>(/.*)?'` then `sudo restorecon -Rv <path>`.
+**Fix 1: fix the label.** If `matchpathcon` already gives the right type: `sudo restorecon -Rv <path>`. If the location is new to the policy: `sudo semanage fcontext -a -t <type> '<path>(/.*)?'` then `sudo restorecon -Rv <path>`.
 
 </div>
 
 <div class="node" data-id="labelok" markdown>
 
-**Is the target a port (`tclass=tcp_socket` or `udp_socket`, `name_bind` or `name_connect`)?**
+**Is the target a port the service listens on (`tclass=tcp_socket` or `udp_socket` with `name_bind`)?**
 
-<button data-goto="port">Yes, a port</button> <button data-goto="bool">No</button>
+<button data-goto="port">Yes, a listening port</button> <button data-goto="bool">No</button>
 
 </div>
 
 <div class="node" data-id="port" markdown>
 
-**Label the port** (for listening): `sudo semanage port -a -t <service>_port_t -p tcp <port>`. For *outgoing* connections (`name_connect`), look for a boolean such as `httpd_can_network_connect_db` first.
+**Fix 3: label the port:** `sudo semanage port -a -t <service>_port_t -p tcp <port>`.
 
 </div>
 
 <div class="node" data-id="bool" markdown>
 
-**Does `audit2why` name a boolean, and is that behaviour something you actually want?**
+**Does `audit2why` name a boolean, and is that behaviour something you actually want?** (Outgoing connections, `name_connect`, usually land here.)
 
 <button data-goto="setbool">Yes, and I want it</button> <button data-goto="module">No suitable boolean</button>
 
@@ -731,7 +924,7 @@ When something fails with "Permission denied" (or a service fails to start, or a
 
 <div class="node" data-id="setbool" markdown>
 
-**Set it persistently:** `sudo setsebool -P <boolean> on`. Pick the narrowest boolean that solves the problem.
+**Fix 2: set it persistently:** `sudo setsebool -P <boolean> on`. Pick the narrowest boolean that solves the problem.
 
 </div>
 
@@ -742,6 +935,7 @@ When something fails with "Permission denied" (or a service fails to start, or a
 </div>
 
 </div>
+
 
 ## Labs
 
@@ -1011,6 +1205,30 @@ When something fails with "Permission denied" (or a service fails to start, or a
 
 <div class="card" markdown>
 
+Explain SELinux in one sentence.
+
+Every process wears a badge (its domain), every file and port wears a sticker (its type), and the policy lists which badges may touch which stickers. Anything not listed is denied.
+
+</div>
+
+<div class="card" markdown>
+
+What are the three fixes behind almost every SELinux denial?
+
+1. Wrong file label: `restorecon` (plus `semanage fcontext` for new locations). 2. Optional behaviour switched off: `setsebool -P`. 3. Unlabeled port: `semanage port -a`.
+
+</div>
+
+<div class="card" markdown>
+
+Turn this into a sentence: `denied { read } … scontext=…httpd_t… tcontext=…user_home_t… tclass=file`
+
+"`httpd_t` was denied read on a file wearing `user_home_t`." A web server reading a home-directory sticker makes no sense, so the file's label is wrong.
+
+</div>
+
+<div class="card" markdown>
+
 What does DAC fail to protect against that SELinux handles?
 
 A compromised program. DAC lets it do anything its user can; SELinux limits each service's domain to what its job needs.
@@ -1094,8 +1312,10 @@ Relabel the host directory to `container_file_t`: `:Z` privately for one contain
 ## Recap
 
 !!! recap "Key takeaways"
+    - SELinux in one sentence: every process wears a badge (domain), every file and port wears a sticker (type), and a rulebook (policy) lists which badges may touch which stickers. Anything not listed is refused.
     - DAC lets a compromised service do anything its user can. SELinux confines each service to what its job requires.
     - Every process and object has a context; the **type** (third field) drives almost every decision.
+    - Read every denial as a sentence: "`<badge>` was denied `<action>` on a `<class>` wearing `<sticker>`". A wrong or generic sticker means relabel; a correct sticker means look for a boolean or a port label.
     - Access needs DAC *and* SELinux to agree. SELinux never grants what permissions deny.
     - Most problems are labels: `restorecon` for known locations, `semanage fcontext` + `restorecon` for new ones. `mv` keeps labels, `cp` does not.
     - Booleans (`setsebool -P`) and port labels (`semanage port`) cover the common supported variations.
