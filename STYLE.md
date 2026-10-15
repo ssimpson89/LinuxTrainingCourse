@@ -304,6 +304,7 @@ GRUB reads the boot entries in `/boot/loader/entries/`…
 </div>
 ````
 
+Don't number `data-title` values ("1. Firmware"): the widget numbers steps itself.
 Steps can contain anything: text, code, mermaid, tables. Keep each step
 short (a screenful). 4 to 9 steps works best.
 
