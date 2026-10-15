@@ -49,15 +49,15 @@ Two numbers make DR goals concrete:
 - **RPO** (Recovery Point Objective): how much data you can afford to lose, measured in time. Nightly backups mean an RPO of up to 24 hours.
 - **RTO** (Recovery Time Objective): how long you can afford to be down. "Reinstall by hand from notes" might be two days; "boot a rescue ISO and restore" might be 30 minutes.
 
+**RPO and RTO around one incident**
+
 ```mermaid
-timeline
-    title RPO and RTO around one incident
-    02.00 : Last good backup
-          : Everything written after this is at risk (the RPO window)
-    09.40 : Disk controller fails, outage starts
-    10.10 : Rescue ISO booted, restore running
-    10.35 : Service back up
-          : 09.40 to 10.35 is your actual recovery time, compared with the RTO
+flowchart TB
+    T0["<b>02.00</b><br/>Last good backup<br/>Everything written after this is at risk (the RPO window)"]
+    T1["<b>09.40</b><br/>Disk controller fails, outage starts"]
+    T2["<b>10.10</b><br/>Rescue ISO booted, restore running"]
+    T3["<b>10.35</b><br/>Service back up<br/>09.40 to 10.35 is your actual recovery time, compared with the RTO"]
+    T0 --> T1 --> T2 --> T3
 ```
 
 Every choice in this module moves one of those two numbers. More frequent backups shrink the RPO. Image-based bare-metal recovery and automation shrink the RTO.
@@ -596,7 +596,7 @@ If `x86-64-v3` isn't listed as supported, that machine's path to Rocky 10 is new
 ### Planning the rebuild
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["Inventory<br/>packages, rpm -Va,<br/>unowned files, SELinux"] --> B["Check compatibility<br/>x86-64-v3, removed packages,<br/>3rd-party repos for EL10"]
     B --> C["Codify<br/>kickstart + Ansible"]
     C --> D["Build Rocky 10<br/>side by side"]

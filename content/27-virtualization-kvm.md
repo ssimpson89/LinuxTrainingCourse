@@ -269,7 +269,7 @@ There are two ways to get an OS into a VM:
 Rocky publishes generic cloud images at `https://dl.rockylinux.org/pub/rocky/10/images/x86_64/`, for example `Rocky-10-GenericCloud-Base.latest.x86_64.qcow2` (plain partitions) and `Rocky-10-GenericCloud-LVM.latest.x86_64.qcow2` (LVM root).
 
 ```mermaid
-flowchart LR
+flowchart TB
     IMG["Rocky-10-GenericCloud<br/>base qcow2 (read only)"] --> OVL["web1.qcow2<br/>overlay (copy-on-write)"]
     UD["user-data<br/>(cloud-init YAML)"] --> VI["virt-install --import<br/>--cloud-init"]
     OVL --> VI

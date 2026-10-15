@@ -27,7 +27,7 @@ A developer hands you a tarball and says "just run `make install` on the 40 web 
 An **RPM package** is an archive of files plus a header of metadata: name, version, dependencies, scripts to run, and a signature. You never write that header by hand. You write a **spec file**, a recipe that says where the source is, how to build it, where the files go, and what the package needs. `rpmbuild` follows the recipe.
 
 ```mermaid
-flowchart LR
+flowchart TB
     T["Source tarball<br/>+ patches"] --> R["rpmbuild"]
     S["SPEC file<br/>(the recipe)"] --> R
     R --> SR["Source RPM<br/>name-ver-rel.src.rpm"]
@@ -305,7 +305,7 @@ rockyhello(x86-64) = 1.0-1.el10
 DNF never needs to know "glibc"; it asks "who provides `libc.so.6(GLIBC_2.34)(64bit)`?" and finds glibc. Write manual `Requires:` only for things the generators cannot see: a command your script calls (`Requires: rsync`), a data package, or a minimum version.
 
 ```mermaid
-flowchart LR
+flowchart TB
     B["Buildroot files"] --> E["ELF scanner"]
     B --> P["Shebang / Python /<br/>pkg-config scanners"]
     E --> R["Requires: libc.so.6(GLIBC_2.34)(64bit)"]

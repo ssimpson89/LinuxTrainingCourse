@@ -344,7 +344,7 @@ A few rules that bite people:
 The cache is both sssd's best feature and its most common source of confusion. You add alice to the `webadmins` group in the directory, and `id alice` on a client still doesn't show it. That's not a bug: the client is serving the cached answer until it expires.
 
 ```mermaid
-flowchart LR
+flowchart TB
     Q["id alice"] --> MC{"In memory cache<br/>and fresh?"}
     MC -- yes --> A["Answer at once"]
     MC -- no --> LDB{"In LDB cache<br/>and fresh?"}

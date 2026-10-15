@@ -185,7 +185,7 @@ Certificate:
 Every TLS client needs a list of roots to trust. Rocky keeps one list for the whole system, managed by the **ca-certificates** package and the **p11-kit** `trust` tool. You add sources; `update-ca-trust` compiles them into the formats each library expects.
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["/usr/share/pki/ca-trust-source/<br/>(Mozilla roots, from the package)"] --> U["update-ca-trust"]
     B["/etc/pki/ca-trust/source/anchors/<br/>(your CAs go here)"] --> U
     X["/etc/pki/ca-trust/source/blocklist/<br/>(distrust these)"] --> U
@@ -299,7 +299,7 @@ Put `ca.crt` in the trust store of every client (`/etc/pki/ca-trust/source/ancho
 Each TLS library has its own way to configure allowed protocols, ciphers, and key sizes. Keeping OpenSSL, GnuTLS, NSS, Java, OpenSSH, Kerberos, BIND, and libreswan consistent by hand is hopeless. Rocky solves this with **system-wide cryptographic policies** (**crypto-policies**): you pick one policy, and a tool generates a matching config snippet for each library.
 
 ```mermaid
-flowchart LR
+flowchart TB
     S["update-crypto-policies<br/>--set DEFAULT:AD-SUPPORT"] --> CFG["/etc/crypto-policies/config<br/>(the chosen policy)"]
     CFG --> GEN["generator reads<br/>policies/*.pol + modules/*.pmod"]
     GEN --> BE["/etc/crypto-policies/back-ends/"]

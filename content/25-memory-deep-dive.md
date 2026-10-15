@@ -141,7 +141,7 @@ the CPU translate, page by page, into real RAM.
   disk or swap (a **major fault**, slow), or send `SIGSEGV` (no such mapping).
 
 ```mermaid
-flowchart LR
+flowchart TB
     P["Process reads virtual address 0x7f3a…1040"] --> M["MMU"]
     M --> T{"In the TLB?"}
     T -- yes --> R["Physical frame: access RAM"]
@@ -735,7 +735,7 @@ exactly what happens when it's exceeded. On Rocky 10, every service, user
 session and container already has its own cgroup under `/sys/fs/cgroup/`.
 
 ```mermaid
-flowchart LR
+flowchart TB
     MIN["memory.min: hard protection (never reclaimed)"] --> LOW["memory.low: soft protection (reclaimed last)"]
     LOW --> NORMAL["normal operation"]
     NORMAL --> HIGH["memory.high: throttle + reclaim hard (no kill)"]

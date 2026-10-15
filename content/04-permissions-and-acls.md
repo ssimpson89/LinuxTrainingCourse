@@ -28,7 +28,7 @@ Every file and directory on a Linux filesystem carries a small amount of securit
 When a process tries to open, write, or run a file, the kernel compares the process's identity (UID and groups, from [03 · Users, Groups and sudo](03-users-groups-and-sudo.md)) with that information. If the answer is no, you get `Permission denied` (the `EACCES` error) or `Operation not permitted` (`EPERM`).
 
 ```mermaid
-flowchart LR
+flowchart TB
     P["Process<br/>uid=1001 (bob)<br/>groups: bob, devs"] -- "open('report.txt', write)" --> K{"Kernel checks"}
     K --> A["1. Attributes<br/>immutable? append-only?"]
     A --> D["2. Owner / group / other bits<br/>+ ACL entries"]

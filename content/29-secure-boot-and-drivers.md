@@ -638,17 +638,17 @@ The Microsoft certificates that the whole PC ecosystem trusts were created in 20
 | Microsoft Corporation UEFI CA 2011 | Signs third-party boot loaders (shim) and option ROMs | Microsoft UEFI CA 2023 (boot loaders), Microsoft Option ROM UEFI CA 2023 (add-in card firmware) |
 | Microsoft Windows Production PCA 2011 | Signs Windows' boot manager | Windows UEFI CA 2023 |
 
+**Secure Boot CA transition (simplified)**
+
 ```mermaid
-timeline
-    title Secure Boot CA transition (simplified)
-    2011 : Original Microsoft KEK and UEFI CAs created
-    2023 : Replacement 2023 CAs created
-    2024-2025 : Firmware and OS updates start adding 2023 CAs to KEK and db
-              : Microsoft starts dual-signing shims (late 2025)
-    June 2026 : 2011 KEK and third-party UEFI CA reach expiry
-              : Rocky confirms dual-signed shims
-    October 2026 : Windows Production PCA 2011 expires
-    After 2026 : New shims and dbx updates signed only with 2023 keys
+flowchart TB
+    T0["<b>2011</b><br/>Original Microsoft KEK and UEFI CAs created"]
+    T1["<b>2023</b><br/>Replacement 2023 CAs created"]
+    T2["<b>2024-2025</b><br/>Firmware and OS updates start adding 2023 CAs to KEK and db<br/>Microsoft starts dual-signing shims (late 2025)"]
+    T3["<b>June 2026</b><br/>2011 KEK and third-party UEFI CA reach expiry<br/>Rocky confirms dual-signed shims"]
+    T4["<b>October 2026</b><br/>Windows Production PCA 2011 expires"]
+    T5["<b>After 2026</b><br/>New shims and dbx updates signed only with 2023 keys"]
+    T0 --> T1 --> T2 --> T3 --> T4 --> T5
 ```
 
 Two facts keep this from being scary:

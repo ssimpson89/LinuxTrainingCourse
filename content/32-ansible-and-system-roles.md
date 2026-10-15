@@ -535,7 +535,7 @@ web2    : ok=11   changed=1    unreachable=0    failed=0    skipped=0    rescued
 Someone set `PermitRootLogin yes` on web2 and forgot. Check mode found it, showed exactly what differs, and touched nothing. Run without `--check` and Ansible puts it back.
 
 ```mermaid
-flowchart LR
+flowchart TB
     G["Git: baseline.yml<br/>(the truth)"] --> C["Nightly:<br/>ansible-playbook --check --diff"]
     C --> R{"changed > 0?"}
     R -- no --> OK["Fleet matches code"]

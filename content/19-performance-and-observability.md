@@ -37,7 +37,7 @@ you start by checking every resource for three simple signals, then zoom into
 the one that looks wrong.
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["Complaint: it's slow"] --> B["Define it: what, who, since when?"]
     B --> C["60-second checklist"]
     C --> D{"Which resource looks wrong?"}
@@ -131,7 +131,7 @@ Three rules for reading it:
    tasks stuck on I/O, not a CPU problem.
 
 ```mermaid
-flowchart LR
+flowchart TB
     R["R: running on a CPU"] --> L["Load average"]
     Q["R: runnable, waiting for a CPU"] --> L
     D["D: uninterruptible sleep (disk, NFS)"] --> L

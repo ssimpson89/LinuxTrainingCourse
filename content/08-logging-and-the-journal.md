@@ -37,7 +37,7 @@ journal daemon. From there, a second daemon, **rsyslog**, writes the
 classic text files in `/var/log`.
 
 ```mermaid
-flowchart LR
+flowchart TB
     K["Kernel (printk)"] --> RB["ring buffer /dev/kmsg"]
     RB --> J["systemd-journald"]
     SV["Service stdout/stderr"] --> J

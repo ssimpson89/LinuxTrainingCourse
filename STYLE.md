@@ -456,7 +456,10 @@ Links the unit to `/dev/null` so nothing, not even a dependency, can start it.
 
 - Inside HTML attributes (`data-expect`, `data-hint`, …) write a double quote
   as `&quot;`; a backslash does not escape it.
-- Mermaid `timeline` entries can't contain a colon (so no `02:00`).
+- Don't use Mermaid `timeline`: it ignores the site theme and is unreadable in
+  dark mode. Use a `flowchart TB` with one node per period instead.
+- A straight chain of 6+ boxes must be `flowchart TB`, not `LR`: wide LR
+  diagrams are shrunk to fit the column and the text becomes unreadable.
 - Never nest one widget inside another.
 - Mermaid is fine inside steppers, layers, and decision nodes.
 - Everything inside a widget must also make sense if JavaScript is off.

@@ -450,7 +450,7 @@ then says `Permission denied`. The *exact* message tells you which layer
 failed, so read it carefully, and add `-v` for detail.
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["Name resolves?"] --> B["Host reachable?"]
     B --> C["Port 22 open in firewall?"]
     C --> D["sshd listening?"]

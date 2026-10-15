@@ -27,7 +27,7 @@ A developer swears their service works on their laptop, but in staging every ten
 When a packet arrives at a Rocky host, it does not go straight to an application. The kernel passes it through a series of checkpoints. Some checkpoints belong to **netfilter** (firewalling, NAT, connection tracking). Some belong to **traffic control** (queueing, shaping, delaying). The routing table sits between them and decides where the packet goes next.
 
 ```mermaid
-flowchart LR
+flowchart TB
     NIC_IN["NIC in"] --> TCI["tc ingress"]
     TCI --> PRE["prerouting<br/>conntrack, DNAT"]
     PRE --> RT{"Routing<br/>decision"}

@@ -27,7 +27,7 @@ A security bulletin lands on Tuesday. Your manager asks three questions: "Are we
 **Rocky Linux** is a **rebuild**: a distribution compiled from the same source code as Red Hat Enterprise Linux (RHEL), with Red Hat's trademarks removed, so that software certified for RHEL runs on it unchanged. Rocky does not write most of the code. Its job is a pipeline: get the sources, remove the branding, build them reproducibly, sign them, and deliver them to millions of machines.
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["Upstream sources<br/>(CentOS Stream, RHEL SRPMs)"] --> B["Import into<br/>Rocky Git"]
     B --> C["Debrand<br/>(patch repos)"]
     C --> D["Build system<br/>(Koji / Peridot + mock)"]
@@ -57,19 +57,17 @@ Every arrow in that picture leaves evidence you can inspect on your own server:
 
 Rocky exists because of a change of plan. In December 2020, Red Hat announced that CentOS Linux, the free RHEL rebuild many people relied on, would end and be replaced by **CentOS Stream**, a rolling preview of the *next* RHEL minor release. Gregory Kurtzer, a co-founder of the original CentOS project, started Rocky Linux the same week. Rocky 8.4 was the first general release in June 2021.
 
+**How Rocky got its source**
+
 ```mermaid
-timeline
-    title How Rocky got its source
-    2020 : CentOS Linux 8 end announced
-         : Rocky Linux project starts
-    2021 : Rocky 8.4 GA, built with Koji
-         : Sources imported from git.centos.org
-    2022 : Rocky 9.0 GA, built with Peridot
-         : RESF charter adopted
-    2023 : Red Hat stops publishing RHEL sources to git.centos.org
-         : Rocky switches to multiple source routes
-    2025 : Rocky 10.0 GA, built with Koji again
-    2026 : Rocky 10.2 GA (May)
+flowchart TB
+    T0["<b>2020</b><br/>CentOS Linux 8 end announced<br/>Rocky Linux project starts"]
+    T1["<b>2021</b><br/>Rocky 8.4 GA, built with Koji<br/>Sources imported from git.centos.org"]
+    T2["<b>2022</b><br/>Rocky 9.0 GA, built with Peridot<br/>RESF charter adopted"]
+    T3["<b>2023</b><br/>Red Hat stops publishing RHEL sources to git.centos.org<br/>Rocky switches to multiple source routes"]
+    T4["<b>2025</b><br/>Rocky 10.0 GA, built with Koji again"]
+    T5["<b>2026</b><br/>Rocky 10.2 GA (May)"]
+    T0 --> T1 --> T2 --> T3 --> T4 --> T5
 ```
 
 ### The 2023 change and Rocky's response
@@ -211,7 +209,7 @@ Rocky's 10.0 announcement explains the switch back: the next generation of Perid
 Underneath both sits **mock**, a tool that creates a fresh minimal chroot, installs only the declared build dependencies, and runs `rpmbuild` inside it. A Koji or Peridot "build" is essentially an orchestrated mock run with careful bookkeeping. You will use mock yourself in [module 22](22-building-rpms.md).
 
 ```mermaid
-flowchart LR
+flowchart TB
     G["Rocky Git<br/>rpms/openssl @ el10"] --> K["Koji hub<br/>(schedules build)"]
     K --> B1["Builder x86_64<br/>mock chroot"]
     K --> B2["Builder aarch64<br/>mock chroot"]

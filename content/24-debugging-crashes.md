@@ -188,7 +188,7 @@ hostname, `%d` the dump mode and `%F` a pidfd for the dying process. systemd
 sets this value at boot from `/usr/lib/sysctl.d/50-coredump.conf`.
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["Process dies on SIGSEGV"] --> B["Kernel reads kernel.core_pattern"]
     B -- "starts with a pipe" --> C["systemd-coredump (short-lived)"]
     C --> D["Checks size limits and coredump.conf"]
@@ -483,7 +483,7 @@ won't match and `gdb` ignores it. **The version must match exactly.** This is
 the single most common reason symbols "don't load".
 
 ```mermaid
-flowchart LR
+flowchart TB
     C["core file"] -- "build IDs of every loaded ELF" --> G["gdb"]
     G --> L{"/usr/lib/debug/.build-id/xx/yyyy.debug exists?"}
     L -- yes --> S["Function names, files, lines, variables"]

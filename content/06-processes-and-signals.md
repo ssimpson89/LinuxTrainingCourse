@@ -390,7 +390,7 @@ session isn't its child.) systemd calls `wait()` for its adopted children,
 so orphans never become permanent zombies.
 
 ```mermaid
-flowchart LR
+flowchart TB
     P["parent (5118)"] -->|forks| C["child (5120)"]
     C -->|exits| Z["zombie: holds exit status"]
     P -->|"calls wait()"| G["gone"]
@@ -1058,7 +1058,7 @@ $ ulimit -Hn           # hard limit
 Where limits come from depends on how the process was started:
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["Login (ssh, console)"] --> P["pam_limits reads /etc/security/limits.conf and limits.d/*.conf"]
     P --> S["your shell"]
     S --> U["ulimit changes (this shell and children only)"]

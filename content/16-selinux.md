@@ -33,7 +33,7 @@ Now imagine your web server has a bug. An attacker sends a crafted request and g
 **SELinux** (Security-Enhanced Linux) adds **MAC**, **mandatory access control**. Mandatory means the rules come from a central **policy** loaded into the kernel, and no user (not even the file owner, and not even root in most cases) can wave them away. The policy says, in effect: "the web server process may read web content, write its logs, and listen on web ports. Nothing else." The compromised web server is now locked in a small box.
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["Attacker exploits httpd"] --> B["Runs code as user apache,<br/>SELinux domain httpd_t"]
     B --> C["Read /var/www/html<br/>(httpd_sys_content_t)"]
     B --> D["Read /home/alice/.ssh<br/>(ssh_home_t)"]

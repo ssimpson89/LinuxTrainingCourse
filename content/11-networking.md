@@ -463,7 +463,7 @@ hosts:      files dns myhostname
 ```
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["curl rockylinux.org"] --> B["glibc getaddrinfo()"]
     B --> C["/etc/nsswitch.conf<br/>hosts: files dns myhostname"]
     C --> D["files: /etc/hosts"]

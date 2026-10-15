@@ -34,7 +34,7 @@ On Rocky Linux, the firewall has two parts:
 - **firewalld** is a daemon that *manages* those rules for you. You describe what you want in high-level terms ("allow the `https` service in the `public` zone") and firewalld writes the nftables rules. This is the *driver*.
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["You: firewall-cmd, Cockpit"] -- "D-Bus" --> B["firewalld daemon"]
     C["NetworkManager: interface zones"] -- "D-Bus" --> B
     P["Podman / netavark"] -- "D-Bus or nft" --> B
@@ -53,7 +53,7 @@ Rules on the inbound path generally fall into three verdicts. **Accept** lets th
 Netfilter gives the kernel a handful of **hooks**, which are checkpoints a packet passes on its way through the network stack. Rules attach to hooks.
 
 ```mermaid
-flowchart LR
+flowchart TB
     IN["Packet arrives on NIC"] --> PRE["prerouting<br/>(DNAT, port forwards)"]
     PRE --> R{"For this host?"}
     R -- "yes" --> INPUT["input<br/>(most firewall rules)"]

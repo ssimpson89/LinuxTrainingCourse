@@ -27,7 +27,7 @@ A new server goes on the internet at 10:00. By 10:05 its SSH port is being hamme
 No single control stops every attack. A firewall does not help once an attacker has a valid password; SELinux does not help if you never install the patch for a remote exploit. **Defense in depth** means stacking independent layers so that each one catches what the others miss, and an attacker must beat *all* of them.
 
 ```mermaid
-flowchart LR
+flowchart TB
     ATK["Attacker"] --> L1["Network: firewalld,<br/>few open ports"]
     L1 --> L2["Access: SSH keys, no root login,<br/>faillock / fail2ban"]
     L2 --> L3["System: patches, minimal packages,<br/>strong crypto policy"]

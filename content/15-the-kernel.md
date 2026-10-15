@@ -221,7 +221,7 @@ To find which package owns a module, ask RPM: `rpm -qf $(modinfo -n xfs)`.
 Most packages are *replaced* when you update them. The kernel is different: it's an **install-only package**. `dnf update` installs the new kernel *next to* the old ones, adds a boot entry, and makes it the default. If the new kernel doesn't boot, you pick the previous one in the GRUB menu.
 
 ```mermaid
-flowchart LR
+flowchart TB
     U["dnf update"] --> N["Install new kernel-core<br/>(old ones stay)"]
     N --> I["kernel-install: copy vmlinuz,<br/>build initramfs with dracut"]
     I --> B["Add BLS entry in<br/>/boot/loader/entries/"]

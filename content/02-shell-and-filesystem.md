@@ -29,7 +29,7 @@ The **shell** is an ordinary program whose job is to read a line of text, turn i
 Every time you press ++enter++, Bash runs the same loop: read the line, break it into words, expand those words (variables, wildcards, `~`), set up any redirections, find the command, run it, and wait for it to finish. The command it runs gets three open "channels" for input and output, and sees a filesystem tree that starts at `/`.
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["You type a line"] --> B["Bash splits it into words"]
     B --> C["Expansions: $VAR, ~, *.log"]
     C --> D["Redirections: > < |"]
