@@ -1,8 +1,8 @@
 /* Linux Training Course — visual system layered on MkDocs Material */
 
 :root {
-  --course-green: #0f8a68;
-  --course-green-bright: #19b886;
+  --course-accent: #7aa2ff;
+  --course-accent-bright: #9db8ff;
   --course-amber: #e9822b;
   --course-radius-sm: 0.35rem;
   --course-radius: 0.65rem;
@@ -12,52 +12,32 @@
   --course-ease: 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-[data-md-color-scheme="default"] {
-  --md-primary-fg-color: #102521;
-  --md-primary-fg-color--light: #173c34;
-  --md-primary-fg-color--dark: #091713;
-  --md-accent-fg-color: var(--course-green);
-  --md-typeset-a-color: #08775b;
-
-  --course-page: #f4f7f6;
-  --course-surface: #ffffff;
-  --course-surface-soft: #edf3f1;
-  --course-surface-code: #f4f7f6;
-  --course-ink: #14211e;
-  --course-muted: #63716d;
-  --course-border: rgba(20, 49, 42, 0.12);
-  --course-border-strong: rgba(20, 49, 42, 0.22);
-  --course-grid: rgba(15, 138, 104, 0.075);
-  --course-shadow-sm: 0 1px 2px rgba(14, 34, 29, 0.05);
-  --course-shadow: 0 12px 36px rgba(14, 34, 29, 0.09);
-  --course-header-shadow: 0 1px 0 rgba(255, 255, 255, 0.07),
-    0 8px 32px rgba(5, 19, 16, 0.16);
-}
-
 [data-md-color-scheme="slate"] {
-  --md-primary-fg-color: #0b1715;
-  --md-primary-fg-color--light: #132a25;
-  --md-primary-fg-color--dark: #07100e;
-  --md-accent-fg-color: #27d3a0;
-  --md-typeset-a-color: #51d9b1;
-  --md-default-bg-color: #0e1615;
-  --md-default-bg-color--light: #111c1a;
-  --md-default-bg-color--lighter: #16221f;
-  --md-default-bg-color--lightest: #1a2825;
+  --md-primary-fg-color: #0c0d10;
+  --md-primary-fg-color--light: #16181d;
+  --md-primary-fg-color--dark: #08090b;
+  --md-accent-fg-color: var(--course-accent);
+  --md-typeset-a-color: #9db8ff;
+  --md-default-bg-color: #0d0e11;
+  --md-default-bg-color--light: #121318;
+  --md-default-bg-color--lighter: #17191f;
+  --md-default-bg-color--lightest: #1c1f26;
+  --md-default-fg-color: #e6e8ee;
+  --md-default-fg-color--light: #b4b9c6;
 
-  --course-page: #0e1615;
-  --course-surface: #141f1d;
-  --course-surface-soft: #192724;
-  --course-surface-code: #0d1514;
-  --course-ink: #e4eeeb;
-  --course-muted: #93a7a1;
-  --course-border: rgba(173, 224, 208, 0.1);
-  --course-border-strong: rgba(173, 224, 208, 0.19);
-  --course-grid: rgba(39, 211, 160, 0.065);
-  --course-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --course-shadow: 0 16px 42px rgba(0, 0, 0, 0.3);
+  --course-page: #0d0e11;
+  --course-surface: #14161b;
+  --course-surface-soft: #1a1d23;
+  --course-surface-code: #0f1014;
+  --course-ink: #e6e8ee;
+  --course-muted: #9399a8;
+  --course-border: rgba(200, 210, 235, 0.09);
+  --course-border-strong: rgba(200, 210, 235, 0.17);
+  --course-grid: rgba(122, 162, 255, 0.05);
+  --course-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --course-shadow: 0 16px 42px rgba(0, 0, 0, 0.45);
   --course-header-shadow: 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 10px 34px rgba(0, 0, 0, 0.35);
+    0 10px 34px rgba(0, 0, 0, 0.45);
 }
 
 /* Page chrome */
@@ -82,7 +62,7 @@ body {
 }
 
 .md-logo svg {
-  color: var(--course-green-bright);
+  color: var(--course-accent-bright);
 }
 
 .md-tabs {
@@ -478,6 +458,16 @@ body {
 .intro__actions .md-button:hover {
   transform: translateY(-2px);
   box-shadow: 0 8px 20px color-mix(in srgb, var(--md-accent-fg-color) 20%, transparent);
+}
+
+.intro__actions .md-button:not(.md-button--primary) {
+  border-color: var(--course-border-strong);
+  color: var(--course-ink);
+}
+
+.intro__actions .md-button:not(.md-button--primary):hover {
+  border-color: var(--md-accent-fg-color);
+  color: var(--md-accent-fg-color);
 }
 
 .intro__actions .md-button--primary {

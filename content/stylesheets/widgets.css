@@ -33,12 +33,12 @@
 }
 
 .md-typeset .admonition.version,
-.md-typeset details.version { border-color: #10b981; }
+.md-typeset details.version { border-color: #a78bfa; }
 .md-typeset .version > .admonition-title,
-.md-typeset .version > summary { background-color: rgba(16, 185, 129, 0.1); }
+.md-typeset .version > summary { background-color: rgba(167, 139, 250, 0.1); }
 .md-typeset .version > .admonition-title::before,
 .md-typeset .version > summary::before {
-  background-color: #10b981;
+  background-color: #a78bfa;
   -webkit-mask-image: var(--md-admonition-icon--version);
   mask-image: var(--md-admonition-icon--version);
 }
@@ -984,7 +984,7 @@
 
 .term__progress {
   font-family: var(--md-code-font-family);
-  color: #27d3a0;
+  color: var(--course-accent-bright);
 }
 
 .md-typeset .term__brief {
@@ -1042,7 +1042,7 @@
 .term__cmd { color: #ffffff; }
 .term__err { color: #ff8a8e; }
 .term__hint { color: #e9c46a; }
-.term__ok { color: #27d3a0; font-weight: 700; }
+.term__ok { color: var(--course-accent-bright); font-weight: 700; }
 
 .term__line {
   display: flex;
@@ -1052,7 +1052,7 @@
 
 .term__ps1 {
   flex: none;
-  color: #27d3a0;
+  color: var(--course-accent-bright);
   white-space: pre;
 }
 
@@ -1065,7 +1065,7 @@
   background: transparent;
   color: #ffffff;
   font: inherit;
-  caret-color: #27d3a0;
+  caret-color: var(--course-accent-bright);
 }
 
 .term__input:disabled {
@@ -1171,7 +1171,7 @@
   left: 0;
   width: 100%;
   height: 3px;
-  background: linear-gradient(90deg, var(--course-green-bright), var(--course-amber));
+  background: linear-gradient(90deg, var(--course-accent-bright), var(--course-amber));
   transform: scaleX(0);
   transform-origin: 0 50%;
   pointer-events: none;
@@ -1184,3 +1184,19 @@
 @media (prefers-reduced-motion: reduce) {
   .card__inner { transition: none; }
 }
+
+/* Dark theme: replace Material's green "question" and "success" admonitions */
+.md-typeset .admonition.question,
+.md-typeset details.question,
+.md-typeset .admonition.success,
+.md-typeset details.success { border-color: var(--course-accent); }
+.md-typeset .question > .admonition-title,
+.md-typeset .question > summary,
+.md-typeset .success > .admonition-title,
+.md-typeset .success > summary { background-color: color-mix(in srgb, var(--course-accent) 10%, transparent); }
+.md-typeset .question > .admonition-title::before,
+.md-typeset .question > summary::before,
+.md-typeset .success > .admonition-title::before,
+.md-typeset .success > summary::before,
+.md-typeset .question > summary::after,
+.md-typeset .success > summary::after { background-color: var(--course-accent); }
