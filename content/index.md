@@ -1,102 +1,211 @@
 ---
 title: Home
+description: An easy-to-follow, hands-on deep dive into how Rocky Linux really works.
+hide:
+  - toc
 ---
 
 <div class="intro" markdown>
-  <span class="intro__eyebrow">Linux Internals · Track 1</span>
-  <h1>Linux Training Course</h1>
+  <span class="intro__eyebrow">Rocky Linux 10 · Hands-on</span>
+  <h1>Rocky Linux Deep Dive</h1>
   <p>
-    Fourteen mechanism-first modules that build a coherent vertical model of a
-    running Linux system, from the DAC access check the kernel runs on every
-    <code>open()</code> up through namespaces, cgroups, and the eBPF tooling
-    you use to watch it all happen. 62 hands-on labs, curated primary sources,
-    and a "senior signal" checklist per module.
+    Learn how Rocky Linux actually works, from the moment you press the power
+    button to the packets leaving your network card. Plain English, real
+    commands, interactive diagrams, and labs you run on your own VM. No kernel
+    source code required.
   </p>
   <div class="intro__actions" markdown>
-[Start the track](00-track-overview/){ .md-button .md-button--primary }
+[Start here](00-start-here.md){ .md-button .md-button--primary }
 [Browse modules](#modules){ .md-button }
   </div>
 </div>
 
-Every module follows the same shape: **concept deep-dive → hands-on labs (Objective / Setup / Steps / Prove it) → curated resources → senior signal.** Do the labs. Reading without running them gets you recognition, not recall.
+<div class="course-progress" hidden>
+  <div class="course-progress__track"><span class="course-progress__fill"></span></div>
+  <p class="course-progress__text"></p>
+</div>
 
-## Modules
+## How this course works
+
+Every module follows the same rhythm: **why it matters → how it works (with a picture) → what it looks like on a real system → try it yourself.** You'll find:
+
+<div class="feature-grid" markdown>
+
+<div class="feature" markdown>
+:material-cursor-default-click-outline: **Interactive diagrams**
+
+Step through the boot process, click through the storage stack, and play with permission bits.
+</div>
+
+<div class="feature" markdown>
+:material-flask-outline: **80+ hands-on labs**
+
+Safe, self-cleaning exercises for a throwaway VM. Every lab tells you how to check your work.
+</div>
+
+<div class="feature" markdown>
+:material-head-question-outline: **Checkpoints**
+
+Quick quizzes in every module so you know you've got it before moving on.
+</div>
+
+<div class="feature" markdown>
+:material-tools: **Troubleshooting first**
+
+Interactive decision trees and a capstone break-fix playbook for when things go wrong.
+</div>
+
+</div>
+
+## Modules { #modules }
+
+### Getting grounded
 
 <div class="syllabus-grid">
-  <a class="syllabus-card" href="01-permissions-and-access-control/">
-    <span class="syllabus-card__index">Module 01</span>
-    <span class="syllabus-card__title">Permissions and Access Control</span>
-    <span class="syllabus-card__description">DAC internals: mode bits, setuid/setgid, POSIX ACLs, capabilities.</span>
+  <a class="syllabus-card" href="00-start-here/">
+    <span class="syllabus-card__index">00</span>
+    <span class="syllabus-card__title">Start Here</span>
+    <span class="syllabus-card__description">What Rocky Linux is, how to use this course, and building your lab VM.</span>
   </a>
-  <a class="syllabus-card" href="02-users-authentication-and-pam/">
-    <span class="syllabus-card__index">Module 02</span>
-    <span class="syllabus-card__title">Users, Authentication and PAM</span>
-    <span class="syllabus-card__description">Identity stores (NSS), the PAM stack, sessions, credential lifecycle.</span>
+  <a class="syllabus-card" href="01-how-linux-works/">
+    <span class="syllabus-card__index">01</span>
+    <span class="syllabus-card__title">How Linux Works</span>
+    <span class="syllabus-card__description">The big picture: kernel vs user space, system calls, and "everything is a file".</span>
   </a>
-  <a class="syllabus-card" href="03-processes-scheduling-and-signals/">
-    <span class="syllabus-card__index">Module 03</span>
-    <span class="syllabus-card__title">Processes, Scheduling and Signals</span>
-    <span class="syllabus-card__description">Process lifecycle, the scheduler, signal delivery and semantics.</span>
-  </a>
-  <a class="syllabus-card" href="04-filesystems-and-the-vfs/">
-    <span class="syllabus-card__index">Module 04</span>
-    <span class="syllabus-card__title">Filesystems and the VFS</span>
-    <span class="syllabus-card__description">VFS objects, path walk, page cache, ext4/XFS, extended attributes.</span>
-  </a>
-  <a class="syllabus-card" href="05-storage-and-lvm/">
-    <span class="syllabus-card__index">Module 05</span>
-    <span class="syllabus-card__title">Storage and LVM</span>
-    <span class="syllabus-card__description">Block layer, device-mapper, LVM, snapshots, md/RAID, LUKS2, NVMe.</span>
-  </a>
-  <a class="syllabus-card" href="06-networking-deep/">
-    <span class="syllabus-card__index">Module 06</span>
-    <span class="syllabus-card__title">Networking Deep</span>
-    <span class="syllabus-card__description">NIC to socket: netdev, sk_buff, netfilter, routing, namespaces.</span>
-  </a>
-  <a class="syllabus-card" href="07-systemd/">
-    <span class="syllabus-card__index">Module 07</span>
-    <span class="syllabus-card__title">systemd</span>
-    <span class="syllabus-card__description">Unit model, job engine, cgroup integration, socket activation, journald.</span>
-  </a>
-  <a class="syllabus-card" href="08-boot-and-init/">
-    <span class="syllabus-card__index">Module 08</span>
-    <span class="syllabus-card__title">Boot and Init</span>
-    <span class="syllabus-card__description">Firmware → bootloader → initramfs → PID 1, the early-userspace pivot.</span>
-  </a>
-  <a class="syllabus-card" href="09-the-kernel/">
-    <span class="syllabus-card__index">Module 09</span>
-    <span class="syllabus-card__title">The Kernel</span>
-    <span class="syllabus-card__description">Kernel architecture, syscalls, memory management, modules, config.</span>
-  </a>
-  <a class="syllabus-card" href="10-namespaces-and-cgroups-v2/">
-    <span class="syllabus-card__index">Module 10</span>
-    <span class="syllabus-card__title">Namespaces and cgroups v2</span>
-    <span class="syllabus-card__description">The isolation and resource-control primitives behind containers.</span>
-  </a>
-  <a class="syllabus-card" href="11-observability-and-tracing-with-ebpf/">
-    <span class="syllabus-card__index">Module 11</span>
-    <span class="syllabus-card__title">Observability and Tracing with eBPF</span>
-    <span class="syllabus-card__description">Tracepoints, kprobes/uprobes, bcc and bpftrace workflows.</span>
-  </a>
-  <a class="syllabus-card" href="12-selinux-and-hardening/">
-    <span class="syllabus-card__index">Module 12</span>
-    <span class="syllabus-card__title">SELinux and Hardening</span>
-    <span class="syllabus-card__description">LSM hooks, type enforcement, policy authoring, hardening.</span>
-  </a>
-  <a class="syllabus-card" href="13-samba-and-smb/">
-    <span class="syllabus-card__index">Module 13</span>
-    <span class="syllabus-card__title">Samba and SMB</span>
-    <span class="syllabus-card__description">Shares, the passdb model, permissions and ACLs, troubleshooting, AD.</span>
-  </a>
-  <a class="syllabus-card" href="14-early-userspace-dracut-hooks-udev-and-the-initqueue/">
-    <span class="syllabus-card__index">Module 14</span>
-    <span class="syllabus-card__title">Early Userspace</span>
-    <span class="syllabus-card__description">dracut hooks, udev and the initqueue; initramfs debugging and triage.</span>
+  <a class="syllabus-card" href="02-shell-and-filesystem/">
+    <span class="syllabus-card__index">02</span>
+    <span class="syllabus-card__title">The Shell and the Filesystem</span>
+    <span class="syllabus-card__description">How bash runs commands, pipes and redirection, and a tour of the directory tree.</span>
   </a>
 </div>
 
-## Before you start
+### Running the system
 
-- You'll need a Rocky 9.x (or RHEL-compatible) throwaway VM for the labs
-- 62 labs total across 14 modules; each module takes 2–4 hours
-- The [Track Overview](00-track-overview/) has the recommended study order, shortcut paths, and a consolidated lab index
+<div class="syllabus-grid">
+  <a class="syllabus-card" href="03-users-groups-and-sudo/">
+    <span class="syllabus-card__index">03</span>
+    <span class="syllabus-card__title">Users, Groups and sudo</span>
+    <span class="syllabus-card__description">Identities, passwords, sudo, and what really happens when you log in (PAM).</span>
+  </a>
+  <a class="syllabus-card" href="04-permissions-and-acls/">
+    <span class="syllabus-card__index">04</span>
+    <span class="syllabus-card__title">Permissions and ACLs</span>
+    <span class="syllabus-card__description">rwx, special bits, ACLs, attributes, and capabilities. With a live calculator.</span>
+  </a>
+  <a class="syllabus-card" href="05-software-rpm-and-dnf/">
+    <span class="syllabus-card__index">05</span>
+    <span class="syllabus-card__title">Software: RPM and DNF</span>
+    <span class="syllabus-card__description">Packages, repositories, EPEL, updates, history, and rollback.</span>
+  </a>
+  <a class="syllabus-card" href="06-processes-and-signals/">
+    <span class="syllabus-card__index">06</span>
+    <span class="syllabus-card__title">Processes and Signals</span>
+    <span class="syllabus-card__description">fork and exec, process states, /proc, signals, priorities, and the OOM killer.</span>
+  </a>
+  <a class="syllabus-card" href="07-systemd-and-services/">
+    <span class="syllabus-card__index">07</span>
+    <span class="syllabus-card__title">systemd and Services</span>
+    <span class="syllabus-card__description">Units, dependencies, targets, timers, writing your own services, sandboxing.</span>
+  </a>
+  <a class="syllabus-card" href="08-logging-and-the-journal/">
+    <span class="syllabus-card__index">08</span>
+    <span class="syllabus-card__title">Logging and the Journal</span>
+    <span class="syllabus-card__description">journalctl like a pro, rsyslog, log rotation, and reading logs in an incident.</span>
+  </a>
+</div>
+
+### Storage and networking
+
+<div class="syllabus-grid">
+  <a class="syllabus-card" href="09-disks-and-filesystems/">
+    <span class="syllabus-card__index">09</span>
+    <span class="syllabus-card__title">Disks and Filesystems</span>
+    <span class="syllabus-card__description">Block devices, partitions, XFS and ext4, inodes, links, mounting, fstab, swap.</span>
+  </a>
+  <a class="syllabus-card" href="10-lvm-raid-and-encryption/">
+    <span class="syllabus-card__index">10</span>
+    <span class="syllabus-card__title">LVM, RAID and Encryption</span>
+    <span class="syllabus-card__description">Flexible volumes, snapshots, thin pools, mdadm RAID, and LUKS2.</span>
+  </a>
+  <a class="syllabus-card" href="11-networking/">
+    <span class="syllabus-card__index">11</span>
+    <span class="syllabus-card__title">Networking</span>
+    <span class="syllabus-card__description">IP, subnets, routing, DNS, NetworkManager, and the life of a packet.</span>
+  </a>
+  <a class="syllabus-card" href="12-firewalld/">
+    <span class="syllabus-card__index">12</span>
+    <span class="syllabus-card__title">Firewalls with firewalld</span>
+    <span class="syllabus-card__description">Zones, services, rich rules, forwarding, and nftables underneath.</span>
+  </a>
+  <a class="syllabus-card" href="13-nfs-and-samba/">
+    <span class="syllabus-card__index">13</span>
+    <span class="syllabus-card__title">File Sharing: NFS and Samba</span>
+    <span class="syllabus-card__description">Share files with Linux and Windows clients, securely.</span>
+  </a>
+</div>
+
+### Under the hood
+
+<div class="syllabus-grid">
+  <a class="syllabus-card" href="14-the-boot-process/">
+    <span class="syllabus-card__index">14</span>
+    <span class="syllabus-card__title">The Boot Process</span>
+    <span class="syllabus-card__description">UEFI, GRUB2, the kernel, dracut and the initramfs, systemd, and rescue mode.</span>
+  </a>
+  <a class="syllabus-card" href="15-the-kernel/">
+    <span class="syllabus-card__index">15</span>
+    <span class="syllabus-card__title">The Kernel</span>
+    <span class="syllabus-card__description">System calls, modules, /proc and /sys, sysctl, memory, and kdump.</span>
+  </a>
+  <a class="syllabus-card" href="16-selinux/">
+    <span class="syllabus-card__index">16</span>
+    <span class="syllabus-card__title">SELinux</span>
+    <span class="syllabus-card__description">Labels, type enforcement, booleans, and fixing denials without turning it off.</span>
+  </a>
+  <a class="syllabus-card" href="17-security-hardening/">
+    <span class="syllabus-card__index">17</span>
+    <span class="syllabus-card__title">Security Hardening</span>
+    <span class="syllabus-card__description">Patching, SSH, crypto policies, auditd, AIDE, and OpenSCAP compliance scans.</span>
+  </a>
+  <a class="syllabus-card" href="18-containers/">
+    <span class="syllabus-card__index">18</span>
+    <span class="syllabus-card__title">Containers from the Ground Up</span>
+    <span class="syllabus-card__description">Namespaces, cgroups v2, then Podman, rootless containers, and Quadlet.</span>
+  </a>
+  <a class="syllabus-card" href="19-performance-and-observability/">
+    <span class="syllabus-card__index">19</span>
+    <span class="syllabus-card__title">Performance and Observability</span>
+    <span class="syllabus-card__description">The USE method, sar, tuned, perf, and eBPF tools made approachable.</span>
+  </a>
+</div>
+
+### Putting it together
+
+<div class="syllabus-grid">
+  <a class="syllabus-card" href="20-troubleshooting-playbook/">
+    <span class="syllabus-card__index">20</span>
+    <span class="syllabus-card__title">Troubleshooting Playbook</span>
+    <span class="syllabus-card__description">A method plus real break-fix scenarios that tie every module together.</span>
+  </a>
+  <a class="syllabus-card" href="cheat-sheet/">
+    <span class="syllabus-card__index">Ref</span>
+    <span class="syllabus-card__title">Command Cheat Sheet</span>
+    <span class="syllabus-card__description">Every command from the course, grouped by task.</span>
+  </a>
+  <a class="syllabus-card" href="glossary/">
+    <span class="syllabus-card__index">Ref</span>
+    <span class="syllabus-card__title">Glossary</span>
+    <span class="syllabus-card__description">Plain-English definitions for every term you'll meet.</span>
+  </a>
+</div>
+
+## Suggested paths
+
+Working straight through (00 → 20) is the best way to learn. If you have a specific goal, these shortcuts work too:
+
+| If you want to… | Take these modules |
+|---|---|
+| Become a capable Rocky admin fast | 00 → 02 → 03 → 04 → 05 → 07 → 08 → 09 → 11 → 12 |
+| Run containers in production | 01 → 06 → 07 → 16 → 18 → 19 |
+| Pass a security review | 03 → 04 → 12 → 16 → 17 |
+| Get good at fixing broken servers | 07 → 08 → 14 → 19 → 20 |

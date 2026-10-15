@@ -488,11 +488,14 @@
       content.appendChild(box);
       sync();
     }
-    var cards = document.querySelectorAll(".syllabus-card[href]");
+    var cards = Array.prototype.filter.call(
+      document.querySelectorAll(".syllabus-card[href]"),
+      function (card) { return /\d{2}-[a-z0-9-]+/.test(card.getAttribute("href")); }
+    );
     var done = 0;
-    Array.prototype.forEach.call(cards, function (card) {
+    cards.forEach(function (card) {
       var m = card.getAttribute("href").match(/(\d{2}-[a-z0-9-]+)/);
-      var isDone = !!(m && progress[m[1]]);
+      var isDone = !!progress[m[1]];
       card.classList.toggle("is-done", isDone);
       if (isDone) done++;
     });

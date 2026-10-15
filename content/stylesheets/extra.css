@@ -154,7 +154,7 @@ body {
   line-height: 1.75;
 }
 
-.md-typeset > :not(.intro):not(.syllabus-grid) {
+.md-typeset > :not(.intro):not(.syllabus-grid):not(.feature-grid):not(.course-progress) {
   max-width: var(--course-reading-width);
 }
 
@@ -588,7 +588,7 @@ body {
     margin-top: 1.2rem;
   }
 
-  .md-typeset > :not(.intro):not(.syllabus-grid) {
+  .md-typeset > :not(.intro):not(.syllabus-grid):not(.feature-grid):not(.course-progress) {
     max-width: none;
   }
 }
