@@ -91,12 +91,11 @@ The kernel keeps time as seconds since 1970 in **UTC**. Time zones are applied b
 ```console
 $ ls -l /etc/localtime
 lrwxrwxrwx. 1 root root 25 Sep 30 08:01 /etc/localtime -> ../usr/share/zoneinfo/UTC
-$ sudo timedatectl set-timezone Europe/Berlin
 $ TZ=America/New_York date
 Thu Oct 15 06:12:03 AM EDT 2026
 ```
 
-Changing the time zone never changes the actual clock, and NTP never deals with time zones. Many teams run servers in UTC so logs from every region line up.
+The `TZ` variable changes the zone for one command only. `sudo timedatectl set-timezone Europe/Berlin` changes the system default by repointing that symlink. Either way, changing the time zone never changes the actual clock, and NTP never deals with time zones. Many teams run servers in UTC so logs from every region line up.
 
 ### Kernel clocks: REALTIME vs MONOTONIC
 
@@ -153,29 +152,30 @@ sequenceDiagram
 
 ### The default configuration
 
-Here is Rocky 10's `/etc/chrony.conf`, trimmed to the active lines and annotated. (Compare with yours: `grep -Ev '^(#|$)' /etc/chrony.conf`. Minor releases occasionally adjust a line or two.)
+Here are the active lines of Rocky 10's `/etc/chrony.conf` (compare with yours: `grep -Ev '^(#|$)' /etc/chrony.conf`). chrony's config file only allows comments on their own line, so the explanations are below the block rather than at the end of each line.
 
-```bash title="/etc/chrony.conf"
-pool 2.rocky.pool.ntp.org iburst     # (1)!
-sourcedir /run/chrony-dhcp           # (2)!
-driftfile /var/lib/chrony/drift      # (3)!
-makestep 1.0 3                       # (4)!
-rtcsync                              # (5)!
-keyfile /etc/chrony.keys             # (6)!
-ntsdumpdir /var/lib/chrony           # (7)!
-leapsectz right/UTC                  # (8)!
-logdir /var/log/chrony               # (9)!
+```ini title="/etc/chrony.conf"
+pool 2.rocky.pool.ntp.org iburst
+sourcedir /run/chrony-dhcp
+driftfile /var/lib/chrony/drift
+makestep 1.0 3
+rtcsync
+ntsdumpdir /var/lib/chrony
+logdir /var/log/chrony
 ```
 
-1. Use several servers from the NTP Pool's Rocky zone. `pool` resolves the name to multiple addresses and replaces ones that go bad. **`iburst`** sends a quick burst of four requests at start-up so the first sync takes seconds, not minutes. For a single fixed server, use `server name iburst`.
-2. Also use NTP servers handed out by DHCP (NetworkManager writes them here).
-3. Where chrony saves the learned **frequency error** of your oscillator, so after a reboot it starts out already compensating.
-4. **Step** the clock if it's off by more than 1.0 second, but only during the first 3 clock updates. After that, only slew. More below.
-5. Have the kernel copy system time to the RTC every 11 minutes.
-6. Symmetric keys for classic NTP authentication (rarely used now that NTS exists).
-7. Save NTS keys and cookies across restarts, so clients don't need a new NTS-KE handshake each time.
-8. Learn about upcoming leap seconds (and the TAI-UTC offset) from the system time zone database. Newer chrony versions also offer `leapseclist`, which reads tzdata's `leap-seconds.list` file instead; either does the job.
-9. Directory for optional measurement logs (enable with a `log` line).
+- `pool 2.rocky.pool.ntp.org iburst`: use several servers from the NTP Pool's Rocky zone. `pool` resolves the name to multiple addresses and replaces ones that go bad. **`iburst`** sends a quick burst of four requests at start-up so the first sync takes seconds, not minutes. For a single fixed server, use `server name iburst`.
+- `sourcedir /run/chrony-dhcp`: also use NTP servers handed out by DHCP (a NetworkManager dispatcher script from the chrony package writes them here).
+- `driftfile`: where chrony saves the learned **frequency error** of your oscillator, so after a reboot it starts out already compensating.
+- `makestep 1.0 3`: **step** the clock if it's off by more than 1.0 second, but only during the first 3 clock updates. After that, only slew. More below.
+- `rtcsync`: have the kernel copy system time to the RTC every 11 minutes.
+- `ntsdumpdir`: save NTS keys and cookies across restarts, so clients don't need a new NTS-KE handshake each time.
+- `logdir`: directory for optional measurement logs (enable with a `log` line).
+
+The commented-out lines in the file are worth reading too: `allow`, `local stratum`, `authselectmode`, `keyfile`, `leapsecmode`, and `leapseclist` are all there, ready to uncomment.
+
+!!! version "Rocky 9 vs 10"
+    Rocky 9's default file also has `keyfile /etc/chrony.keys` and `leapsectz right/UTC` active. Rocky 10 (chrony 4.6 and later) ships both commented out, and the leap-second line is now `#leapseclist /usr/share/zoneinfo/leap-seconds.list`. So out of the box, a Rocky 10 host learns about leap seconds only from its NTP servers, and doesn't know the TAI-UTC offset (see "Leap seconds" below).
 
 Cloud images and hosting providers often replace the `pool` line with their own internal time service (for example a link-local address on AWS or Azure's host time). That's fine and usually better than the public pool.
 
@@ -390,13 +390,13 @@ Reach is a register of the last eight polls in octal; `0` means none answered. C
 
 Clients across a site should sync to a few local servers, not each to the internet. Turning a Rocky machine into an NTP server takes one directive and a firewall rule:
 
-```bash title="/etc/chrony.conf (server additions)"
-allow 192.168.122.0/24           # (1)!
-#local stratum 10                # (2)!
+```ini title="/etc/chrony.conf (server additions)"
+allow 192.168.122.0/24
+#local stratum 10
 ```
 
-1. Answer NTP requests from this network. Without any `allow`, chronyd is client-only.
-2. Keep serving time even if all upstream sources are lost, at a high (untrusted-looking) stratum. Useful on isolated networks; dangerous if it makes clients follow a drifting clock. Leave it off unless you need it.
+- `allow`: answer NTP requests from this network. Without any `allow`, chronyd is client-only.
+- `local stratum 10` (commented out here): keep serving time even if all upstream sources are lost, at a high (untrusted-looking) stratum. Useful on isolated networks; dangerous if it makes clients follow a drifting clock. Leave it off unless you need it.
 
 ```console
 $ sudo systemctl restart chronyd
@@ -473,10 +473,10 @@ $ sudo systemctl restart chronyd
 $ sudo firewall-cmd --permanent --add-service=ntp
 $ sudo firewall-cmd --permanent --add-port=4460/tcp
 $ sudo firewall-cmd --reload
-$ sudo chronyc serverstats | grep -i nts
-NTS-KE connections accepted : 3
-NTS-KE connections dropped  : 0
-Authenticated NTP packets   : 412
+$ sudo chronyc serverstats | grep -E 'NTS|Authenticated'
+NTS-KE connections accepted: 3
+NTS-KE connections dropped : 0
+Authenticated NTP packets  : 412
 ```
 
 Remember that NTS-KE is TLS, so the server's crypto policy applies to it too. A client whose policy forbids the server's key (for example a 2048-bit RSA key under FUTURE) fails the NTS-KE handshake.
@@ -498,7 +498,7 @@ NTS-KE (TCP 4460) is failing, so clients never get cookies. Firewall, name, and 
 
 The Earth's rotation is slightly irregular, so UTC occasionally gets a **leap second**: an extra second, 23:59:60, at the end of June or December. Leap seconds have caused real outages when software saw a repeated second or a minute with 61 seconds. None has been added since the end of 2016, and the international timekeeping bodies have decided to stop adding them by 2035, but your systems should still handle one sensibly.
 
-chrony learns about upcoming leap seconds from NTP servers and from the time zone database (`leapsectz right/UTC`). `chronyc tracking` shows `Leap status : Insert second` in the days before. How it applies it is set by `leapsecmode`:
+chrony learns about upcoming leap seconds from the leap indicator NTP servers send, and optionally from a file: `leapseclist /usr/share/zoneinfo/leap-seconds.list` (chrony 4.6+, the commented-out line in Rocky 10's config) or the older `leapsectz right/UTC` (active by default on Rocky 9). Both files come from the `tzdata` package. `chronyc tracking` shows `Leap status : Insert second` in the days before. How it applies it is set by `leapsecmode`:
 
 | `leapsecmode` | Behaviour |
 |---|---|
@@ -507,7 +507,17 @@ chrony learns about upcoming leap seconds from NTP servers and from the time zon
 | `slew` | chronyd slews the second out over about 12 seconds; no repeated time, briefly off by up to 1 s |
 | `ignore` | Do nothing; the error is corrected later by normal slewing |
 
-Big providers instead **smear** the leap second: their servers spread the extra second over many hours, so clients see time running very slightly slow and never notice. chrony can act as a smearing server with `smoothtime 400 0.001 leaponly` plus `leapsecmode slew`. Never mix smeared and non-smeared servers on the same client: during a smear they disagree by up to a second and chrony will reject one group as falsetickers. A client that follows smeared servers should also comment out `leapsectz`, so it doesn't apply the leap second a second time.
+Big providers instead **smear** the leap second: their servers spread the extra second over many hours, so clients see time running very slightly slow and never notice. chrony can act as a smearing server with `smoothtime 400 0.001 leaponly` plus `leapsecmode slew`. Never mix smeared and non-smeared servers on the same client: during a smear they disagree by up to a second and chrony will reject one group as falsetickers. A client that follows smeared servers should not use `leapsectz` or `leapseclist`, so it doesn't apply the leap second a second time.
+
+??? question "Under the hood: the TAI offset nobody sets"
+    The kernel keeps a **TAI-UTC offset** that turns `CLOCK_REALTIME` into `CLOCK_TAI`. It starts at 0. chronyd sets it only when `leapsectz` or `leapseclist` is configured (and `leapsecmode` is the default, `system`). Check yours:
+
+    ```console
+    $ python3 -c 'import time; print(round(time.clock_gettime(time.CLOCK_TAI) - time.time()))'
+    0
+    ```
+
+    `0` means `CLOCK_TAI` is silently equal to UTC: the default on Rocky 10. `37` means the offset is set (the default on Rocky 9, thanks to `leapsectz`). It matters for PTP software, some databases, and chrony's own `refclock … tai` option, which needs that offset to convert a TAI reference clock. Uncomment the `leapseclist` line, restart chronyd, give it a minute to synchronise, and the same command prints `37`.
 
 ## PTP: when milliseconds aren't enough
 
@@ -566,7 +576,7 @@ ptp4l[1211.104]: port 1 (enp1s0): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
 ptp4l[1212.105]: master offset        -23 s2 freq   +1132 path delay       612
 ```
 
-`-s` means client only (never become master), `-m` prints to the terminal. `master offset` in nanoseconds settling to small numbers means the PHC is locked. For a permanent setup, use the `ptp4l` systemd service with options in `/etc/sysconfig/ptp4l` and settings in `/etc/ptp4l.conf`.
+`-s` means client only (never become master), `-m` prints to the terminal. `master offset` in nanoseconds settling to small numbers means the PHC is locked. (`s0`, `s1`, `s2` are the clock servo's states: unlocked, clock stepped, locked.) For a permanent setup, use the `ptp4l` systemd service with options in `/etc/sysconfig/ptp4l` and settings in `/etc/ptp4l.conf`.
 
 Now get PHC time into the system clock. Two ways:
 
@@ -577,7 +587,7 @@ Now get PHC time into the system clock. Two ways:
     pool 2.rocky.pool.ntp.org iburst
     ```
 
-    chronyd reads the PHC directly as a **reference clock**. `offset -37` converts from TAI (which PTP uses) to UTC: TAI is currently 37 seconds ahead. NTP sources stay configured as a sanity check and fallback. `chronyc sources` then shows a `#* PTP` line.
+    chronyd reads the PHC directly as a **reference clock**. `offset -37` converts from TAI (which PTP uses) to UTC: TAI is currently 37 seconds ahead. NTP sources stay configured as a sanity check and fallback. `chronyc sources` then shows a `#* PTP` line. The hard-coded 37 would be wrong after a future leap second; the cleaner form is the `tai` option instead of `offset -37`, which only works once `leapseclist` is enabled (see the leap-second deep dive above).
 
 === "phc2sys"
 
@@ -589,6 +599,8 @@ Now get PHC time into the system clock. Two ways:
 
 !!! tip "A deep cut for KVM guests"
     The `ptp_kvm` kernel module gives a KVM guest a virtual PHC (`/dev/ptp0`) that reads the host's clock directly, with no network involved. With `refclock PHC /dev/ptp0 poll 2` in the guest's chrony.conf, guests track the host very closely. Load it with `sudo modprobe ptp_kvm` and check `ls /dev/ptp*`. The host must itself be well synchronised, of course.
+
+    Production gotcha: `/dev/ptpN` numbers are assigned in probe order, so a guest that also has a passthrough NIC with its own PHC can swap `ptp0` and `ptp1` between boots. systemd's udev rules add a stable `/dev/ptp_kvm` symlink for the KVM clock; check with `ls -l /dev/ptp_kvm` and use that path in `chrony.conf`.
 
 ## Troubleshooting clock skew
 
@@ -618,7 +630,7 @@ Now get PHC time into the system clock. Two ways:
 
 <div class="node" data-id="reach" markdown>
 
-**No source answers.** Check DNS resolves the server names, outbound UDP 123 isn't blocked (cloud security groups, corporate firewalls), and for NTS that TCP 4460 is open and `chronyc -N authdata` shows cookies. `chronyc ntpdata <server>` and `sudo tcpdump -ni any udp port 123` prove whether replies arrive.
+**No source answers.** Check DNS resolves the server names, outbound UDP 123 isn't blocked (cloud security groups, corporate firewalls), and for NTS that TCP 4460 is open and `chronyc -N authdata` shows cookies. `chronyc ntpdata <server>` and `sudo tcpdump -ni any udp port 123` prove whether replies arrive. To test one server in isolation without touching the clock, run `sudo chronyd -Q 'server <name> iburst'`: it measures the offset once, prints it, and exits.
 
 </div>
 
@@ -687,7 +699,7 @@ Now get PHC time into the system clock. Two ways:
     **Check your work:** you can state (a) your clocksource, (b) your current offset from `System time`, (c) your oscillator's frequency error in ppm and roughly how many seconds per day that is (ppm × 0.0864), and (d) which source is `*` and why its Reach is what it is.
 
     ??? success "Reading the drift file"
-        `/var/lib/chrony/drift` holds two numbers: the frequency correction in ppm and its estimated error. It matches `Frequency` in `chronyc tracking` (with the opposite sign convention for "slow"/"fast" spelled out in words there).
+        `/var/lib/chrony/drift` holds two numbers: the frequency offset in ppm and its estimated error. It corresponds to `Frequency` in `chronyc tracking`, which spells the sign out as "fast" or "slow". chronyd writes the file periodically and at shutdown, so a fresh install may not have it yet.
 
     **Clean up:** nothing to undo.
 
@@ -710,7 +722,7 @@ Now get PHC time into the system clock. Two ways:
         ```console
         $ sudo systemctl start chronyd
         $ chronyc waitsync 30 0.1
-        $ journalctl -u chronyd --since '-2 min' --no-pager | grep -i 'system clock'
+        $ sudo journalctl -u chronyd --since '-2 min' --no-pager | grep -i 'system clock'
         … chronyd[2311]: System clock wrong by -300.004113 seconds
         … chronyd[2311]: System clock was stepped by -300.004113 seconds
         ```

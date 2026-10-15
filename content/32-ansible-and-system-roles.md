@@ -74,7 +74,7 @@ Rocky ships **ansible-core** in the AppStream repository. `ansible-core` is the 
 $ sudo dnf install -y ansible-core
 $ ansible --version
 ansible [core 2.16.14]
-  config file = None
+  config file = /etc/ansible/ansible.cfg
   configured module search path = ['/home/alex/.ansible/plugins/modules', '/usr/share/ansible/plugins/modules']
   ansible python module location = /usr/lib/python3.12/site-packages/ansible
   ansible collection location = /home/alex/.ansible/collections:/usr/share/ansible/collections
@@ -85,12 +85,17 @@ ansible [core 2.16.14]
 ```
 
 !!! version "Rocky 9 vs 10"
-    Rocky 10 ships ansible-core **2.16** (packaged as `1:2.16.x`), built on Python 3.12. Rocky 9 froze ansible-core at **2.14** for the rest of its life. Content written for 2.16 usually runs on 2.14, but a few newer collections require 2.15 or later, so a Rocky 10 control node is the better choice for a mixed fleet. Check yours with `dnf info ansible-core`.
+    Rocky 10 ships ansible-core **2.16** (packaged as `1:2.16.x`, still 2.16 in later 10.x updates), built on Python 3.12. Rocky 9 ships ansible-core **2.14** (`1:2.14.x`) and stays on it for the rest of its life. Content written for 2.16 usually runs on 2.14, but a few newer collections require 2.15 or later, so a Rocky 10 control node is the better choice for a mixed fleet. Check yours with `dnf info ansible-core`.
 
 Only the control node needs Ansible. A managed node needs just three things: an SSH server, a user you can log in as, and `python3` (every Rocky install has it, because DNF is written in Python).
 
 !!! tip "Keep each project self-contained"
-    Make a directory per project with its own `ansible.cfg`, inventory, and playbooks. Ansible reads `ansible.cfg` from the current directory first (then `~/.ansible.cfg`, then `/etc/ansible/ansible.cfg`), so `cd` into the project and everything just works. `ansible --version` shows which config file it picked.
+    Make a directory per project with its own `ansible.cfg`, inventory, and playbooks. Ansible uses the first config file it finds: the `ANSIBLE_CONFIG` environment variable, then `./ansible.cfg` in the current directory, then `~/.ansible.cfg`, then `/etc/ansible/ansible.cfg` (a mostly empty stub the RPM ships). So `cd` into the project and everything just works. `ansible --version` shows which file it picked.
+
+??? question "Under the hood: why Ansible sometimes ignores your ansible.cfg"
+    Ansible refuses to load `./ansible.cfg` from a **world-writable directory** (for example a project under `/tmp`, or a shared folder mounted with mode `0777`). Anyone could drop a config there that points your runs at a malicious module path. You get a one-line warning, `Ansible is being run in a world writable directory … ignoring it as an ansible.cfg source`, and the run silently falls back to `/etc/ansible/ansible.cfg`, so your inventory and `remote_user` vanish. Fix the directory mode, or point `ANSIBLE_CONFIG` at the file explicitly.
+
+    A second trap: `ansible.cfg` only allows `#` and `;` at the **start** of a line. An inline comment must start with `;`. `inventory = ./inventory  # my hosts` sets the inventory path to the whole string, comment included. That's why the config examples in this module never put comments at the end of a line.
 
 ## How Ansible runs a task: the agentless model
 
@@ -237,18 +242,18 @@ $ ansible-inventory -i inventory --host db1
 
 ```ini title="ansible.cfg"
 [defaults]
-inventory = ./inventory   # (1)!
-remote_user = ansible     # (2)!
-forks = 10                # (3)!
+inventory = ./inventory
+remote_user = ansible
+forks = 10
 
 [ssh_connection]
-pipelining = True         # (4)!
+pipelining = True
 ```
 
-1. So you don't need `-i inventory` on every command.
-2. The account Ansible logs in as on every node. Use a dedicated user with an SSH key and sudo rights, not root.
-3. How many hosts to work on in parallel (default 5).
-4. Stream modules into Python instead of copying files. Faster, and it requires that `sudo` doesn't need a TTY (the Rocky default).
+- `inventory`: so you don't need `-i inventory` on every command.
+- `remote_user`: the account Ansible logs in as on every node. Use a dedicated user with an SSH key and sudo rights, not root.
+- `forks`: how many hosts to work on in parallel (default 5).
+- `pipelining`: stream modules into Python instead of copying files. Faster, and it requires that `sudo` doesn't need a TTY (the Rocky default).
 
 ## Ad-hoc commands: one task, many hosts
 
@@ -314,7 +319,7 @@ db1 | SUCCESS => { "changed": false, "ping": "pong" }
 
 </div>
 
-<div class="task" data-expect="ansible web -a 'uname -r'||ansible web -m command -a 'uname -r'||ansible web -m ansible.builtin.command -a 'uname -r'" data-match="^ansible web (-m (ansible\.builtin\.)?command )?-a ['\"]uname -r['\"]$" data-hint="The default module is command, so ansible web -a 'uname -r' is enough." markdown>
+<div class="task" data-expect="ansible web -a 'uname -r'||ansible web -m command -a 'uname -r'||ansible web -m ansible.builtin.command -a 'uname -r'" data-match="^ansible web (-m (ansible\.builtin\.)?command )?-a ['&quot;]uname -r['&quot;]$" data-hint="The default module is command, so ansible web -a 'uname -r' is enough." markdown>
 
 **Step 3.** Ask only the `web` group which kernel it runs.
 
@@ -337,9 +342,10 @@ Two different kernels: drift already.
 TASK [Set login banner] ********************************************
 --- before: /etc/issue
 +++ after: /home/alex/lab/templates/issue.j2
-@@ -1,2 +1 @@
+@@ -1,3 +1 @@
 -\S
--Kernel \r on \m
+-Kernel \r on an \m
+-
 +Authorised use only. web2 is monitored.
 changed: [web2]
 …
@@ -413,8 +419,8 @@ Run the playbook twice and read the **PLAY RECAP**:
 $ ansible-playbook web.yml
 …
 PLAY RECAP *********************************************************************
-web1    : ok=5    changed=3    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
-web2    : ok=5    changed=3    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+web1    : ok=5    changed=4    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+web2    : ok=5    changed=4    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
 
 $ ansible-playbook web.yml
 …
@@ -423,7 +429,7 @@ web1    : ok=4    changed=0    unreachable=0    failed=0    skipped=0    rescued
 web2    : ok=4    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
 ```
 
-First run: three things changed (package, config, service), and the handler fired (that's the fifth `ok`). Second run: `changed=0`, and the handler didn't run because nothing notified it. **`changed=0` on the second run is the test of a well-written playbook.**
+First run: four results were `changed`: the package, the config, the service, and the handler that fired at the end (a `reloaded` state always counts as a change). `ok` counts every task that succeeded, changed or not, so it's 5: fact gathering, three tasks, one handler. Second run: `changed=0`, and the handler didn't run because nothing notified it. **`changed=0` on the second run is the test of a well-written playbook.**
 
 ```mermaid
 stateDiagram-v2
@@ -466,8 +472,11 @@ server {{ server }} iburst
 driftfile /var/lib/chrony/drift
 makestep 1.0 3
 rtcsync
-{% if ansible_distribution_major_version | int >= 10 %}
 ntsdumpdir /var/lib/chrony
+{% if ansible_distribution_major_version | int >= 10 %}
+leapseclist /usr/share/zoneinfo/leap-seconds.list
+{% else %}
+leapsectz right/UTC
 {% endif %}
 ```
 
@@ -477,7 +486,7 @@ ntp_servers:
   - ntp2.lab.example
 ```
 
-Jinja2 filters transform values: `| int`, `| default('x')`, `| join(',')`, `| upper`. Conditionals on tasks use `when:` with a bare expression (no braces):
+The `if` block exists because Rocky 9 and Rocky 10 ship different leap-second settings ([module 36](36-time-synchronization.md)): one template, correct for both. Jinja2 filters transform values: `| int`, `| default('x')`, `| join(',')`, `| upper`. Conditionals on tasks use `when:` with a bare expression (no braces):
 
 ```yaml
 - name: Only on Rocky 10
@@ -538,7 +547,14 @@ flowchart LR
 ```
 
 !!! warning "Check mode has blind spots"
-    `command` and `shell` tasks are skipped in check mode (they can't predict their effect). Tasks that depend on an earlier task's real result can fail or mislead in check mode, for example configuring a service whose package "would be" installed. Add `check_mode: false` to read-only tasks that must always run, and guard dependent tasks with `when: not ansible_check_mode` where needed.
+    `command` and `shell` tasks are skipped in check mode (they can't predict their effect) unless they use `creates:` or `removes:`. Tasks that depend on an earlier task's real result can fail or mislead in check mode, for example configuring a service whose package "would be" installed. Add `check_mode: false` to read-only tasks that must always run, and guard dependent tasks with `when: not ansible_check_mode` where needed.
+
+??? question "Under the hood: what check mode really does with handlers and secrets"
+    Two things surprise people in production.
+
+    **Handlers still fire in check mode.** A task that *would* change notifies its handler, and the handler runs in check mode too. A `systemd_service` handler with `state: reloaded` reports `changed` (it would reload), and a `command` handler is skipped. So a drift run that finds one changed file usually reports `changed=2`: the file plus its handler. Alert on `changed > 0`, not on an exact number.
+
+    **`--diff` prints file contents.** A template that renders a password from ansible-vault shows that password in clear text in the diff, and therefore in your CI logs or nightly drift email. Put `diff: false` (or `no_log: true`) on tasks that write secrets. The vault protects the file at rest, not the output of your run.
 
 <div class="quiz" data-answer="4" markdown>
 
@@ -600,7 +616,7 @@ roles/sshd_hardening/
 └── meta/main.yml         # metadata, dependencies
 ```
 
-Create the skeleton with `ansible-galaxy role init roles/sshd_hardening`, then use it from a play:
+Create the skeleton with `ansible-galaxy role init --init-path roles sshd_hardening`, then use it from a play:
 
 ```yaml
 - hosts: rocky
@@ -694,7 +710,7 @@ ad_integration  aide  bootloader  certificate  cockpit  crypto_policies  firewal
 ```
 
 !!! note "Availability on Rocky"
-    `rhel-system-roles` is built for Rocky 10 in AppStream; it has been reported working on Rocky 10.2 and is present in the 10.1 sources. If `dnf info rhel-system-roles` finds nothing on your mirror, install the upstream collection instead: `ansible-galaxy collection install fedora.linux_system_roles`, and replace `redhat.rhel_system_roles.` with `fedora.linux_system_roles.` in role names. The variables are the same.
+    `rhel-system-roles` is in Rocky 10's AppStream repository, rebuilt from RHEL's package (the version follows RHEL: 1.108 in 10.1, 1.120 in later 10.x updates). If you're on another EL rebuild or `dnf info rhel-system-roles` finds nothing on your mirror, install the upstream collection instead: `ansible-galaxy collection install fedora.linux_system_roles`, and replace `redhat.rhel_system_roles.` with `fedora.linux_system_roles.` in role names. The variables are the same. The upstream collection pulls its dependencies (such as `ansible.posix` and `community.general`) from Galaxy, while the RPM bundles what it needs.
 
 Each role's `README.md` documents every variable, and `/usr/share/doc/rhel-system-roles/<role>/` holds ready-to-run example playbooks. That's your reference; read it before using a role.
 
@@ -816,7 +832,7 @@ Why use `redhat.rhel_system_roles.selinux` instead of a few `command: semanage �
 
 ## Quality and tooling: ansible-lint and ansible-navigator
 
-**ansible-lint** checks playbooks and roles for mistakes and bad habits: missing FQCNs, `command` where a module exists, tasks without names, risky file permissions, YAML style. It is not in Rocky's base repos, so install it from PyPI in a virtual environment (keeping it away from the RPM-installed ansible-core):
+**ansible-lint** checks playbooks and roles for mistakes and bad habits: missing FQCNs, `command` where a module exists, tasks without names, risky file permissions, YAML style. It is not in Rocky's repos (nor, at the time of writing, in EPEL 10), so install it from PyPI in a virtual environment (keeping it away from the RPM-installed ansible-core):
 
 ```console
 $ python3 -m venv ~/venvs/lint && ~/venvs/lint/bin/pip install -q ansible-lint
@@ -830,7 +846,7 @@ baseline.yml:31 Task/Handler: Reload sysctl
 …
 ```
 
-**ansible-navigator** is a text UI and runner that executes playbooks inside an **execution environment**: a container image that bundles a specific ansible-core, Python, and collections. It solves "works on my control node" by making the whole toolchain a pinned image, run with Podman ([module 18](18-containers.md)). It also comes from PyPI on Rocky. For a small team, a project `requirements.yml` and a single control node is enough; reach for navigator when several people or CI need identical tooling.
+**ansible-navigator** is a text UI and runner that executes playbooks inside an **execution environment**: a container image that bundles a specific ansible-core, Python, and collections. It solves "works on my control node" by making the whole toolchain a pinned image, run with Podman ([module 18](18-containers.md)). It also comes from PyPI on Rocky (`pip install ansible-navigator` in a virtual environment). For a small team, a project `requirements.yml` and a single control node is enough; reach for navigator when several people or CI need identical tooling.
 
 ## Labs
 
@@ -857,8 +873,12 @@ You need a control node and something to manage. Three small Rocky 10 VMs (one c
         [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
         sudo install -d -m 700 -o ansible -g ansible ~ansible/.ssh
         sudo install -m 600 -o ansible -g ansible ~/.ssh/id_ed25519.pub ~ansible/.ssh/authorized_keys
+        sudo restorecon -R ~ansible/.ssh
         ssh -o StrictHostKeyChecking=accept-new ansible@localhost true
+        ssh -o StrictHostKeyChecking=accept-new ansible@127.0.0.1 true
         ```
+
+        Both `ssh` lines matter: Ansible checks host keys by the address it connects to, and the inventory below uses both `localhost` and `127.0.0.1`. Without the second line, `web1` fails with "Host key verification failed".
 
     3. Create the project:
 
@@ -901,10 +921,11 @@ You need a control node and something to manage. Three small Rocky 10 VMs (one c
 
     **You'll need:** Lab 1.
 
-    1. Create a template for the login banner and an sshd drop-in:
+    1. Back up the login banner, then create a template for it and an sshd drop-in:
 
         ```bash
         cd ~/lab
+        sudo cp -a /etc/issue /root/issue.orig
         cat > templates/issue.j2 <<'EOF'
         Authorised use only. {{ inventory_hostname }} is monitored.
         EOF
@@ -979,7 +1000,10 @@ You need a control node and something to manage. Three small Rocky 10 VMs (one c
         $ ansible-playbook baseline.yml
         ```
 
-    **Check your work:** the second run's recap shows `changed=0`, and `sudo sshd -T | grep -i permitrootlogin` prints `permitrootlogin no`.
+    **Check your work:** the second run's recap shows `changed=0`, and `sudo sshd -T | grep -i -E 'permitrootlogin|maxauthtries'` prints `permitrootlogin no` and `maxauthtries 3`.
+
+    ??? question "Under the hood: why the drop-in's file name matters"
+        `sshd` uses the **first** value it reads for most keywords, and `/etc/ssh/sshd_config` includes `sshd_config.d/*.conf` at the very top, in alphabetical order. Rocky ships `50-redhat.conf` there; `50-hardening.conf` sorts before it (`h` comes before `r`), so your settings win. If the installer created `01-permitrootlogin.conf` (it does when you allowed root SSH login with a password during installation), that file sorts first and `PermitRootLogin yes` beats yours. `sshd -T` shows the effective value, which is the only one that counts. In real baselines, name your drop-in `00-…` or manage the installer's file too.
 
     ??? tip "Hint: the validate line fails"
         `sshd -t -f %s` tests the drop-in as if it were the whole config. That works for these simple directives. If you add `Match` blocks, validate the main config instead with a handler that runs `sshd -t`.
@@ -987,7 +1011,7 @@ You need a control node and something to manage. Three small Rocky 10 VMs (one c
     ??? success "Why is the handler `changed_when: true` OK?"
         Handlers only run when something notified them, which already means a change happened. Marking it explicitly keeps ansible-lint quiet and makes the intent clear.
 
-    **Clean up:** keep the files for Lab 3. To revert the host later: `sudo rm /etc/ssh/sshd_config.d/50-hardening.conf /etc/sysctl.d/90-baseline.conf; sudo systemctl reload sshd; sudo sysctl --system; echo -e '\S\nKernel \r on \m' | sudo tee /etc/issue`.
+    **Clean up:** keep the files for Lab 3. To revert the host later: `sudo rm /etc/ssh/sshd_config.d/50-hardening.conf /etc/sysctl.d/90-baseline.conf; sudo systemctl reload sshd; sudo sysctl --system; sudo cp -a /root/issue.orig /etc/issue`. (The sysctl values already applied stay in effect until the next reboot.)
 
 !!! lab "Lab 3: Catch drift with --check --diff"
 
@@ -1008,7 +1032,7 @@ You need a control node and something to manage. Three small Rocky 10 VMs (one c
         $ ansible-playbook baseline.yml --check --diff
         ```
 
-        Find the two `--- before / +++ after` blocks and the recap line with `changed=2`. Confirm nothing was changed yet: `grep MaxAuth /etc/ssh/sshd_config.d/50-hardening.conf` still says `10`.
+        Find the two `--- before / +++ after` blocks. The recap shows `changed=3`: the two files plus the `Reload sshd` handler, which also runs in check mode (the `command` handler is skipped). Confirm nothing was changed yet: `grep MaxAuth /etc/ssh/sshd_config.d/50-hardening.conf` still says `10`.
 
     3. Remediate, then audit again:
 
@@ -1020,7 +1044,7 @@ You need a control node and something to manage. Three small Rocky 10 VMs (one c
     **Check your work:** the final check run reports `changed=0`.
 
     ??? success "What just happened?"
-        In check mode, `template` and `copy` rendered the desired content, compared checksums with the real files, and printed a diff instead of writing. The handlers were "notified" but don't run in check mode. The real run restored both files and fired both handlers. Schedule the check run nightly (a systemd timer, [module 07](07-systemd-and-services.md)) and alert on `changed>0`, and you have continuous compliance.
+        In check mode, `template` and `copy` rendered the desired content, compared checksums with the real files, and printed a diff instead of writing. The handlers were notified and ran in check mode too: `Reload sshd` reported that it *would* reload, and the `command` handler was skipped. The real run restored both files and fired both handlers. Schedule the check run nightly (a systemd timer, [module 07](07-systemd-and-services.md)) and alert on `changed>0`, and you have continuous compliance.
 
     **Clean up:** nothing extra.
 
