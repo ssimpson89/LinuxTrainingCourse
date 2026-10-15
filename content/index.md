@@ -244,6 +244,51 @@ The topics most Linux guides skip. Take them after the core track, in any order.
     <span class="syllabus-card__title">High Availability</span>
     <span class="syllabus-card__description">Pacemaker and Corosync clusters, fencing, and resources that fail over.</span>
   </a>
+  <a class="syllabus-card syllabus-card--elective" href="29-secure-boot-and-drivers/">
+    <span class="syllabus-card__index">29</span>
+    <span class="syllabus-card__title">Secure Boot and Drivers</span>
+    <span class="syllabus-card__description">The UEFI trust chain, shim and MOK, signing kernel modules, DKMS vs kmods, and NVIDIA done right.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="30-network-bound-encryption/">
+    <span class="syllabus-card__index">30</span>
+    <span class="syllabus-card__title">Clevis, Tang and TPM2</span>
+    <span class="syllabus-card__description">Encrypted servers that unlock themselves safely, plus measured boot and PCR policy.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="31-disaster-recovery-and-migration/">
+    <span class="syllabus-card__index">31</span>
+    <span class="syllabus-card__title">Disaster Recovery and Migration</span>
+    <span class="syllabus-card__description">ReaR bare-metal recovery, and planning major-version moves when there's no in-place upgrade.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="32-ansible-and-system-roles/">
+    <span class="syllabus-card__index">32</span>
+    <span class="syllabus-card__title">Ansible and System Roles</span>
+    <span class="syllabus-card__description">Idempotent fleet management with ansible-core and the RHEL System Roles.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="33-tls-and-crypto-policies/">
+    <span class="syllabus-card__index">33</span>
+    <span class="syllabus-card__title">TLS and Crypto Policies</span>
+    <span class="syllabus-card__description">Crypto policies, your own CA, web TLS, debugging handshakes, and post-quantum crypto.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="34-nftables-and-traffic-control/">
+    <span class="syllabus-card__index">34</span>
+    <span class="syllabus-card__title">nftables and Traffic Control</span>
+    <span class="syllabus-card__description">Raw nftables, packet tracing, and shaping traffic with tc and netem.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="35-enterprise-storage/">
+    <span class="syllabus-card__index">35</span>
+    <span class="syllabus-card__title">Enterprise Storage</span>
+    <span class="syllabus-card__description">SAN storage over iSCSI and NVMe/TCP, multipathing, I/O schedulers, and fio.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="36-time-synchronization/">
+    <span class="syllabus-card__index">36</span>
+    <span class="syllabus-card__title">Time Synchronization</span>
+    <span class="syllabus-card__description">Why time breaks everything, chrony internals, authenticated NTP, and precision PTP.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="37-real-time-and-low-latency/">
+    <span class="syllabus-card__index">37</span>
+    <span class="syllabus-card__title">Real-Time and Low Latency</span>
+    <span class="syllabus-card__description">kernel-rt, CPU isolation, IRQ affinity, tuned profiles, and measuring jitter.</span>
+  </a>
 </div>
 
 ## Suggested paths
@@ -254,6 +299,6 @@ Working straight through (00 → 20) is the best way to learn. If you have a spe
 |---|---|
 | Become a capable Rocky admin fast | 00 → 02 → 03 → 04 → 05 → 07 → 08 → 09 → 11 → 12 |
 | Run containers in production | 01 → 06 → 07 → 16 → 18 → 19 |
-| Pass a security review | 03 → 04 → 12 → 16 → 17 |
+| Pass a security review | 03 → 04 → 12 → 16 → 17 → 29 → 30 → 33 |
 | Get good at fixing broken servers | 07 → 08 → 14 → 19 → 20 → 24 |
 | Go deep on how Rocky itself works | 05 → 14 → 21 → 22 → 23 |

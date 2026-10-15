@@ -102,6 +102,15 @@ nav:
       - '26 · Centralized Identity': 26-centralized-identity.md
       - '27 · Virtualization with KVM': 27-virtualization-kvm.md
       - '28 · High Availability': 28-high-availability.md
+      - '29 · Secure Boot and Third-Party Drivers': 29-secure-boot-and-drivers.md
+      - '30 · Unattended Disk Unlock: Clevis, Tang and TPM2': 30-network-bound-encryption.md
+      - '31 · Disaster Recovery and Migration': 31-disaster-recovery-and-migration.md
+      - '32 · Automation with Ansible and System Roles': 32-ansible-and-system-roles.md
+      - '33 · TLS, Certificates and Crypto Policies': 33-tls-and-crypto-policies.md
+      - '34 · nftables and Traffic Control': 34-nftables-and-traffic-control.md
+      - '35 · Enterprise Storage: iSCSI, Multipath and NVMe-oF': 35-enterprise-storage.md
+      - '36 · Time: chrony, NTS and PTP': 36-time-synchronization.md
+      - '37 · Real-Time and Low-Latency Rocky': 37-real-time-and-low-latency.md
 
 markdown_extensions:
   - tables
