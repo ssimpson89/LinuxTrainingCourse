@@ -138,6 +138,24 @@ flowchart LR
     S["S: sleeping (waiting for input)"] -. "not counted" .-> L
 ```
 
+??? question "How is the load average actually calculated?"
+    Every 5 seconds the kernel counts tasks that are runnable or in `D`
+    state, then updates three **exponentially weighted moving averages**.
+    Each new sample nudges the old value toward the current count, with a
+    different weight for the 1, 5 and 15 minute figures. That is why a sudden
+    burst of 10 tasks does not show as 10 immediately: after one minute the
+    1-minute average has covered only about 63% of the distance. It also
+    means the "1-minute" number still remembers a little of what happened
+    five minutes ago. You can read the raw values, plus the count of
+    currently runnable tasks, in `/proc/loadavg`.
+
+??? question "Why %iowait is a weak signal"
+    `%iowait` is *idle* time during which some I/O was outstanding. It does
+    not mean "the CPU was busy waiting". If a CPU-bound job starts on the
+    same box, `%iowait` can drop to zero even though the disk is just as slow,
+    because the CPU is no longer idle. Use it as a hint, then confirm disk
+    problems with `iostat` latency and PSI `io` pressure.
+
 To find which kind of load you have, count process states:
 
 ```console
@@ -357,6 +375,60 @@ should already know what you are looking for; `top` confirms it.
 
 </div>
 
+### Practise the checklist
+
+<div class="terminal-sim" data-title="Sixty seconds on a slow box" data-prompt="[alex@rocky-lab ~]$ " markdown>
+
+<div class="task" data-expect="uptime" data-hint="One word: how long has the system been up, and how loaded is it?" markdown>
+
+**Step 1.** Check the load averages and their trend.
+
+```text
+ 10:14:02 up 12 days,  3:41,  2 users,  load average: 7.92, 5.10, 1.84
+```
+
+</div>
+
+<div class="task" data-expect="nproc" data-hint="A coreutils command that prints the number of processing units." markdown>
+
+**Step 2.** A load of 7.9 means nothing without the CPU count. Get it.
+
+```text
+2
+```
+
+</div>
+
+<div class="task" data-expect="vmstat 1" data-match="^vmstat 1( \d+)?$" data-hint="vmstat with a 1-second interval (optionally a count)." markdown>
+
+**Step 3.** Load is four times the CPU count. CPU or I/O? Watch `vmstat` every second.
+
+```text
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu
+ 8  0      0 512044   5120 2190312    0    0     0    12 1210 2450 96  4  0  0  0  0
+ 7  0      0 511820   5120 2190340    0    0     0     0 1185 2390 97  3  0  0  0  0
+```
+
+</div>
+
+<div class="task" data-expect="pidstat 1" data-match="^pidstat 1( \d+)?$" data-hint="pidstat from sysstat, with a 1-second interval." markdown>
+
+**Step 4.** `r` is 7 to 8 and `id` is 0: CPU saturation. Who is using it? Use `pidstat`.
+
+```text
+10:15:31 AM   UID       PID    %usr %system  %guest   %wait    %CPU   CPU  Command
+10:15:31 AM  1001      3120   96.00    1.00    0.00   72.00   97.00     0  report-gen
+10:15:31 AM  1001      3121   95.00    2.00    0.00   70.00   97.00     1  report-gen
+…
+```
+
+</div>
+
+</div>
+
+Diagnosis: several `report-gen` workers saturate both CPUs, and the high
+`%wait` shows each spends most of its time waiting for a CPU.
+
 !!! version "Rocky 9 vs 10"
     The checklist is the same on both. Rocky 10 ships a newer `procps-ng`, so
     `vmstat` has an extra `gu` (guest) CPU column, and a newer sysstat whose
@@ -390,13 +462,15 @@ picks a victim process (usually the biggest) and kills it with `SIGKILL`. It
 always leaves a message:
 
 ```console
-$ journalctl -k --grep -i 'killed process' --no-pager
+$ journalctl -k --grep 'killed process' --no-pager
 Oct 15 10:09:51 web1 kernel: Out of memory: Killed process 4471 (java) total-vm:6123508kB, anon-rss:3881020kB, file-rss:1024kB, shmem-rss:0kB, UID:1001 pgtables:8412kB oom_score_adj:0
 ```
 
 If the line says `Memory cgroup out of memory`, the process hit its service or
 container `MemoryMax=` limit, not the machine's limit. That changes the fix:
-raise the limit or fix the leak, rather than add RAM.
+raise the limit or fix the leak, rather than add RAM. How the kernel
+decides what to reclaim, overcommit and `systemd-oomd` are covered in
+[25 · Memory Deep Dive](25-memory-deep-dive.md).
 
 ```console
 $ grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree|Dirty' /proc/meminfo
@@ -1023,6 +1097,76 @@ the ticket.
 | `execsnoop`, `opensnoop`, `biolatency`, `tcplife`, `runqlat` | bcc-tools in `/usr/share/bcc/tools` |
 | `bpftrace -e '…'` | eBPF one-liners |
 | `systemctl enable --now cockpit.socket` | Web console on port 9090 |
+
+## Flashcards
+
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+What are the three letters of the USE method?
+
+Utilization (how busy), Saturation (how much work is queued), Errors (what is failing). Check all three for every resource.
+
+</div>
+
+<div class="card" markdown>
+
+What does the Linux load average count?
+
+Tasks that are running, waiting for a CPU, or in uninterruptible sleep (`D` state), averaged over about 1, 5 and 15 minutes.
+
+</div>
+
+<div class="card" markdown>
+
+Which `free` column matters?
+
+`available`: memory that can be given to programs without swapping. `free` is always small because Linux uses spare RAM as cache.
+
+</div>
+
+<div class="card" markdown>
+
+In `vmstat 1`, what do `r`, `b`, `si`/`so` and `wa` mean?
+
+Runnable tasks, blocked (`D`) tasks, swap-in/swap-out, and CPU idle time with I/O outstanding.
+
+</div>
+
+<div class="card" markdown>
+
+In `iostat -xz`, which numbers show a saturated disk?
+
+High `aqu-sz` (queue depth) and high `r_await`/`w_await` (milliseconds per request). `%util` alone can mislead on SSD/NVMe.
+
+</div>
+
+<div class="card" markdown>
+
+How do you make `sar` history available?
+
+`dnf install sysstat` then `systemctl enable --now sysstat`. Data goes to `/var/log/sa/saDD`.
+
+</div>
+
+<div class="card" markdown>
+
+Which bcc tool catches short-lived processes?
+
+`execsnoop`, in `/usr/share/bcc/tools/`. It prints every `exec()` as it happens.
+
+</div>
+
+<div class="card" markdown>
+
+What does PSI `full avg10=30` in `/proc/pressure/io` mean?
+
+For 30% of the last 10 seconds, every non-idle task was stalled waiting on I/O.
+
+</div>
+
+</div>
 
 ## Recap
 

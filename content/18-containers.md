@@ -526,7 +526,7 @@ sequenceDiagram
     C->>R: create container
     R->>K: unshare namespaces, join cgroup, set SELinux label, seccomp
     R->>K: exec nginx as PID 1
-    R-->>C: exits; conmon stays as parent
+    R-->>C: exits, conmon stays as parent
     P-->>You: prints container ID and exits
 ```
 
@@ -591,6 +591,28 @@ networking runs through **pasta**, a user-space network stack that Podman 5
 uses as the rootless default. Rootful containers (`sudo podman`) use a real
 bridge with nftables rules instead.
 
+??? question "Why is PID 1 inside a container special?"
+    On a normal system, PID 1 is systemd, which reaps orphaned zombie
+    processes and has sensible signal handling. In a container, PID 1 is
+    whatever your `CMD` is, and the kernel treats it specially: signals with
+    no handler installed (including `SIGTERM`) are *ignored* for PID 1 of a
+    PID namespace. So `podman stop` sends `SIGTERM`, your app ignores it, and
+    after 10 seconds Podman falls back to `SIGKILL`. Apps that also spawn
+    children may leave zombies, because nothing reaps them. The fix is
+    `podman run --init`, which injects a tiny init (`catatonit`) as PID 1 that
+    forwards signals and reaps zombies.
+
+??? question "How does rootless networking work without root?"
+    A rootless user cannot create a veth pair on the host or add nftables
+    rules. So Podman creates the container's network namespace, and
+    **pasta** sits in user space with one foot in each namespace: it reads
+    packets from a TAP device inside the container and turns them into
+    ordinary socket calls on the host (and back). Published ports are just
+    sockets pasta opens on the host as you. By default the container even
+    gets a copy of the host's IP address, which is why rootless containers
+    usually "just work" with no NAT. The cost is some extra CPU per packet
+    compared with a kernel bridge, which matters only for heavy network loads.
+
 ### Everyday Podman commands
 
 ```console
@@ -624,6 +646,73 @@ $ podman inspect -f '{{.State.Pid}} {{.HostConfig.Memory}}' web
 | `podman stop N` / `rm N` | Stop / delete a container |
 | `podman stats` | Live CPU and memory per container (from cgroups) |
 | `podman top N` | Processes inside, with host and container users |
+
+Practise the inspection workflow before you touch your VM. Assume a
+container called `web` is running.
+
+<div class="terminal-sim" data-title="Take a container apart" data-prompt="[alice@rocky-lab ~]$ " markdown>
+
+<div class="task" data-expect="podman ps" data-match="^podman (ps|container ls)( -a)?$" data-hint="Podman lists running containers with a two-letter subcommand, just like ps." markdown>
+
+**Step 1.** List the running containers.
+
+```text
+CONTAINER ID  IMAGE                           COMMAND               CREATED        STATUS        PORTS                 NAMES
+3f2a8c1d77e1  docker.io/library/nginx:latest  nginx -g daemon o...  2 minutes ago  Up 2 minutes  0.0.0.0:8080->80/tcp  web
+```
+
+</div>
+
+<div class="task" data-expect="podman inspect -f '{{.State.Pid}}' web" data-match="^podman inspect (-f|--format) ['&quot;]?\{\{ ?\.State\.Pid ?\}\}['&quot;]? web$" data-hint="Use podman inspect with -f and the Go template {{.State.Pid}}." markdown>
+
+**Step 2.** Print only the host PID of the container's main process.
+
+```text
+4120
+```
+
+</div>
+
+<div class="task" data-expect="cat /proc/4120/cgroup" data-hint="Every process's cgroup is listed in /proc/PID/cgroup." markdown>
+
+**Step 3.** Which cgroup is PID 4120 in?
+
+```text
+0::/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-3f2a8c1d77e1….scope/container
+```
+
+</div>
+
+<div class="task" data-expect="sudo lsns -p 4120||lsns -p 4120" data-hint="lsns has a -p option that takes a PID." markdown>
+
+**Step 4.** List the namespaces that PID 4120 belongs to.
+
+```text
+        NS TYPE   NPROCS   PID USER  COMMAND
+4026531834 time      190     1 root  /usr/lib/systemd/systemd --switched-root --system --deserialize=46
+4026532290 user        3  4120 alice nginx: master process nginx -g daemon off;
+4026532291 mnt         2  4120 alice nginx: master process nginx -g daemon off;
+4026532292 uts         2  4120 alice nginx: master process nginx -g daemon off;
+4026532293 ipc         2  4120 alice nginx: master process nginx -g daemon off;
+4026532294 pid         2  4120 alice nginx: master process nginx -g daemon off;
+4026532295 cgroup      2  4120 alice nginx: master process nginx -g daemon off;
+4026532301 net         2  4120 alice nginx: master process nginx -g daemon off;
+```
+
+</div>
+
+<div class="task" data-expect="sudo nsenter -t 4120 -n ss -tlnp" data-match="^sudo nsenter (-t 4120 -n|-n -t 4120|--target 4120 --net) ss -[tlnp]{4}$" data-hint="nsenter -t PID -n runs a command in that process's network namespace. Use ss -tlnp." markdown>
+
+**Step 5.** Using the host's `ss`, list listening TCP sockets *inside* the container's network namespace.
+
+```text
+State   Recv-Q  Send-Q   Local Address:Port   Peer Address:Port  Process
+LISTEN  0       511            0.0.0.0:80          0.0.0.0:*      users:(("nginx",pid=4120,fd=6))
+```
+
+</div>
+
+</div>
 
 You can give a container cgroup limits directly; Podman writes the same cgroup
 files you saw earlier:
@@ -1241,6 +1330,76 @@ to stay in the foreground.
 | `/usr/libexec/podman/quadlet -dryrun` | Show generated units and parse errors |
 | `podman build -t NAME .` | Build from a Containerfile |
 | `skopeo inspect docker://IMAGE` | Inspect a remote image without pulling |
+
+## Flashcards
+
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+What four building blocks make up a container?
+
+Namespaces (what it sees), cgroups (what it uses), a filesystem image (what is at `/`), and security restrictions: SELinux, seccomp and capabilities (what it may do).
+
+</div>
+
+<div class="card" markdown>
+
+What does `unshare --pid --fork --mount-proc bash` do?
+
+Starts bash as PID 1 in a new PID namespace (`--fork`), with a fresh `/proc` in a new mount namespace so `ps` shows only that namespace.
+
+</div>
+
+<div class="card" markdown>
+
+What is `nsenter` for?
+
+Running a command inside the namespaces of an existing process, for example the host's `ss` in a container's network namespace: `nsenter -t PID -n ss -tlnp`.
+
+</div>
+
+<div class="card" markdown>
+
+`memory.high` vs `memory.max`?
+
+`memory.high` throttles and reclaims (a speed bump). `memory.max` is a hard limit: above it, the kernel OOM-kills inside the cgroup.
+
+</div>
+
+<div class="card" markdown>
+
+What do `/etc/subuid` and `/etc/subgid` do?
+
+Give each user a block of extra UIDs/GIDs that rootless Podman maps into the container's user namespace, so image users other than root have somewhere to map to.
+
+</div>
+
+<div class="card" markdown>
+
+`:Z` vs `:z` on a volume?
+
+`:Z` relabels the content for this container only (private MCS categories). `:z` relabels it so all containers can share it.
+
+</div>
+
+<div class="card" markdown>
+
+Where do Quadlet files go?
+
+`/etc/containers/systemd/` for system (rootful) services, `~/.config/containers/systemd/` for rootless user services. Then `systemctl daemon-reload`.
+
+</div>
+
+<div class="card" markdown>
+
+Why do changes inside a container disappear after `podman rm`?
+
+They live in the container's writable overlayfs upper layer, which is deleted with the container. Persistent data belongs in a volume.
+
+</div>
+
+</div>
 
 ## Recap
 

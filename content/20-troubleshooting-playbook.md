@@ -79,6 +79,67 @@ $ sudo ausearch -m AVC -ts recent         # recent SELinux denials
 $ ss -tlnp                                # what is listening
 ```
 
+Drill them now. The scenario: users say "the server is acting weird".
+
+<div class="terminal-sim" data-title="The first five minutes" data-prompt="[alex@rocky-lab ~]$ " markdown>
+
+<div class="task" data-expect="systemctl --failed" data-match="^(sudo )?systemctl (--failed|list-units --failed|list-units --state=failed)$" data-hint="systemctl has an option that lists only failed units." markdown>
+
+**Step 1.** Are any units in a failed state?
+
+```text
+  UNIT           LOAD   ACTIVE SUB    DESCRIPTION
+● httpd.service  loaded failed failed The Apache HTTP Server
+
+1 loaded units listed.
+```
+
+</div>
+
+<div class="task" data-expect="journalctl -xeu httpd||journalctl -xeu httpd.service||journalctl -u httpd||journalctl -u httpd.service" data-match="^(sudo )?journalctl (-[xe]*u ?|-u )httpd(\.service)?( -[xeb]+)?$" data-hint="journalctl -u selects one unit; -xe jumps to the end with explanations." markdown>
+
+**Step 2.** Read the failed unit's log.
+
+```text
+Oct 15 11:02:17 web1 httpd[6120]: (13)Permission denied: AH00072: make_sock: could not bind to address [::]:8095
+Oct 15 11:02:17 web1 httpd[6120]: no listening sockets available, shutting down
+Oct 15 11:02:17 web1 systemd[1]: httpd.service: Main process exited, code=exited, status=1/FAILURE
+```
+
+</div>
+
+<div class="task" data-expect="sudo ausearch -m AVC -ts recent" data-match="^sudo ausearch -m (AVC|avc) -ts recent( -c httpd)?$" data-hint="httpd runs as root and still got Permission denied. Look for recent SELinux AVC records with ausearch." markdown>
+
+**Step 3.** Root got "Permission denied". Check for SELinux denials.
+
+```text
+type=AVC msg=audit(1760526137.412:812): avc:  denied  { name_bind } for  pid=6120 comm="httpd" src=8095 scontext=system_u:system_r:httpd_t:s0 tcontext=system_u:object_r:unreserved_port_t:s0 tclass=tcp_socket permissive=0
+```
+
+</div>
+
+<div class="task" data-expect="sudo semanage port -a -t http_port_t -p tcp 8095" data-match="^sudo semanage port (-a|--add) -t http_port_t -p tcp 8095$" data-hint="semanage port -a -t TYPE -p tcp PORT. The web server port type is http_port_t." markdown>
+
+**Step 4.** Allow httpd to use port 8095 by labelling the port.
+
+```text
+(no output: the port is now labelled http_port_t)
+```
+
+</div>
+
+<div class="task" data-expect="sudo systemctl start httpd||sudo systemctl restart httpd||sudo systemctl start httpd.service||sudo systemctl restart httpd.service" data-hint="Start the httpd unit again with sudo systemctl." markdown>
+
+**Step 5.** Start the service again.
+
+```text
+(no output: success)
+```
+
+</div>
+
+</div>
+
 | Where | What it tells you | Module |
 |-------|-------------------|--------|
 | `systemctl status UNIT` | State, last log lines, exit code | [07 · systemd](07-systemd-and-services.md) |
@@ -225,6 +286,24 @@ core dump is covered in [24 · Debugging Crashes](24-debugging-crashes.md).
 </div>
 
 </div>
+
+??? question "What do the systemd exit codes mean?"
+    When systemd itself fails to launch the program, it reports a code from
+    its own range (200 and up) rather than the program's exit status. The
+    common ones:
+
+    | Code | Name | Meaning |
+    |------|------|---------|
+    | `200/CHDIR` | CHDIR | `WorkingDirectory=` does not exist |
+    | `203/EXEC` | EXEC | `ExecStart=` binary missing, not executable, or blocked |
+    | `209/STDOUT` | STDOUT | Could not set up standard output (bad `StandardOutput=`) |
+    | `217/USER` | USER | `User=` does not exist |
+    | `226/NAMESPACE` | NAMESPACE | Sandboxing setup failed (a path in `ReadWritePaths=` is missing) |
+
+    Codes below 200 come from the program. `status=1/FAILURE` is a generic
+    error, and anything reported as a signal (`status=9/KILL`,
+    `status=11/SEGV`) means it was killed. The full list is in
+    [[man:systemd.exec(5)]] under "Process Exit Codes".
 
 **Root cause in the example above:** nginx had been installed and enabled for a
 test and was holding port 80.
@@ -1186,6 +1265,84 @@ with the method before you open the hints.
 | `rpm --import KEYFILE` | Trust a repository signing key |
 | `namei -l PATH` | Permissions of every directory in a path |
 | `coredumpctl list` | Programs that crashed and dumped core |
+
+## Flashcards
+
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+What are the five steps of the troubleshooting loop?
+
+Define the problem, gather evidence, form one hypothesis, test one change at a time, write it down.
+
+</div>
+
+<div class="card" markdown>
+
+A service fails with `status=203/EXEC`. What does it mean?
+
+systemd could not execute the `ExecStart=` program: wrong path, not executable, bad `#!` line, or an SELinux label problem.
+
+</div>
+
+<div class="card" markdown>
+
+`df` says 100% but `du` adds up to much less. Why?
+
+A deleted file is still held open by a process. Find it with `lsof +L1` and restart that process.
+
+</div>
+
+<div class="card" markdown>
+
+Space is free but "No space left on device" persists. What next?
+
+Check inodes with `df -i`. Millions of tiny files can exhaust them.
+
+</div>
+
+<div class="card" markdown>
+
+Why might `dig` and `getent hosts` disagree?
+
+`getent` follows `/etc/nsswitch.conf`, so `/etc/hosts` usually wins. `dig` asks DNS directly and ignores `/etc/hosts`.
+
+</div>
+
+<div class="card" markdown>
+
+How do you check fstab safely before rebooting?
+
+`findmnt --verify` and `mount -a`. Add `nofail` to optional filesystems.
+
+</div>
+
+<div class="card" markdown>
+
+Which step of the `rd.break` password reset is most often forgotten?
+
+`touch /.autorelabel`, so SELinux relabels the new `/etc/shadow` on the next boot.
+
+</div>
+
+<div class="card" markdown>
+
+High load average with idle CPUs points to what?
+
+Tasks in `D` (uninterruptible) state, usually waiting on a slow disk or an unresponsive NFS server.
+
+</div>
+
+<div class="card" markdown>
+
+httpd gets 403 on a file you moved with `mv`. Likely cause and fix?
+
+The file kept its `user_home_t` SELinux label. `restorecon -Rv /var/www/html`.
+
+</div>
+
+</div>
 
 ## Recap
 
