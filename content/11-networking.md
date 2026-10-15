@@ -228,6 +228,24 @@ $ ip route get 192.168.122.10
 
 The first goes through the gateway (`via`). The second is local, so it goes straight to the target. `ip route get` is the single most useful routing command: it answers "which interface and source address would be used?" for any destination, including tricky multi-homed servers.
 
+??? question "For the curious: there is more than one routing table"
+    `ip route` shows the **main** table, but the kernel actually consults a list of **routing policy rules** first, and each rule points at a table:
+
+    ```console
+    $ ip rule
+    0:	from all lookup local
+    32766:	from all lookup main
+    32767:	from all lookup default
+    $ ip route show table local
+    local 127.0.0.0/8 dev lo proto kernel scope host src 127.0.0.1
+    local 127.0.0.1 dev lo proto kernel scope host src 127.0.0.1
+    broadcast 127.255.255.255 dev lo proto kernel scope link src 127.0.0.1
+    local 192.168.122.50 dev enp1s0 proto kernel scope host src 192.168.122.50
+    broadcast 192.168.122.255 dev enp1s0 proto kernel scope link src 192.168.122.50
+    ```
+
+    The **local** table, checked first, holds the machine's own addresses: that is how the kernel knows a packet for `192.168.122.50` is for *itself* and should go up the stack instead of out of a cable. Extra rules and tables (**policy routing**) let you route by source address, for example "replies from the second NIC's IP must leave through the second NIC". NetworkManager can manage them with the `ipv4.routing-rules` and `ipv4.route-table` settings.
+
 !!! note "Forwarding is off by default"
     A Rocky machine routes its *own* traffic but does not forward packets between interfaces for others unless you set `net.ipv4.ip_forward = 1`. Container runtimes and firewalld masquerading turn this on when they need it. See [Firewalls with firewalld](12-firewalld.md).
 
@@ -304,6 +322,24 @@ IP4.DNS[1]:                             192.168.122.1
 ```
 
 Lowercase `ipv4.*` are the **settings** you configured. Uppercase `IP4.*` are the **live values** currently applied. With `ipv4.method auto` (DHCP), the settings are empty and the live values come from the DHCP server.
+
+You can see exactly what the DHCP server said, including the lease time, with the `DHCP4` fields. NetworkManager uses its own built-in DHCP client and logs every lease in the journal:
+
+```console
+$ nmcli -f DHCP4 device show enp1s0
+DHCP4.OPTION[1]:                        dhcp_lease_time = 3600
+DHCP4.OPTION[2]:                        domain_name_servers = 192.168.122.1
+DHCP4.OPTION[3]:                        expiry = 1760534802
+DHCP4.OPTION[4]:                        ip_address = 192.168.122.50
+DHCP4.OPTION[5]:                        routers = 192.168.122.1
+DHCP4.OPTION[6]:                        subnet_mask = 255.255.255.0
+…
+$ journalctl -u NetworkManager -b --grep='dhcp4' | tail -2
+Oct 15 09:12:41 web01 NetworkManager[903]: <info>  [1760519561.2032] dhcp4 (enp1s0): state changed new lease, address=192.168.122.50, acd pending
+Oct 15 09:12:41 web01 NetworkManager[903]: <info>  [1760519561.2151] dhcp4 (enp1s0): state changed new lease, address=192.168.122.50
+```
+
+The lease is renewed halfway through its lifetime. If the DHCP server disappears, the address keeps working until the lease expires, which is why DHCP outages often show up hours later.
 
 ### Static vs DHCP
 
@@ -494,7 +530,7 @@ Now put every layer together. Step through what happens between pressing ++enter
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. Resolve the name" markdown>
+<div class="step" data-title="Resolve the name" markdown>
 
 `curl` calls `getaddrinfo("rockylinux.org")`. glibc reads `nsswitch.conf`, checks `/etc/hosts` (no match), then sends a DNS query over UDP port 53 to the first `nameserver` in `/etc/resolv.conf`.
 
@@ -507,7 +543,7 @@ That DNS query is itself a packet, so it goes through steps 2 and 3 first.
 
 </div>
 
-<div class="step" data-title="2. Choose a route" markdown>
+<div class="step" data-title="Choose a route" markdown>
 
 The kernel looks up `104.21.21.232` in the routing table. Only `default` matches, so the packet goes to the gateway via `enp1s0`, with source address `192.168.122.50`.
 
@@ -519,7 +555,7 @@ $ ip route get 104.21.21.232
 
 </div>
 
-<div class="step" data-title="3. Find the gateway's MAC" markdown>
+<div class="step" data-title="Find the gateway's MAC" markdown>
 
 To put a frame on the wire, the kernel needs the gateway's MAC. If it is not in the neighbour table, it sends an ARP broadcast and waits for the reply.
 
@@ -532,7 +568,7 @@ The frame's destination MAC is the **gateway's**, while the destination IP is **
 
 </div>
 
-<div class="step" data-title="4. TCP handshake" markdown>
+<div class="step" data-title="TCP handshake" markdown>
 
 `curl` calls `connect()` to port 443. The kernel picks a random local **ephemeral port** and performs the three-way handshake. The firewall's connection tracking notes the new connection so that replies are allowed back in.
 
@@ -548,7 +584,7 @@ sequenceDiagram
 
 </div>
 
-<div class="step" data-title="5. TLS handshake" markdown>
+<div class="step" data-title="TLS handshake" markdown>
 
 Now `curl` (through OpenSSL) negotiates encryption. It sends a ClientHello with the name it wants (SNI), the server proves its identity with a certificate, and both agree on keys. The allowed algorithms come from the system-wide crypto policy (see [Security Hardening](17-security-hardening.md)).
 
@@ -562,7 +598,7 @@ $ curl -sv -o /dev/null https://rockylinux.org 2>&1 | grep -E '^\* (SSL|TLS|Serv
 
 </div>
 
-<div class="step" data-title="6. Request and response" markdown>
+<div class="step" data-title="Request and response" markdown>
 
 Inside the encrypted tunnel, `curl` sends `GET / HTTP/2`. The reply comes back through every layer in reverse: NIC, Ethernet, IP (to `192.168.122.50`), TCP (to port 51874), and finally the socket that `curl` is reading.
 
@@ -570,7 +606,7 @@ Each router along the way only looked at the IP header and swapped the MAC addre
 
 </div>
 
-<div class="step" data-title="7. Close" markdown>
+<div class="step" data-title="Close" markdown>
 
 When `curl` is done, both sides exchange FIN packets. Your side keeps the socket in `TIME-WAIT` for a short while so stray late packets are not confused with a new connection. You can see them with `ss -tan state time-wait`.
 
@@ -809,6 +845,70 @@ Right. "Refused" means the packet arrived and the kernel answered with a reset, 
 
 </div>
 
+### Practice: read the network like a pro
+
+Type the commands. The output is from the example machine used throughout this module.
+
+<div class="terminal-sim" data-title="Inspect the network" markdown>
+
+<div class="task" data-expect="ip -br addr||ip -br a||ip -br address||ip -br addr show" data-hint="Use ip with the brief option (-br) and the addr object." markdown>
+
+**Step 1.** Show every interface and its addresses, one line each.
+
+```text
+lo               UNKNOWN        127.0.0.1/8 ::1/128
+enp1s0           UP             192.168.122.50/24 fe80::5054:ff:fe3a:91c2/64
+```
+
+</div>
+
+<div class="task" data-expect="ip route||ip r||ip route show||ip r s" data-hint="The routing table is the 'route' object of the ip command." markdown>
+
+**Step 2.** Show the routing table. Which address is the default gateway?
+
+```text
+default via 192.168.122.1 dev enp1s0 proto dhcp src 192.168.122.50 metric 100
+192.168.122.0/24 dev enp1s0 proto kernel scope link src 192.168.122.50 metric 100
+```
+
+</div>
+
+<div class="task" data-expect="ip route get 1.1.1.1||ip r g 1.1.1.1||ip r get 1.1.1.1" data-hint="ip route get, followed by the destination address." markdown>
+
+**Step 3.** Ask the kernel which way a packet to `1.1.1.1` would leave.
+
+```text
+1.1.1.1 via 192.168.122.1 dev enp1s0 src 192.168.122.50 uid 1000
+    cache
+```
+
+</div>
+
+<div class="task" data-expect="getent hosts rockylinux.org" data-hint="getent looks names up the same way applications do. The database is called hosts." markdown>
+
+**Step 4.** Resolve `rockylinux.org` exactly the way applications do (through `nsswitch.conf`).
+
+```text
+2606:4700:3036::ac43:a9e9 rockylinux.org
+```
+
+</div>
+
+<div class="task" data-expect="sudo ss -tlnp" data-match="(sudo )?ss -(tlnp|tlpn|ltnp|ltpn|tnlp|plnt|tpln|lntp|nltp|pltn)" data-hint="ss with the options t (tcp), l (listening), n (numeric) and p (process). Process names need root." markdown>
+
+**Step 5.** List listening TCP sockets with the owning process, without name lookups.
+
+```text
+State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0      128          0.0.0.0:22        0.0.0.0:*     users:(("sshd",pid=1023,fd=3))
+LISTEN 0      511                *:80              *:*     users:(("httpd",pid=1450,fd=4))
+LISTEN 0      128             [::]:22           [::]:*     users:(("sshd",pid=1023,fd=4))
+```
+
+</div>
+
+</div>
+
 ## Labs
 
 !!! lab "Lab 1: Map your machine's network"
@@ -1044,6 +1144,84 @@ Right. "Refused" means the packet arrived and the kernel answered with a reset, 
 | `tcpdump -ni <dev> <filter>` | Capture packets |
 | `curl -v <url>` | Connect and show every step, including TLS |
 | `ip netns add/exec/delete` | Manage network namespaces |
+
+## Flashcards
+
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+What does the `/24` in `192.168.122.50/24` mean?
+
+The first 24 bits are the network part. Every address sharing them (`192.168.122.0` to `.255`) is on the same subnet and reachable without a router.
+
+</div>
+
+<div class="card" markdown>
+
+How does the kernel choose between several matching routes?
+
+Longest prefix match: the most specific route wins. On a tie, the lower metric wins. `ip route get <ip>` shows the result.
+
+</div>
+
+<div class="card" markdown>
+
+What is ARP for?
+
+Finding the MAC address that belongs to a local IP (the next hop). Cached answers are in `ip neigh`.
+
+</div>
+
+<div class="card" markdown>
+
+Where does NetworkManager store connection profiles on Rocky 10?
+
+As keyfiles in `/etc/NetworkManager/system-connections/*.nmconnection`, mode `600`, owned by root. ifcfg files are no longer supported.
+
+</div>
+
+<div class="card" markdown>
+
+You ran `nmcli connection modify`. Why did nothing change?
+
+`modify` edits the saved profile only. Apply it with `nmcli connection up <name>` (or `nmcli device reapply <dev>`).
+
+</div>
+
+<div class="card" markdown>
+
+Why shouldn't you edit `/etc/resolv.conf` by hand?
+
+NetworkManager generates it from the active connections' DNS settings and will overwrite it. Set `ipv4.dns` on the connection instead.
+
+</div>
+
+<div class="card" markdown>
+
+`getent hosts` vs `dig`: what is the difference?
+
+`getent` follows `nsswitch.conf` like applications do, so it sees `/etc/hosts`. `dig` queries DNS servers directly and ignores `/etc/hosts`.
+
+</div>
+
+<div class="card" markdown>
+
+"Connection refused" vs a timeout: what does each usually mean?
+
+Refused: the host answered with a reset because nothing listens on that port. Timeout: something (often a firewall) silently dropped the packets, or the host is unreachable.
+
+</div>
+
+<div class="card" markdown>
+
+What replaced network teaming in Rocky 10?
+
+Bonding. `teamd` and `libteam` were removed; create `type bond` connections with `nmcli`.
+
+</div>
+
+</div>
 
 ## Recap
 

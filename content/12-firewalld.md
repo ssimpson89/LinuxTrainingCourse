@@ -290,6 +290,45 @@ $ diff <(sudo firewall-cmd --list-all) <(sudo firewall-cmd --permanent --list-al
 
 Here `http` is open *now* but will vanish at the next reload. That is the bug from this module's opening story.
 
+### Where the permanent config lives
+
+The permanent configuration is just XML files, and you can read them to prove what will survive a reboot. Shipped defaults live in `/usr/lib/firewalld/` and are never edited; the first time you change a zone permanently, firewalld writes a full copy of it to `/etc/firewalld/zones/`, and that copy wins from then on.
+
+```console
+$ sudo ls /etc/firewalld/ /etc/firewalld/zones/
+firewalld.conf  helpers  icmptypes  ipsets  lockdown-allowlist.xml  policies  services  zones
+public.xml
+$ sudo cat /etc/firewalld/zones/public.xml
+<?xml version="1.0" encoding="utf-8"?>
+<zone>
+  <short>Public</short>
+  <description>For use in public areas. You do not trust the other computers on networks to not harm your computer. Only selected incoming connections are accepted.</description>
+  <service name="ssh"/>
+  <service name="dhcpv6-client"/>
+  <service name="cockpit"/>
+  <service name="http"/>
+  <forward/>
+</zone>
+$ sudo grep -E '^(DefaultZone|FirewallBackend|LogDenied)=' /etc/firewalld/firewalld.conf
+DefaultZone=public
+FirewallBackend=nftables
+LogDenied=off
+```
+
+Want to reset a zone to the shipped default? Delete its file from `/etc/firewalld/zones/` and run `sudo firewall-cmd --reload`. Configuration management tools (Ansible's `firewalld` module, for example) simply drive the same `--permanent` interface or drop these XML files in place.
+
+??? question "For the curious: what does conntrack actually remember?"
+    Install `conntrack-tools` and list the kernel's connection table. Each entry stores both directions of a flow, its state, and a timeout:
+
+    ```console
+    $ sudo dnf install -y conntrack-tools
+    $ sudo conntrack -L -p tcp --dport 22
+    tcp      6 431999 ESTABLISHED src=192.168.122.1 dst=192.168.122.50 sport=50412 dport=22 src=192.168.122.50 dst=192.168.122.1 sport=22 dport=50412 [ASSURED] mark=0 use=1
+    …
+    ```
+
+    `431999` is the seconds left before an idle established TCP flow is forgotten (five days by default). This entry is why removing the `ssh` service does not cut your current session: the packets match `ct state established` before any zone rule is consulted.
+
 <div class="quiz" data-answer="3" markdown>
 
 You run `sudo firewall-cmd --permanent --add-port=9000/tcp` and test from a client. It still fails. Why?
@@ -309,13 +348,13 @@ Now combine zones, services, connection tracking and the default target. Step th
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. Arrives: prerouting" markdown>
+<div class="step" data-title="Arrives: prerouting" markdown>
 
 The packet enters `enp1s0`. In the prerouting hook, firewalld checks for **forward ports** in the zone. If one matched (say, 80 to 8080), the destination would be rewritten here, before anything else. No match, so nothing changes.
 
 </div>
 
-<div class="step" data-title="2. Connection tracking" markdown>
+<div class="step" data-title="Connection tracking" markdown>
 
 The input chain first asks conntrack: is this part of a connection we already know? Replies to our own outgoing requests and later packets of an accepted connection are `established` and accepted immediately. Garbage packets that belong to no valid connection (`invalid`) are dropped. Loopback traffic (`lo`) is always accepted.
 
@@ -323,30 +362,87 @@ This is a **new** connection (a TCP SYN), so it continues.
 
 </div>
 
-<div class="step" data-title="3. Pick the zone" markdown>
+<div class="step" data-title="Pick the zone" markdown>
 
 Does `203.0.113.9` match any zone's **sources**? No. Is `enp1s0` bound to a zone? Yes: `public`. So the `public` zone's rules apply.
 
 </div>
 
-<div class="step" data-title="4. Policies and rich rules" markdown>
+<div class="step" data-title="Policies and rich rules" markdown>
 
 Any **policies** that apply to traffic from `public` to `HOST` (this machine) are evaluated. (Internally, firewalld implements zones as policies too, which is why policies can be ordered before or after them with a priority.) Then come the zone's **rich rules**, in a fixed order: log rules, then deny rules, then allow rules. A rich rule might say "reject everything from 203.0.113.0/24". None matches here.
 
 </div>
 
-<div class="step" data-title="5. Services and ports" markdown>
+<div class="step" data-title="Services and ports" markdown>
 
 The zone's allowed **services** and **ports** are checked. If `http` (80/tcp) is listed, the packet is accepted and handed to `httpd`.
 
 </div>
 
-<div class="step" data-title="6. The zone target" markdown>
+<div class="step" data-title="The zone target" markdown>
 
 Nothing allowed it, so the zone's **target** decides. For `public` (`target: default`), the packet is rejected with an ICMP "administratively prohibited" message, so the client fails quickly. If **LogDenied** is enabled, a log line is written first.
 
 ```text
 filter_IN_public_REJECT: IN=enp1s0 OUT= SRC=203.0.113.9 DST=192.168.122.50 … PROTO=TCP SPT=51234 DPT=80 …
+```
+
+</div>
+
+</div>
+
+### Practice: open a service the safe way
+
+<div class="terminal-sim" data-title="firewall-cmd drill" data-prompt="[alex@web01 ~]$ " markdown>
+
+<div class="task" data-expect="sudo firewall-cmd --get-active-zones" data-match="(sudo )?firewall-cmd --get-active-zones" data-hint="firewall-cmd has a --get-active-zones option." markdown>
+
+**Step 1.** Find out which zones are in use and which interfaces they own.
+
+```text
+public
+  interfaces: enp1s0
+```
+
+</div>
+
+<div class="task" data-expect="sudo firewall-cmd --list-services" data-match="(sudo )?firewall-cmd (--zone=public )?--list-services" data-hint="--list-services shows the services of the default zone." markdown>
+
+**Step 2.** List the services the default zone currently allows.
+
+```text
+cockpit dhcpv6-client ssh
+```
+
+</div>
+
+<div class="task" data-expect="sudo firewall-cmd --add-service=https" data-match="(sudo )?firewall-cmd (--zone=public )?--add-service[= ]https( --zone=public)?" data-hint="--add-service=https, without --permanent, changes runtime only." markdown>
+
+**Step 3.** Allow `https` in runtime only, so you can test it first.
+
+```text
+success
+```
+
+</div>
+
+<div class="task" data-expect="sudo firewall-cmd --runtime-to-permanent" data-match="(sudo )?firewall-cmd --runtime-to-permanent" data-hint="One option copies the whole runtime config to permanent." markdown>
+
+**Step 4.** It works. Save the current runtime configuration so it survives a reboot.
+
+```text
+success
+```
+
+</div>
+
+<div class="task" data-expect="sudo firewall-cmd --permanent --list-services" data-match="(sudo )?firewall-cmd (--permanent (--zone=public )?|(--zone=public )?--permanent )--list-services" data-hint="Add --permanent to a --list command to read the stored config." markdown>
+
+**Step 5.** Prove it: list the services in the *permanent* config.
+
+```text
+cockpit dhcpv6-client https ssh
 ```
 
 </div>
@@ -850,6 +946,84 @@ Right. Publishing a port is itself a "please expose this" instruction. Bind it t
 | `firewall-cmd --panic-on` / `--panic-off` | Drop all traffic / restore |
 | `firewall-cmd --check-config` | Validate permanent XML config |
 | `nft list ruleset` | Read the live kernel rules (read-only) |
+
+## Flashcards
+
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+firewalld vs nftables: who does what?
+
+nftables (netfilter) is the kernel engine that filters packets. firewalld is the daemon that generates and manages those rules from zones, services and policies.
+
+</div>
+
+<div class="card" markdown>
+
+In what order does firewalld pick a zone for a new packet?
+
+Matching source address first, then the incoming interface's zone, then the default zone.
+
+</div>
+
+<div class="card" markdown>
+
+What is the difference between runtime and permanent config?
+
+Runtime is what the kernel enforces now and is lost on reload or reboot. Permanent is stored in `/etc/firewalld/` and loaded at boot or `--reload`.
+
+</div>
+
+<div class="card" markdown>
+
+Two ways to make a working runtime change permanent?
+
+`firewall-cmd --runtime-to-permanent`, or repeat the command with `--permanent` (then `--reload` is not needed for that rule, since runtime already has it).
+
+</div>
+
+<div class="card" markdown>
+
+Why can you remove the `ssh` service without losing your current session?
+
+Established connections are accepted by connection tracking before zone rules are checked. New logins will fail, though.
+
+</div>
+
+<div class="card" markdown>
+
+What is a firewalld policy?
+
+A rule set for traffic *between* zones (ingress zones to egress zones), including the special `HOST` and `ANY` zones. Used for routing, NAT and outbound filtering.
+
+</div>
+
+<div class="card" markdown>
+
+Where do custom service definitions go?
+
+`/etc/firewalld/services/<name>.xml`. Files there override same-named services in `/usr/lib/firewalld/services/`.
+
+</div>
+
+<div class="card" markdown>
+
+How do you see packets firewalld rejects?
+
+`firewall-cmd --set-log-denied=unicast`, then `journalctl -k` and look for prefixes like `filter_IN_public_REJECT`.
+
+</div>
+
+<div class="card" markdown>
+
+Why can a published Podman port be reachable even if the zone does not allow it?
+
+netavark forwards published ports with its own nftables rules in prerouting, before firewalld's zone filtering. `StrictForwardPorts=yes` changes that.
+
+</div>
+
+</div>
 
 ## Recap
 

@@ -98,6 +98,22 @@ LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=1023,proc_ctx=system_u:syst
 
 The labels on files are stored in **extended attributes** on disk (the `security.selinux` attribute). That is important later: copying a file with a tool that does not preserve extended attributes loses its label.
 
+You can prove it by reading the raw attribute. `ls -Z` is just a pretty way of showing this:
+
+```console
+$ getfattr -n security.selinux -d /var/www/html/index.html
+getfattr: Removing leading '/' from absolute path names
+# file: var/www/html/index.html
+security.selinux="system_u:object_r:httpd_sys_content_t:s0"
+```
+
+A process's label lives in the kernel, not on disk, and is visible under `/proc`:
+
+```console
+$ sudo cat /proc/$(pgrep -o httpd)/attr/current; echo
+system_u:system_r:httpd_t:s0
+```
+
 ## Type enforcement: rules for who can touch what
 
 **Type enforcement** (TE) is the core of SELinux. The policy is a big list of `allow` rules of the form:
@@ -123,6 +139,20 @@ $
 
 The second search returns nothing: no rule, so no access (unless a boolean adds one, as you will see).
 
+??? question "For the curious: where does the policy live?"
+    The policy is compiled from hundreds of **modules** (one per service, roughly) stored under `/var/lib/selinux/targeted/`. At boot, the combined binary policy in `/etc/selinux/targeted/policy/` is loaded into the kernel, which exposes it under `/sys/fs/selinux/`. `semodule -l` lists the modules, and `seinfo` (from `setools-console`) prints counts of types, rules and booleans in the loaded policy:
+
+    ```console
+    $ sudo semodule -l | grep -E '^(apache|container|ssh)$'
+    apache
+    container
+    ssh
+    $ ls /etc/selinux/targeted/contexts/files/
+    file_contexts  file_contexts.bin  file_contexts.homedirs  file_contexts.local  file_contexts.subs  file_contexts.subs_dist  media
+    ```
+
+    Run `seinfo` yourself: the policy has thousands of types and tens of thousands of allow rules. `file_contexts` is the shipped path-to-label database that `restorecon` and `matchpathcon` read; `file_contexts.local` is where your `semanage fcontext` rules end up. You never edit these files directly: `semanage` writes them and rebuilds the policy.
+
 **How does a process get its domain?** Through **type transitions**: rules that say "when a process in domain A executes a file of type B, the new process runs in domain C". systemd runs in `init_t`; when it executes `/usr/sbin/httpd` (type `httpd_exec_t`), the new process enters `httpd_t`. That is why starting a service by hand from your shell can behave differently from starting it with `systemctl`: from an unconfined shell, the transition may not happen.
 
 ### What happens on every access
@@ -131,13 +161,13 @@ Here is the order of checks when a process opens a file. Click through it.
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. The system call" markdown>
+<div class="step" data-title="The system call" markdown>
 
 `httpd` (running as user `apache`, domain `httpd_t`) calls `open("/var/www/html/index.html", O_RDONLY)`. The kernel must decide whether to allow it.
 
 </div>
 
-<div class="step" data-title="2. DAC first" markdown>
+<div class="step" data-title="DAC first" markdown>
 
 The kernel checks normal permissions and ACLs: is `apache` the owner, in the group, or covered by "other" with read permission? If **no**, the call fails with `Permission denied` right here and SELinux is never asked. No AVC message is logged.
 
@@ -150,19 +180,19 @@ The trailing `.` after the mode means the file has an SELinux label.
 
 </div>
 
-<div class="step" data-title="3. SELinux hook" markdown>
+<div class="step" data-title="SELinux hook" markdown>
 
 DAC said yes, so the kernel calls the SELinux security hook. SELinux gathers the **source** context (the process: `httpd_t`), the **target** context (the file: `httpd_sys_content_t`), the **class** (`file`) and the **permission** (`read`, `open`).
 
 </div>
 
-<div class="step" data-title="4. Ask the cache (AVC)" markdown>
+<div class="step" data-title="Ask the cache (AVC)" markdown>
 
 Decisions are cached in the **AVC** (access vector cache), so most checks take nanoseconds. On a miss, SELinux looks up the policy and caches the answer. This is why SELinux denial messages are called "AVC denials".
 
 </div>
 
-<div class="step" data-title="5. Allow or deny" markdown>
+<div class="step" data-title="Allow or deny" markdown>
 
 If an `allow` rule matches, the `open()` succeeds. If not:
 
@@ -171,7 +201,7 @@ If an `allow` rule matches, the `open()` succeeds. If not:
 
 </div>
 
-<div class="step" data-title="6. The evidence" markdown>
+<div class="step" data-title="The evidence" markdown>
 
 ```text
 type=AVC msg=audit(1760519001.112:892): avc:  denied  { read } for  pid=1452
@@ -265,10 +295,10 @@ This is the classic. You write a page in your home directory and move it into th
 
 ```mermaid
 flowchart TB
-    subgraph home["/home/alice (user_home_t)"]
+    subgraph home["/home/alice"]
         F1["page.html<br/>user_home_t"]
     end
-    subgraph web["/var/www/html (httpd_sys_content_t)"]
+    subgraph web["/var/www/html"]
         M["page.html via mv<br/>still user_home_t<br/>403 Forbidden"]
         C["page.html via cp<br/>new file: httpd_sys_content_t<br/>200 OK"]
     end
@@ -367,6 +397,19 @@ If a port already belongs to another type, `-a` fails with "already defined"; us
 !!! tip "Moving SSH to another port"
     You need three things: `Port 2222` in an sshd drop-in, `sudo semanage port -a -t ssh_port_t -p tcp 2222`, and a firewall rule ([module 12](12-firewalld.md)). Miss the SELinux step and `sshd` fails to start with "Bind to port 2222 … failed: Permission denied".
 
+<div class="quiz" data-answer="3" markdown>
+
+You changed PostgreSQL to listen on port 5433, opened it in firewalld, and now `postgresql.service` fails with "could not bind … Permission denied". `ausearch` shows `denied { name_bind }` with `tcontext=…unreserved_port_t`. What is the fix?
+
+- `sudo setsebool -P postgresql_can_bind on`
+- `sudo restorecon -Rv /var/lib/pgsql`
+- `sudo semanage port -a -t postgresql_port_t -p tcp 5433`
+- `sudo chcon -t postgresql_port_t /etc/services`
+
+Right. The port has the generic `unreserved_port_t` type. Labeling it `postgresql_port_t` lets `postgresql_t` bind to it. Files are not involved, and there is no such boolean.
+
+</div>
+
 ## Reading AVC denials
 
 When SELinux blocks something, it writes an **AVC record** to the audit log, `/var/log/audit/audit.log`, through `auditd`. Do not grep that file by hand; use `ausearch`:
@@ -460,6 +503,18 @@ Work through the fixes in this order:
 3. **Is it a port?** Use `semanage port`.
 4. **Only then**, if the application really does something the policy never anticipated, write a small custom module.
 
+<div class="quiz" data-answer="2" markdown>
+
+`audit2allow` suggests `allow httpd_t var_t:file { read open };` for your app's files in `/srv/app/data`. What should you do?
+
+- Load it with `audit2allow -M` and `semodule -i`; the tool knows best
+- Label the directory properly with `semanage fcontext` and `restorecon`, because the rule would let httpd read every `var_t` file
+- Switch to permissive mode, since the app clearly needs the access
+
+Right. A rule on a broad, generic type like `var_t` is the signature of a labeling problem. Give the files a web content type and the existing policy allows the access.
+
+</div>
+
 ### A custom policy module, as a last resort
 
 If you have exhausted the options above, build a module from the denials, *read it*, and keep it as small as possible:
@@ -490,6 +545,64 @@ $ sudo semodule -r myapp_local       # remove it again
 ```
 
 The `.te` file is the human-readable source; review every line. If a rule targets a broad type like `var_lib_t`, `etc_t` or `user_home_t`, stop: you are probably looking at a labeling problem. Keep the `.te` file in version control so the module can be rebuilt.
+
+### Practice: the 403 drill
+
+<div class="terminal-sim" data-title="Fix a 403 the right way" data-prompt="[alex@web01 ~]$ " markdown>
+
+<div class="task" data-expect="getenforce" data-match="getenforce|sestatus|sudo sestatus" data-hint="One short command prints the current SELinux mode." markdown>
+
+**Step 1.** A page returns 403. First, is SELinux enforcing?
+
+```text
+Enforcing
+```
+
+</div>
+
+<div class="task" data-expect="ls -Z /var/www/html/page.html" data-match="ls -[lZ]*Z[lZ]* /var/www/html/page.html|ls -Z /var/www/html/?" data-hint="ls has a -Z option that shows the SELinux context." markdown>
+
+**Step 2.** Look at the label on `/var/www/html/page.html`.
+
+```text
+unconfined_u:object_r:user_home_t:s0 /var/www/html/page.html
+```
+
+</div>
+
+<div class="task" data-expect="sudo ausearch -m AVC -ts recent" data-match="(sudo )?ausearch -m (AVC|avc) -ts recent( -c httpd)?|(sudo )?ausearch -m (AVC|avc)( -c httpd)? -ts recent" data-hint="ausearch with -m AVC selects denials; -ts recent limits it to the last 10 minutes." markdown>
+
+**Step 3.** Confirm it with the audit log: show recent AVC denials.
+
+```text
+----
+time->Thu Oct 15 10:03:21 2026
+type=AVC msg=audit(1760522601.448:1021): avc:  denied  { read } for  pid=1452 comm="httpd" name="page.html" dev="vda4" ino=3412290 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
+```
+
+</div>
+
+<div class="task" data-expect="sudo restorecon -v /var/www/html/page.html" data-match="(sudo )?restorecon (-v |-Rv |-vR |-R -v |-v -R )?/var/www/html(/page.html|/)?" data-hint="restorecon resets a file to the label the policy database says it should have. Add -v to see what changed." markdown>
+
+**Step 4.** The type is wrong for web content. Reset the file's label to the policy default.
+
+```text
+Relabeled /var/www/html/page.html from unconfined_u:object_r:user_home_t:s0 to unconfined_u:object_r:httpd_sys_content_t:s0
+```
+
+</div>
+
+<div class="task" data-expect="curl http://localhost/page.html" data-match="curl (-s |-sS |-i |-I |-v )?(http://)?localhost/page.html" data-hint="Request the page again with curl." markdown>
+
+**Step 5.** Test the page again.
+
+```text
+<h1>Quarterly report</h1>
+```
+
+</div>
+
+</div>
 
 ## SELinux and containers
 
@@ -783,7 +896,7 @@ When something fails with "Permission denied" (or a service fails to start, or a
 
     **Goal:** Use a boolean to allow outbound connections from the web server, and use a permissive domain to collect denials safely.
 
-    1. Show that `httpd_t` may not connect out to an arbitrary port. A quick way to run a command in that domain is not available, so look at the policy and the boolean instead:
+    1. Check the boolean, then ask the policy which outbound-connection rules exist for `httpd_t`, and which ones only exist when the boolean is on:
 
         ```bash
         getsebool httpd_can_network_connect
@@ -863,6 +976,92 @@ When something fails with "Permission denied" (or a service fails to start, or a
 | `semodule -i <name>.pp` / `-r <name>` / `-l` | Install / remove / list modules |
 | `semodule -DB` / `semodule -B` | Disable / restore dontaudit rules |
 | `sesearch --allow -s <domain> -t <type>` | Search the loaded policy |
+
+## Flashcards
+
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+What does DAC fail to protect against that SELinux handles?
+
+A compromised program. DAC lets it do anything its user can; SELinux limits each service's domain to what its job needs.
+
+</div>
+
+<div class="card" markdown>
+
+Which field of `system_u:object_r:httpd_sys_content_t:s0` matters most day to day?
+
+The third one, the **type**. Almost all targeted-policy rules are written in terms of types.
+
+</div>
+
+<div class="card" markdown>
+
+Which check runs first, DAC or SELinux?
+
+DAC. If permissions deny the access, SELinux is never consulted and no AVC is logged.
+
+</div>
+
+<div class="card" markdown>
+
+Why does `mv` cause SELinux problems when `cp` usually doesn't?
+
+`mv` keeps the inode and its label. `cp` creates a new file that gets the label for its new location.
+
+</div>
+
+<div class="card" markdown>
+
+`chcon` vs `semanage fcontext` + `restorecon`?
+
+`chcon` changes the label now but is undone by the next relabel. `semanage fcontext` records the rule in the database, `restorecon` applies it, and it lasts.
+
+</div>
+
+<div class="card" markdown>
+
+What does `-P` do in `setsebool -P`?
+
+Makes the boolean change persistent across reboots. Without it, the change is runtime only.
+
+</div>
+
+<div class="card" markdown>
+
+How do you let `httpd` listen on port 3131?
+
+`semanage port -a -t http_port_t -p tcp 3131` (plus the `Listen` directive and a firewall rule).
+
+</div>
+
+<div class="card" markdown>
+
+How do you debug one service without turning SELinux off for everything?
+
+`semanage permissive -a <domain>_t`. Only that domain becomes permissive; remove with `-d`.
+
+</div>
+
+<div class="card" markdown>
+
+Why is blindly loading `audit2allow -M` output dangerous?
+
+It allows whatever was denied, often on broad types like `user_home_t`, which can open the exact hole SELinux was closing. Fix labels, booleans and ports first.
+
+</div>
+
+<div class="card" markdown>
+
+What do `:Z` and `:z` do on a Podman volume?
+
+Relabel the host directory to `container_file_t`: `:Z` privately for one container (unique categories), `:z` shared by all containers.
+
+</div>
+
+</div>
 
 ## Recap
 
