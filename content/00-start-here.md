@@ -51,9 +51,17 @@ Rocky uses **major versions** (8, 9, 10) and **minor releases** (10.0, 10.1, …
 |---|---|---|---|
 | Rocky Linux 10 | 6.12 | June 2025 | May 2035 |
 | Rocky Linux 9 | 5.14 | July 2022 | May 2032 |
-| Rocky Linux 8 | 4.18 | June 2021 | May 2029 |
+| Rocky Linux 8 | 4.18 | June 2021 (8.4) | May 2029 |
 
 Each major version gets about ten years of security updates. That long life is the whole point of an enterprise distribution: you can build on it and not have the ground move under you.
+
+??? question "Under the hood: the two phases of a major version's life"
+    The ten years come in two halves, mirroring RHEL. For roughly the first five years (**active support**) each major gets new minor releases with new features and hardware enablement. After that it is in **security support**: only security and critical bug fixes, no new minor releases. Rocky 8 entered that phase in May 2024; Rocky 9 does so in May 2027; Rocky 10 in May 2030. Planning a fleet? Budget the big migration before the *security* end date, but expect new hardware to want the newer major long before it.
+
+    Two more things that confuse people:
+
+    - The kernel's **series** never changes within a major. Rocky 10 will still say `6.12.0-…` in 2034. Red Hat backports fixes and even whole features into it, so the version number tells you very little about what the kernel can do. The `-124.8.1.el10_1` part (the package release) is what moves.
+    - Every Rocky 10 minor release shares one codename, **Red Quartz** (Rocky 9 is Blue Onyx, Rocky 8 is Green Obsidian). The minor number is what tells you where you are.
 
 !!! version "Rocky 9 vs 10"
     This course targets **Rocky Linux 10**. Rocky 9 is still everywhere, and 95% of what you learn here applies to it unchanged. Where Rocky 9 behaves differently in a way that would trip you up, you'll see a green callout like this one.
@@ -173,7 +181,19 @@ You'll learn ten times faster by doing. Every module has labs, and some of them 
 | Hypervisor | Any: KVM/virt-manager, VirtualBox, VMware, Hyper-V, UTM (Apple Silicon), Parallels, or a cloud VM | |
 
 !!! warning "Rocky 10 needs a modern CPU"
-    On x86, Rocky Linux 10 is built for the **x86-64-v3** level, which means the CPU (and the virtual CPU your hypervisor shows the VM) must support instructions like AVX2. Most Intel CPUs since Haswell (2013) and AMD CPUs since Excavator qualify. If the installer refuses to boot or crashes immediately in a VM, set the VM's CPU type to "host" / "host-passthrough" so it sees your real CPU features. On Apple Silicon, use the **aarch64** image.
+    On x86, Rocky Linux 10 is built for the **x86-64-v3** level, which means the CPU (and the virtual CPU your hypervisor shows the VM) must support instructions like AVX2, BMI2, and FMA. Most Intel Core and Xeon CPUs since Haswell (2013) and AMD CPUs since Excavator (2015) qualify, but some budget Pentium, Celeron, and older Atom chips do not. If the installer refuses to boot or crashes immediately in a VM, set the VM's CPU type to "host" / "host-passthrough" so it sees your real CPU features. On Apple Silicon, use the **aarch64** image.
+
+??? question "Under the hood: check a CPU before you download anything"
+    Any Linux machine with glibc 2.33 or newer (Rocky 9, Fedora, recent Ubuntu) can tell you which x86-64 levels its CPU supports. Ask the dynamic linker:
+
+    ```console
+    $ /lib64/ld-linux-x86-64.so.2 --help | grep x86-64-v
+      x86-64-v4
+      x86-64-v3 (supported, searched)
+      x86-64-v2 (supported, searched)
+    ```
+
+    If `x86-64-v3` doesn't say `supported`, Rocky 10 won't run there. On an unsupported CPU, programs don't crash randomly: glibc checks at startup and stops with `Fatal glibc error: CPU does not support x86-64-v3`. If you see that message in a VM, the fix is the CPU model setting, not the ISO. A Rocky 9 VM is a fine fallback for older hardware; almost all of this course applies.
 
 !!! tip "Snapshots are your undo button"
     Whatever hypervisor you use, learn to take a **snapshot** right after installing. Before any lab that says "this will break things", take another. Restoring a snapshot takes seconds; rebuilding a VM takes half an hour.
@@ -212,10 +232,10 @@ Use UEFI firmware if your hypervisor offers it. That matches modern real hardwar
 
 Boot the ISO and choose **Install Rocky Linux**. The installer (called **Anaconda**) shows a summary screen where you set:
 
-- **Software Selection:** choose **Server** (no GUI). A server without a desktop is what you'll meet in the real world, and it keeps the VM small.
+- **Software Selection:** the DVD defaults to **Server with GUI**; change it to **Server** (no GUI). A server without a desktop is what you'll meet in the real world, and it keeps the VM small.
 - **Installation Destination:** select the first disk and keep **Automatic** partitioning. This gives you the standard Rocky layout with LVM, which you'll dissect in module 10. Leave the second disk unselected.
 - **User Creation:** create your user and tick **Make this user administrator**. That adds you to the `wheel` group, which lets you use `sudo`.
-- **Root account:** you can leave root locked. You'll use `sudo` for admin tasks, which is the safer habit.
+- **Root account:** leave it disabled, which is the Rocky 10 default. The root account still exists but has no password, so nobody can log in as root; you'll use `sudo` for admin tasks, which is the safer habit.
 
 Click **Begin Installation**, wait, then reboot.
 
@@ -269,7 +289,7 @@ Snapshots are the right tool. Labs do include clean-up steps, but a lab that bre
 
 ### Optional: the Cockpit web console
 
-Rocky ships a browser-based admin console called **Cockpit**. It's handy for seeing what's going on at a glance (graphs, logs, services, storage) and it shows you the equivalent commands for many actions. On a Server install it's usually already installed, just not running:
+Rocky ships a browser-based admin console called **Cockpit**. It's handy for seeing what's going on at a glance (graphs, logs, services, storage) and it shows you the equivalent commands for many actions. On a Server install it's already installed and the firewall already allows it, but it isn't switched on. The login banner even tells you so: `Activate the web console with: systemctl enable --now cockpit.socket`. (On a Minimal install, run `sudo dnf -y install cockpit` first.)
 
 ```console
 $ sudo systemctl enable --now cockpit.socket
@@ -277,7 +297,10 @@ $ sudo firewall-cmd --add-service=cockpit --permanent
 $ sudo firewall-cmd --reload
 ```
 
-Then browse to `https://<vm-ip>:9090` and log in with your user. Your browser will warn about a self-signed certificate; that's expected on a lab VM.
+The `firewall-cmd` lines are harmless if the service is already allowed (you'll just see `Warning: ALREADY_ENABLED`). Then browse to `https://<vm-ip>:9090` and log in with your user. Your browser will warn about a self-signed certificate; that's expected on a lab VM.
+
+??? question "Under the hood: why enable a *socket* and not a service?"
+    You enabled `cockpit.socket`, not `cockpit.service`. systemd itself listens on port 9090 and only starts the Cockpit web server when a browser actually connects, which is called **socket activation**. Cockpit then exits again after a few idle minutes, so it costs almost nothing when you aren't using it. You'll see the same trick in [module 07](07-systemd-and-services.md). Cockpit also refuses `root` logins by default (the list is in `/etc/cockpit/disallowed-users`), which is another reason to log in as your admin user.
 
 We'll do almost everything from the command line in this course, because that's where understanding comes from. But Cockpit is a good companion.
 
@@ -305,6 +328,9 @@ Throughout the course you'll see man page badges like [[man:systemctl(1)]]. Clic
 
 !!! tip "Navigating a man page"
     Man pages open in `less`. Press ++slash++ to search, ++n++ for the next match, ++space++ to page down, ++g++ / ++shift+g++ for top and bottom, and ++q++ to quit. Most man pages have an **EXAMPLES** section near the end; jump straight to it with `/EXAMPLES`.
+
+!!! pitfall "When man -k finds nothing"
+    `man -k` searches an index, not the pages themselves, and on a brand-new install that index may not be built yet. Run `sudo mandb` once and try again. If `man` itself says "No manual entry", the package that owns the page may not be installed: `dnf provides '*/man5/fstab.5*'` tells you which one does.
 
 ### Practice: your first commands
 

@@ -305,18 +305,184 @@ $ journalctl -u sshd | grep -i 'invalid user' | wc -l
 | `lsns`, `sudo nsenter -t PID -n CMD` | List namespaces; run a command inside one | [18](18-containers.md) |
 | `systemd-cgls`, `systemd-cgtop` | cgroup tree; live usage per cgroup | [18](18-containers.md) |
 
-## Deep cuts
+## Deep cuts: Rocky itself and packaging
 
 | Command | What it does | Module |
 |---------|--------------|--------|
-| `cat /etc/rocky-release`, `rpm -q rocky-release` | Which Rocky release you run | [21](21-inside-rocky-linux.md) |
-| `rpmdev-setuptree`, `rpmbuild -ba FILE.spec` | Set up and build RPMs | [22](22-building-rpms.md) |
-| `ksvalidator ks.cfg` | Check a Kickstart file (`pykickstart`) | [23](23-automated-installs.md) |
-| `coredumpctl gdb PID` | Open a core dump in gdb | [24](24-debugging-crashes.md) |
-| `cat /proc/meminfo`, `vmstat -s` | Detailed memory counters | [25](25-memory-deep-dive.md) |
-| `sudo realm join DOMAIN`, `sssctl domain-status DOMAIN`, `kinit USER` | Join a domain; check SSSD; get a Kerberos ticket | [26](26-centralized-identity.md) |
-| `virsh list --all`, `virt-install …` | List / create KVM virtual machines | [27](27-virtualization-kvm.md) |
-| `sudo pcs status` | Pacemaker cluster status | [28](28-high-availability.md) |
+| `cat /etc/os-release`, `rpm -q rocky-release` | Which Rocky release you run (and its `SUPPORT_END`) | [21](21-inside-rocky-linux.md) |
+| `rpm -qi PKG` | Vendor, signature, build date and source RPM of a package | [21](21-inside-rocky-linux.md) |
+| `rpm -Kv FILE.rpm` | Verify a package file's digests and signature | [21](21-inside-rocky-linux.md) |
+| `rpm -q gpg-pubkey --qf '%{VERSION} %{SUMMARY}\n'` | Keys RPM trusts | [21](21-inside-rocky-linux.md) |
+| `dnf repoinfo REPO` | Repo details: mirrorlist, metadata age, size | [21](21-inside-rocky-linux.md) |
+| `dnf updateinfo info RLSA-…`, `sudo dnf upgrade --advisory ID` | Read one advisory; install only that advisory | [21](21-inside-rocky-linux.md) |
+| `dnf download --source PKG` | Fetch a package's source RPM | [21](21-inside-rocky-linux.md) |
+| `dnf needs-restarting -r` | Does the system need a reboot after updates? | [21](21-inside-rocky-linux.md) |
+| `rpmdev-setuptree`, `rpmdev-newspec NAME` | Create `~/rpmbuild`; start a spec file from a template | [22](22-building-rpms.md) |
+| `rpm --eval '%{_libdir}'` | Expand an RPM macro | [22](22-building-rpms.md) |
+| `sudo dnf builddep FILE.spec` | Install a spec's `BuildRequires` | [22](22-building-rpms.md) |
+| `rpmbuild -ba FILE.spec`, `rpmbuild --rebuild X.src.rpm` | Build source and binary RPMs; rebuild from an SRPM | [22](22-building-rpms.md) |
+| `mock -r rocky-10-x86_64 --rebuild X.src.rpm` | Build in a clean chroot (EPEL) | [22](22-building-rpms.md) |
+| `rpmlint FILE.spec`, `rpm -qp --scripts FILE.rpm` | Lint packaging; show a package's scriptlets | [22](22-building-rpms.md) |
+| `rpmsign --addsign FILE.rpm`, `createrepo_c --update DIR` | Sign a package; build or refresh repo metadata | [22](22-building-rpms.md) |
+| `rpmdev-vercmp A B` | Compare two versions the way RPM does | [22](22-building-rpms.md) |
+
+## Deep cuts: installs, crashes and memory
+
+| Command | What it does | Module |
+|---------|--------------|--------|
+| `sudo cat /root/anaconda-ks.cfg` | The kickstart of the current install: a starting point | [23](23-automated-installs.md) |
+| `ksvalidator -v RHEL10 FILE.ks` | Validate kickstart syntax (`pykickstart`) | [23](23-automated-installs.md) |
+| `inst.ks=URL`, `inst.repo=URL` | Boot options: where the kickstart and install tree are | [23](23-automated-installs.md) |
+| `sudo mkksiso --ks FILE.ks IN.iso OUT.iso` | Embed a kickstart into an ISO (`lorax`) | [23](23-automated-installs.md) |
+| `composer-cli blueprints push FILE.toml`, `composer-cli compose start NAME qcow2` | Upload a blueprint; build an image with Image Builder | [23](23-automated-installs.md) |
+| `cloud-init status --long`, `cloud-init analyze show` | Did cloud-init finish, and where did the time go? | [23](23-automated-installs.md) |
+| `sudo cloud-init clean --logs --reboot` | Re-run cloud-init as if on first boot | [23](23-automated-installs.md) |
+| `bootc status` | Image mode: which image this host runs | [23](23-automated-installs.md) |
+| `sysctl kernel.core_pattern` | Where core dumps go | [24](24-debugging-crashes.md) |
+| `coredumpctl list`, `coredumpctl debug PID` | List crashed programs; open one in gdb | [24](24-debugging-crashes.md) |
+| `sudo dnf debuginfo-install --enablerepo='*debug*' PKG` | Install matching debug symbols | [24](24-debugging-crashes.md) |
+| `gdb BINARY CORE`, then `bt full`, `thread apply all bt` | Backtraces from a core | [24](24-debugging-crashes.md) |
+| `gcore -o PREFIX PID`, `gstack PID` | Core or stack trace of a live process | [24](24-debugging-crashes.md) |
+| `cat /proc/sys/kernel/tainted` | Kernel taint flags (0 = clean) | [24](24-debugging-crashes.md) |
+| `kdumpctl status`, `kdumpctl showmem` | Is kdump armed, and how much RAM is reserved? | [24](24-debugging-crashes.md) |
+| `crash vmlinux vmcore` | Open a kernel dump (then `sys`, `bt`, `log`, `ps`) | [24](24-debugging-crashes.md) |
+| `cat /proc/PID/smaps_rollup`, `pmap -x PID` | Per-process memory: RSS, PSS, swap; per-mapping detail | [25](25-memory-deep-dive.md) |
+| `fincore FILE` | How much of a file is in the page cache | [25](25-memory-deep-dive.md) |
+| `sysctl vm.swappiness vm.overcommit_memory` | Reclaim bias and overcommit mode | [25](25-memory-deep-dive.md) |
+| `grep allocstall /proc/vmstat` | Direct reclaim stalls | [25](25-memory-deep-dive.md) |
+| `journalctl -k -g 'Killed process'` | Find OOM kills | [25](25-memory-deep-dive.md) |
+| `systemd-run --scope -p MemoryMax=256M CMD` | Run a command in a memory-limited cgroup | [25](25-memory-deep-dive.md) |
+| `numactl --hardware`, `numastat -m` | NUMA layout and per-node memory | [25](25-memory-deep-dive.md) |
+| `cat /sys/kernel/mm/transparent_hugepage/enabled` | Transparent Huge Pages mode | [25](25-memory-deep-dive.md) |
+
+## Deep cuts: identity, virtualization and clusters
+
+| Command | What it does | Module |
+|---------|--------------|--------|
+| `getent passwd USER`, `id USER` | Look a user up through NSS (files and SSSD) | [26](26-centralized-identity.md) |
+| `authselect current` | Active NSS/PAM profile and features | [26](26-centralized-identity.md) |
+| `sssctl domain-status DOMAIN` | Is SSSD online, and which server is active? | [26](26-centralized-identity.md) |
+| `sssctl user-checks USER -s sshd` | Test lookup and access for a user and PAM service | [26](26-centralized-identity.md) |
+| `sudo sss_cache -E` | Expire every SSSD cache entry | [26](26-centralized-identity.md) |
+| `kinit USER`, `klist`, `kdestroy` | Get, list and destroy Kerberos tickets | [26](26-centralized-identity.md) |
+| `sudo klist -k /etc/krb5.keytab` | Keys in the machine keytab | [26](26-centralized-identity.md) |
+| `sudo ipa-client-install --mkhomedir` | Join a host to FreeIPA | [26](26-centralized-identity.md) |
+| `ipa hbactest --user=U --host=H --service=sshd` | Simulate a host-based access rule | [26](26-centralized-identity.md) |
+| `realm discover DOMAIN`, `sudo realm join DOMAIN` | Find and join an Active Directory domain | [26](26-centralized-identity.md) |
+| `virt-host-validate qemu` | Is this host ready for KVM? | [27](27-virtualization-kvm.md) |
+| `virsh list --all`, `virsh dominfo VM` | List VMs; summary of one | [27](27-virtualization-kvm.md) |
+| `virsh start VM`, `virsh shutdown VM`, `virsh destroy VM` | Boot / clean shutdown / hard power off | [27](27-virtualization-kvm.md) |
+| `virsh console VM` | Serial console (exit with ++ctrl+bracket-right++) | [27](27-virtualization-kvm.md) |
+| `virsh edit VM`, `virsh dumpxml VM` | Edit / print the domain XML | [27](27-virtualization-kvm.md) |
+| `virsh domifaddr VM`, `virsh net-dhcp-leases default` | A VM's IP addresses; DHCP leases | [27](27-virtualization-kvm.md) |
+| `qemu-img create -f qcow2 -F qcow2 -b BASE NEW` | Create an overlay on a backing file | [27](27-virtualization-kvm.md) |
+| `qemu-img info -U --backing-chain FILE` | Format, sizes and backing chain of an image | [27](27-virtualization-kvm.md) |
+| `virsh snapshot-create-as VM NAME`, `virsh snapshot-revert VM NAME` | Take / roll back to a snapshot | [27](27-virtualization-kvm.md) |
+| `virsh migrate --live VM qemu+ssh://HOST/system` | Live-migrate a VM | [27](27-virtualization-kvm.md) |
+| `sudo pcs status`, `sudo crm_mon -1rf` | Cluster state | [28](28-high-availability.md) |
+| `sudo corosync-quorumtool` | Votes and quorum | [28](28-high-availability.md) |
+| `sudo pcs resource create NAME AGENT key=value` | Create a cluster resource | [28](28-high-availability.md) |
+| `sudo pcs constraint colocation add A with B INFINITY` | Keep A on the same node as B | [28](28-high-availability.md) |
+| `sudo pcs node standby NODE`, `sudo pcs node unstandby NODE` | Drain a node / return it to service | [28](28-high-availability.md) |
+| `sudo pcs resource move R NODE`, `sudo pcs resource clear R` | Move a resource; remove leftover move constraints | [28](28-high-availability.md) |
+| `sudo pcs resource cleanup R` | Reset a resource's failure history | [28](28-high-availability.md) |
+| `sudo pcs stonith fence NODE` | Fence a node now (test fencing) | [28](28-high-availability.md) |
+| `sudo crm_simulate -sL` | Show placement scores | [28](28-high-availability.md) |
+
+## Deep cuts: boot trust, encryption and recovery
+
+| Command | What it does | Module |
+|---------|--------------|--------|
+| `mokutil --sb-state` | Is Secure Boot on? | [29](29-secure-boot-and-drivers.md) |
+| `mokutil --list-enrolled`, `mokutil --db` | Keys in the MOK list; firmware `db` | [29](29-secure-boot-and-drivers.md) |
+| `sudo mokutil --import key.der` | Queue a key for enrollment at next boot | [29](29-secure-boot-and-drivers.md) |
+| `cat /sys/kernel/security/lockdown` | Current kernel lockdown mode | [29](29-secure-boot-and-drivers.md) |
+| `modinfo -F signer MODULE` | Who signed a kernel module | [29](29-secure-boot-and-drivers.md) |
+| `dkms status`, `sudo dkms autoinstall -k KERNEL` | DKMS modules; build them for a kernel | [29](29-secure-boot-and-drivers.md) |
+| `efibootmgr` | UEFI boot entries | [29](29-secure-boot-and-drivers.md) |
+| `sudo systemctl enable --now tangd.socket` | Start a Tang server | [30](30-network-bound-encryption.md) |
+| `tang-show-keys PORT` | Tang's signing key thumbprint | [30](30-network-bound-encryption.md) |
+| `sudo clevis luks bind -d DEV tang '{"url":"…"}'` | Bind a LUKS device to Tang | [30](30-network-bound-encryption.md) |
+| `sudo clevis luks bind -d DEV tpm2 '{"pcr_ids":"7"}'` | Bind a LUKS device to the TPM (PCR 7) | [30](30-network-bound-encryption.md) |
+| `sudo clevis luks list -d DEV` | Show Clevis bindings | [30](30-network-bound-encryption.md) |
+| `sudo clevis luks regen -d DEV -s SLOT` | Rebind after key rotation or a PCR change | [30](30-network-bound-encryption.md) |
+| `sudo tpm2_pcrread sha256:0,7` | Show TPM PCR values | [30](30-network-bound-encryption.md) |
+| `sudo cryptsetup luksDump DEV` | LUKS keyslots and tokens | [30](30-network-bound-encryption.md) |
+| `sudo tar --xattrs --acls --selinux -czpf FILE -C / DIR` | Archive keeping SELinux labels, ACLs and xattrs | [31](31-disaster-recovery-and-migration.md) |
+| `sudo semanage export -f FILE`, `sudo semanage import -f FILE` | Save / replay local SELinux customizations | [31](31-disaster-recovery-and-migration.md) |
+| `sudo rsync -aAXH SRC DST` | Copy with ACLs, xattrs and hard links | [31](31-disaster-recovery-and-migration.md) |
+| `sudo rear -v mkbackup`, `sudo rear -v mkrescue` | ReaR rescue image plus backup; rescue image only | [31](31-disaster-recovery-and-migration.md) |
+| `sudo rear checklayout` | Has the disk layout changed since the rescue image? | [31](31-disaster-recovery-and-migration.md) |
+| `rear recover` | Restore, from inside the ReaR rescue system | [31](31-disaster-recovery-and-migration.md) |
+| `sudo rpm -Va` | Files that differ from their packages | [31](31-disaster-recovery-and-migration.md) |
+| `dnf repoquery --userinstalled` | Packages installed on purpose | [31](31-disaster-recovery-and-migration.md) |
+| `/lib64/ld-linux-x86-64.so.2 --help` | Which x86-64 levels this CPU supports | [31](31-disaster-recovery-and-migration.md) |
+
+## Deep cuts: automation, TLS and networking
+
+| Command | What it does | Module |
+|---------|--------------|--------|
+| `ansible-inventory --graph` | Draw inventory groups and hosts | [32](32-ansible-and-system-roles.md) |
+| `ansible all -m ansible.builtin.ping` | Test SSH, Python and module execution | [32](32-ansible-and-system-roles.md) |
+| `ansible-playbook site.yml` | Apply a playbook | [32](32-ansible-and-system-roles.md) |
+| `ansible-playbook site.yml --check --diff` | Report drift without changing anything | [32](32-ansible-and-system-roles.md) |
+| `ansible-playbook site.yml --limit HOST` | Run against a subset of hosts | [32](32-ansible-and-system-roles.md) |
+| `ansible-doc MODULE` | Module documentation, offline | [32](32-ansible-and-system-roles.md) |
+| `ansible-vault create FILE`, `ansible-vault edit FILE` | Manage encrypted variable files | [32](32-ansible-and-system-roles.md) |
+| `sudo dnf install rhel-system-roles` | Install the System Roles collection | [32](32-ansible-and-system-roles.md) |
+| `openssl x509 -in c.pem -noout -subject -issuer -dates` | Quick certificate identity and validity check | [33](33-tls-and-crypto-policies.md) |
+| `openssl x509 -in c.pem -noout -ext subjectAltName` | Names the certificate is valid for | [33](33-tls-and-crypto-policies.md) |
+| `openssl x509 -in c.pem -noout -checkend 2592000` | Exit 1 if it expires within 30 days | [33](33-tls-and-crypto-policies.md) |
+| `openssl verify -CAfile ca.crt c.pem` | Verify a certificate against a CA | [33](33-tls-and-crypto-policies.md) |
+| `openssl s_client -connect HOST:443 -servername HOST -showcerts` | Inspect a live TLS handshake and chain | [33](33-tls-and-crypto-policies.md) |
+| `sudo cp ca.crt /etc/pki/ca-trust/source/anchors/`, `sudo update-ca-trust` | Trust a private CA system-wide | [33](33-tls-and-crypto-policies.md) |
+| `trust list --filter=ca-anchors` | List trusted root CAs | [33](33-tls-and-crypto-policies.md) |
+| `sudo update-crypto-policies --set DEFAULT:NO-PQ` | Set a crypto policy with a subpolicy (`NO-PQ` is 10.1+) | [33](33-tls-and-crypto-policies.md) |
+| `sudo certbot renew --dry-run` | Test Let's Encrypt renewal | [33](33-tls-and-crypto-policies.md) |
+| `sudo nft list ruleset` | Every nftables table, chain, rule and set | [34](34-nftables-and-traffic-control.md) |
+| `sudo nft -a list chain inet T C` | A chain with rule handles | [34](34-nftables-and-traffic-control.md) |
+| `sudo nft -c -f FILE`, `sudo nft -f FILE` | Check a ruleset file; apply it atomically | [34](34-nftables-and-traffic-control.md) |
+| `sudo nft monitor trace` | Follow packets marked with `meta nftrace set 1` | [34](34-nftables-and-traffic-control.md) |
+| `sudo conntrack -L`, `sudo conntrack -E` | List tracked flows; stream conntrack events | [34](34-nftables-and-traffic-control.md) |
+| `sudo ip netns add N`, `sudo ip netns exec N CMD` | Create a network namespace; run a command in it | [34](34-nftables-and-traffic-control.md) |
+| `tc -s qdisc show dev IF` | Queueing disciplines with statistics | [34](34-nftables-and-traffic-control.md) |
+| `sudo tc qdisc add dev IF root netem delay 200ms loss 5%` | Inject latency and packet loss | [34](34-nftables-and-traffic-control.md) |
+| `sudo tc qdisc add dev IF root tbf rate 5mbit burst 32kbit latency 400ms` | Simple rate limit | [34](34-nftables-and-traffic-control.md) |
+| `sudo tc qdisc del dev IF root` | Remove your qdisc, restore the default | [34](34-nftables-and-traffic-control.md) |
+
+## Deep cuts: storage, time and real-time
+
+| Command | What it does | Module |
+|---------|--------------|--------|
+| `sudo targetcli ls`, `sudo targetcli saveconfig` | Show and save the LIO iSCSI target configuration | [35](35-enterprise-storage.md) |
+| `sudo iscsiadm -m discovery -t sendtargets -p IP` | Discover iSCSI targets on a portal | [35](35-enterprise-storage.md) |
+| `sudo iscsiadm -m node -T IQN -l` | Log in to a target (`-u` logs out) | [35](35-enterprise-storage.md) |
+| `sudo iscsiadm -m session -P 3` | Session details, including attached disks | [35](35-enterprise-storage.md) |
+| `sudo mpathconf --enable --with_multipathd y` | Create `multipath.conf` and start multipathd | [35](35-enterprise-storage.md) |
+| `sudo multipath -ll` | Multipath devices, path groups and path states | [35](35-enterprise-storage.md) |
+| `sudo nvme discover -t tcp -a IP -s 4420` | Query an NVMe-oF discovery controller | [35](35-enterprise-storage.md) |
+| `sudo nvme connect -t tcp -a IP -s 4420 -n NQN` | Connect to an NVMe/TCP subsystem | [35](35-enterprise-storage.md) |
+| `sudo nvme list-subsys` | NVMe subsystems and their paths | [35](35-enterprise-storage.md) |
+| `ls -l /dev/disk/by-id/` | Stable device names (WWN, multipath) | [35](35-enterprise-storage.md) |
+| `cat /sys/block/DEV/queue/scheduler` | Current I/O scheduler | [35](35-enterprise-storage.md) |
+| `fio --direct=1 --iodepth=N --rw=randread …` | Benchmark the device, not the cache | [35](35-enterprise-storage.md) |
+| `timedatectl` | Clock, time zone, RTC and sync status | [36](36-time-synchronization.md) |
+| `chronyc tracking` | Clock offset, frequency error, stratum, leap status | [36](36-time-synchronization.md) |
+| `chronyc sources -v` | Time sources and their state, with a legend | [36](36-time-synchronization.md) |
+| `sudo chronyc makestep` | Step the clock now | [36](36-time-synchronization.md) |
+| `chronyc waitsync 30 0.1` | Wait until synchronised (scripts, boot ordering) | [36](36-time-synchronization.md) |
+| `sudo chronyc -N authdata` | NTS authentication status per source | [36](36-time-synchronization.md) |
+| `ethtool -T IF` | Hardware timestamping and PTP clock support | [36](36-time-synchronization.md) |
+| `sudo ptp4l -i IF -s -m`, `sudo phc2sys -s IF -c CLOCK_REALTIME -w` | PTP client; sync the system clock from the NIC | [36](36-time-synchronization.md) |
+| `uname -v` | Shows `PREEMPT_DYNAMIC` (stock) or `PREEMPT_RT` (kernel-rt) | [37](37-real-time-and-low-latency.md) |
+| `sudo dnf config-manager --set-enabled rt`, `sudo dnf install kernel-rt` | Install the real-time kernel | [37](37-real-time-and-low-latency.md) |
+| `sudo tuned-adm profile cpu-partitioning`, `tuned-adm verify` | Isolate CPUs with tuned; check it applied | [37](37-real-time-and-low-latency.md) |
+| `cat /sys/devices/system/cpu/isolated` | Which CPUs are isolated | [37](37-real-time-and-low-latency.md) |
+| `cat /proc/interrupts` | Interrupt counts per CPU | [37](37-real-time-and-low-latency.md) |
+| `taskset -c 3 CMD`, `chrt -f 80 CMD` | Pin to CPU 3; run as SCHED_FIFO priority 80 | [37](37-real-time-and-low-latency.md) |
+| `ps -eLo pid,tid,class,rtprio,psr,comm` | Policy, priority and CPU of every thread | [37](37-real-time-and-low-latency.md) |
+| `sudo cyclictest -m -S -p95 -i200 -D 60 -q` | Measure scheduling latency on every CPU | [37](37-real-time-and-low-latency.md) |
+| `sudo hwlatdetect --duration=60 --threshold=10` | Detect firmware or hypervisor stalls | [37](37-real-time-and-low-latency.md) |
 
 ## Troubleshooting first five minutes
 

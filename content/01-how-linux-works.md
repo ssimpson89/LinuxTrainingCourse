@@ -66,7 +66,7 @@ $ ldd /usr/bin/ls | grep libc
 
 <div class="layer" data-label="System call interface" data-tag="the wall" markdown>
 
-**The boundary.** About 450 numbered entry points (`openat`, `read`, `write`, `clone`, `execve`, …) are the *only* way into the kernel. The CPU enforces this boundary in hardware.
+**The boundary.** A few hundred numbered entry points (roughly 370 on x86_64: `openat`, `read`, `write`, `clone`, `execve`, …) are the *only* way a program can ask the kernel for something. The CPU enforces this boundary in hardware.
 
 </div>
 
@@ -108,7 +108,7 @@ So how does a program read a file, if it can't touch the disk? It asks.
 
 ## System calls: how programs ask the kernel for things
 
-A **system call** (syscall) is a request from a program to the kernel. Opening a file, reading from the network, starting a new program, getting the time, allocating memory: every one of these is a system call.
+A **system call** (syscall) is a request from a program to the kernel. Opening a file, reading from the network, starting a new program, allocating memory: every one of these is a system call.
 
 ```mermaid
 sequenceDiagram
@@ -116,7 +116,7 @@ sequenceDiagram
     participant L as glibc
     participant K as Kernel
     participant D as Disk / page cache
-    P->>L: fopen("/etc/hostname")
+    P->>L: open("/etc/hostname")
     L->>K: openat(AT_FDCWD, "/etc/hostname", O_RDONLY)
     K->>K: Check permissions and SELinux
     K-->>L: file descriptor 3
@@ -131,6 +131,30 @@ sequenceDiagram
 
 Notice the kernel checks permissions on every request. This is the only place they *can* be enforced reliably, because every request has to come through this door. Permissions ([module 04](04-permissions-and-acls.md)) and SELinux ([module 16](16-selinux.md)) both work at this boundary.
 
+??? question "Under the hood: how many system calls are there, and how do you look one up?"
+    Each system call has a **number**, and the number differs between CPU architectures. On x86_64 the numbers run from 0 up to about 460, but there is a big unused gap in the middle (newer calls added since 2019 start at 424 on every architecture), so the real count is roughly 370. The `audit` package, installed by default on Rocky, includes a translator:
+
+    ```console
+    $ ausyscall openat
+    257
+    $ ausyscall 59
+    execve
+    ```
+
+    You'll meet these numbers again in audit rules ([module 17](17-security-hardening.md)) and in seccomp filters that containers use to block dangerous calls ([module 18](18-containers.md)). The full list, with a one-line purpose for each, is in `man 2 syscalls`.
+
+??? question "Under the hood: the one common request that skips the wall"
+    Programs ask for the current time constantly (every log line, every timeout). Crossing into the kernel costs a few hundred nanoseconds, so Linux cheats: it maps a tiny read-only library called the **vDSO** ("virtual dynamic shared object") into every process. `clock_gettime()` and `gettimeofday()` run inside the vDSO, in user space, reading a clock page the kernel keeps updated. No wall crossing at all.
+
+    You can see it in any process's memory map, and you'll notice that `strace` never shows `clock_gettime` for most programs, because it isn't a real system call there:
+
+    ```console
+    $ grep vdso /proc/self/maps
+    7ffd8b5f4000-7ffd8b5f6000 r-xp 00000000 00:00 0                          [vdso]
+    ```
+
+    This is also why a VM with a misbehaving clock source can make time calls suddenly slow: if the kernel decides the clock is unreliable, the vDSO falls back to a real system call. [Module 36](36-time-synchronization.md) goes deeper on clocks.
+
 ### Watching system calls with strace
 
 You don't have to take this on faith. The `strace` tool shows you every system call a program makes. It's one of the most useful debugging tools on Linux.
@@ -139,7 +163,8 @@ You don't have to take this on faith. The `strace` tool shows you every system c
 $ strace -e trace=openat,read,write cat /etc/hostname
 openat(AT_FDCWD, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3
 openat(AT_FDCWD, "/lib64/libc.so.6", O_RDONLY|O_CLOEXEC) = 3
-read(3, "\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0"..., 832) = 832
+read(3, "\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0"..., 832) = 832
+…
 openat(AT_FDCWD, "/etc/hostname", O_RDONLY) = 3
 read(3, "rocky-lab\n", 131072)            = 10
 write(1, "rocky-lab\n", 10rocky-lab
@@ -151,6 +176,7 @@ read(3, "", 131072)                     = 0
 Reading it line by line:
 
 1. The first two `openat` calls are the **dynamic linker** loading glibc before `cat` itself even starts.
+1. The trimmed lines (`…`) are glibc loading your language and character-set settings (the **locale**). Some of those `openat` calls fail with `ENOENT` (no such file), which is normal: glibc tries several places and uses the first that exists.
 2. `openat(... "/etc/hostname" ...) = 3`: the kernel opened the file and handed back **file descriptor 3**, a small number that stands for "this open file" from now on.
 3. `read(3, …) = 10`: read 10 bytes from descriptor 3.
 4. `write(1, …)`: write them to descriptor **1**, which is standard output, your terminal.
@@ -241,13 +267,14 @@ You can see any process's open file descriptors in `/proc`:
 
 ```console
 $ ls -l /proc/$$/fd
+total 0
 lrwx------. 1 alex alex 64 Oct 14 10:02 0 -> /dev/pts/0
 lrwx------. 1 alex alex 64 Oct 14 10:02 1 -> /dev/pts/0
 lrwx------. 1 alex alex 64 Oct 14 10:02 2 -> /dev/pts/0
 lrwx------. 1 alex alex 64 Oct 14 10:02 255 -> /dev/pts/0
 ```
 
-(`$$` is the shell's own process ID. `/dev/pts/0` is your terminal.) Redirection (`>`, `<`, `2>`) and pipes (`|`), which you'll master in [module 02](02-shell-and-filesystem.md), are nothing more than rearranging these numbers before a program starts.
+(`$$` is the shell's own process ID. `/dev/pts/0` is your terminal. Descriptor 255 is a private copy bash keeps of the terminal, so it can still reach it after you redirect 0, 1 or 2.) Redirection (`>`, `<`, `2>`) and pipes (`|`), which you'll master in [module 02](02-shell-and-filesystem.md), are nothing more than rearranging these numbers before a program starts.
 
 ### Practice: explore through files
 
@@ -502,15 +529,20 @@ Firmware finds the bootloader, the bootloader loads the kernel and a small tempo
 $ ps -p 1 -o pid,comm
     PID COMMAND
       1 systemd
-$ pstree -p | head -5
-systemd(1)-+-NetworkManager(812)-+-{NetworkManager}(825)
-           |                     `-{NetworkManager}(827)
-           |-auditd(752)---{auditd}(753)
-           |-chronyd(840)
-           |-sshd(901)---sshd-session(4090)---sshd-session(4099)---bash(4100)---pstree(4240)
+$ pstree -ps $$
+systemd(1)---sshd(901)---sshd-session(4090)---sshd-session(4099)---bash(4100)---pstree(4240)
 ```
 
-Look at that last line: `systemd` started `sshd`, which forked a session for your login, which started your `bash`, which forked and exec'd `pstree`. The whole family tree is right there.
+(`pstree -s` shows the ancestors of one process, here your shell. Your terminal may draw the lines as `───` instead of `---`.) Read it left to right: `systemd` started `sshd`, which started a session process for your login, which started your `bash`, which forked and exec'd `pstree`. The whole family tree is right there. Run plain `pstree -p` to see every branch.
+
+??? question "Under the hood: why two `sshd-session` processes?"
+    Since OpenSSH 9.8 (Rocky 10 ships 9.9), the listening `sshd` no longer handles logins itself. For each connection it starts a separate program, `sshd-session`. That process, still running as root, forks a second, unprivileged `sshd-session` that runs as you and does all the risky work of talking to the network. This **privilege separation** means a bug in the network-facing code lands in a process that has no root powers. `ps -o pid,user,args` shows them as `sshd-session: alex [priv]` (root) and `sshd-session: alex@pts/0` (you).
+
+!!! version "Rocky 9 vs 10"
+    On Rocky 9 (OpenSSH 8.7) the same chain reads `sshd───sshd───sshd───bash`: the per-connection processes were copies of `sshd` itself. Scripts and monitoring checks that count `sshd` processes to find logged-in users give different answers on 10.
+
+??? question "Under the hood: zombies and orphans"
+    Between `exit_group` and the parent's `wait4`, the dead child is a **zombie**: it holds no memory, only its PID and exit status, and shows as state `Z` (`<defunct>`) in `ps`. If a buggy parent never calls `wait`, zombies pile up and can exhaust PIDs. Killing a zombie does nothing (it's already dead); you fix it by fixing or killing the *parent*. If a parent dies first, its children are **re-parented** to PID 1 (or to the nearest ancestor that asked to be a "subreaper", which systemd's per-user manager does), and systemd reaps them when they exit. That's one of PID 1's quiet duties.
 
 ## Labs
 
@@ -529,7 +561,10 @@ Look at that last line: `systemd` started `sshd`, which forked a session for you
 
         ```console
         $ strace -e trace=openat cat /etc/shadow
+        …
         openat(AT_FDCWD, "/etc/shadow", O_RDONLY) = -1 EACCES (Permission denied)
+        cat: /etc/shadow: Permission denied
+        +++ exited with 1 +++
         ```
 
     4. Count all system calls made by `date`:
@@ -539,6 +574,8 @@ Look at that last line: `systemd` started `sshd`, which forked a session for you
         ```
 
     **Check your work:** In step 3 you can point to the exact system call that failed and the error the kernel returned (`EACCES`).
+
+    **Clean up:** nothing to undo; `strace` only watches.
 
     ??? success "Why does `cat /etc/shadow` fail?"
         `/etc/shadow` holds password hashes and is readable only by root. Your process runs as your user, so the kernel refuses the `openat` call with `EACCES`. `cat` just reports what the kernel told it. Try `sudo strace -e trace=openat cat /etc/shadow` and the same call succeeds.
@@ -582,21 +619,24 @@ Look at that last line: `systemd` started `sshd`, which forked a session for you
         $ cat /proc/sys/kernel/hostname
         ```
 
-    2. Change the hostname through `/proc` (temporarily; it resets at reboot):
+    2. Save the current name, then change the hostname through `/proc` (temporarily; it resets at reboot):
 
         ```console
+        $ orig=$(hostname)
         $ sudo sh -c 'echo scratch-name > /proc/sys/kernel/hostname'
         $ hostname
         scratch-name
         ```
 
-    3. Put it back:
+    3. Put it back, the same way:
 
         ```console
-        $ sudo hostnamectl hostname "$(cat /etc/hostname)"
+        $ echo "$orig" | sudo tee /proc/sys/kernel/hostname
         ```
 
-    **Check your work:** `hostname` shows your original name again.
+    **Check your work:** `hostname` shows your original name again. `hostnamectl` would also have shown `scratch-name` as the *transient* hostname: the kernel's copy, as opposed to the *static* one stored in `/etc/hostname`.
+
+    **Clean up:** step 3 already restored the name; a reboot would too.
 
     ??? question "Why `sudo sh -c '…'` instead of `sudo echo … > file`?"
         In `sudo echo scratch-name > /proc/...`, the **redirection is done by your own shell**, running as you, before `sudo` even starts, so it fails with "Permission denied". Wrapping the whole thing in `sudo sh -c '...'` makes a root shell do the redirection. `echo ... | sudo tee file` is the other common trick.
@@ -616,7 +656,9 @@ Look at that last line: `systemd` started `sshd`, which forked a session for you
     4. In the second session, find the `clone`, then the `execve("/usr/bin/cat", …)` in the child, then the parent's `wait4` returning.
     5. Stop the trace with ++ctrl+c++.
 
-    **Check your work:** you can match each line of the strace output to a step in the "life of a command" stepper above.
+    **Check your work:** you can match each line of the strace output to a step in the "life of a command" stepper above. You'll also see `wait4` return with a status like `[{WIFEXITED(s) && WEXITSTATUS(s) == 0}]`: that's the exit code that ends up in `$?`.
+
+    **Clean up:** ++ctrl+c++ detaches `strace`; the traced shell carries on unharmed.
 
 ## Common pitfalls
 
