@@ -270,12 +270,30 @@ Binding to more PCRs is stricter, but every PCR you add is something an ordinary
 | 0 | Firmware code | BIOS/UEFI update | Rarely: every firmware update locks you out |
 | 1 | Firmware settings | Boot order or setting changes, sometimes even hardware changes | Rarely |
 | 2-3 | Option ROMs | Add-in card firmware changes | Rarely |
-| 4 | Boot loaders (shim, GRUB) | `shim-x64` or `grub2` updates | With care |
-| 7 | Secure Boot state and keys | Secure Boot toggled, `db`/`dbx`/`KEK` updated | **The usual choice** |
+| 4 | Boot loaders and other EFI binaries (shim, GRUB, often the kernel image too) | `shim-x64` or `grub2` updates, and on most systems every kernel update | Rarely, for the same reason as 8-9 |
+| 7 | Secure Boot state and keys | Secure Boot toggled, `db`/`dbx`/`KEK` updated, some `shim` updates (shim records its own certificate and SBAT policy here) | **The usual choice** |
 | 8-9 | Kernel command line, kernel, initramfs (via GRUB) | Every kernel update and `dracut -f` | No: changes all the time |
 | 14 | MOK list | You enroll or delete a MOK | With care |
 
-**PCR 7 is the common recommendation** on its own: it proves Secure Boot is on and the trusted keys are the expected ones, so an attacker can't boot their own unsigned initramfs to grab the key, yet it survives kernel updates. Binding to PCRs 0-7 sounds thorough, but it means every firmware update or BIOS setting change locks the machine out until someone types the passphrase and rebinds.
+**PCR 7 is the common recommendation** on its own: it proves Secure Boot is on and the trusted keys are the expected ones, so an attacker can't boot a boot loader or kernel signed by a stranger, and it survives kernel updates. Binding to PCRs 0-7 sounds thorough, but it means every firmware update or BIOS setting change locks the machine out until someone types the passphrase and rebinds.
+
+Be clear about what PCR 7 does *not* prove, though. It records *who signed* the boot chain, not *what* booted.
+
+??? question "Under the hood: the initramfs hole in a PCR 7 policy"
+    Remember from [module 29](29-secure-boot-and-drivers.md) that classic Secure Boot doesn't verify the initramfs or the kernel command line. They sit on the unencrypted `/boot` partition. Now picture an attacker who has the whole machine for an hour:
+
+    1. They boot a live USB (Secure Boot on or off doesn't matter yet), mount `/boot`, and add a shell or a "copy the key to a USB stick" hook to the initramfs.
+    2. They reboot normally. Firmware, shim, GRUB and the Rocky kernel are all genuine and Rocky-signed, so **PCR 7 has exactly its expected value**.
+    3. Their modified initramfs asks the TPM to unseal. The policy is satisfied, and the key comes out.
+
+    The same reasoning applies to any boot medium signed through the same chain, such as Rocky's own install ISO in rescue mode: PCR 7 can't tell them apart from your installed system.
+
+    What this means in practice:
+
+    - `tpm2` with PCR 7 protects a **disk pulled out of the machine**. It does not protect a **whole stolen machine** against a patient attacker.
+    - For whole-machine theft, combine TPM2 with Tang (`sss`, `t=2`, below), so the key also needs your network.
+    - Lock the cheap paths: a GRUB password (`grub2-setpassword`) blocks editing the command line at the boot menu, and a firmware setup password stops boot-order changes.
+    - Measuring the initramfs properly needs a **Unified Kernel Image** (kernel, initramfs and command line in one signed EFI binary). That's the direction Fedora and systemd are taking, but it isn't Rocky's default boot path.
 
 !!! danger "PCR 7 does change sometimes"
     A `dbx` revocation update (shipped through firmware updates or `fwupd`), the 2023 Microsoft CA rollout, enrolling a new key, or toggling Secure Boot all change PCR 7. Before applying one, make sure someone knows the passphrase or that a second pin (Tang) can unlock the machine. After it, rebind with `clevis luks regen`.
@@ -365,6 +383,18 @@ The thumbprint shown should match `tang-show-keys` on the Tang server. That one 
 | Check whether a Tang binding uses outdated keys | `clevis luks report -d DEV -s SLOT` |
 | Edit a binding's config | `clevis luks edit -d DEV -s SLOT -c 'CFG'` |
 
+??? question "Under the hood: what root on a running box can see"
+    The token is plain JSON in the header, and you can pull it out yourself:
+
+    ```console
+    $ sudo cryptsetup token export --token-id 0 /dev/vda3
+    {"type":"clevis","keyslots":["1"],"jwe":{"ciphertext":"…","encrypted_key":"","iv":"…","protected":"…","tag":"…"}}
+    $ sudo clevis luks pass -d /dev/vda3 -s 1
+    Jx1b…(the random keyslot passphrase)…
+    ```
+
+    `clevis luks pass` runs the pin and prints the keyslot's passphrase. That's useful for recovery, and it's a reminder of the threat model: Clevis protects data **at rest**. Anyone who is root on the running, unlocked machine (and can reach Tang, or use the TPM) can recover a working passphrase and keep it. After a suspected compromise, don't just rotate Tang keys. Run `clevis luks regen` so the slot gets a new random passphrase, or better, re-encrypt.
+
 `clevis encrypt` and `clevis decrypt` work on arbitrary data, not just LUKS, which makes them handy for testing a pin before you trust a disk to it:
 
 ```console
@@ -377,7 +407,7 @@ hello
 
 <div class="terminal-sim" data-title="Bind and verify a Tang pin" data-prompt="[root@db01 ~]# " markdown>
 
-<div class="task" data-expect="tang-show-keys 7500" data-hint="On the Tang server, tang-show-keys takes the port number as its argument." markdown>
+<div class="task" data-expect="tang-show-keys 7500||sudo tang-show-keys 7500" data-hint="On the Tang server, tang-show-keys takes the port number as its argument." markdown>
 
 **Step 1.** (On the Tang server.) Print the signing key thumbprint for the server listening on port 7500.
 
@@ -542,7 +572,7 @@ Then rebuild with `dracut -fv --regenerate-all`. Use an IP address in the Tang U
 
 <div class="node" data-id="tpm" markdown>
 
-**Use `tpm2` with `pcr_ids` `7`.** It protects a disk pulled from the machine and blocks booting foreign code to extract the key. It doesn't stop someone who steals the whole device and gets past your login, so pair it with strong OS-level security, or keep a human passphrase for laptops.
+**Use `tpm2` with `pcr_ids` `7`, and set a GRUB password.** It protects a disk pulled from the machine and blocks boot loaders signed by strangers. It does *not* stop a patient attacker who steals the whole device and tampers with the unsigned initramfs on `/boot`. If that threat matters (laptops with sensitive data), keep a human passphrase.
 
 </div>
 
@@ -558,7 +588,7 @@ Then rebuild with `dracut -fv --regenerate-all`. Use an IP address in the Tang U
 
 Tang is simple, which makes it easy to run badly. Four rules:
 
-1. **Run at least two.** With `sss` and `t=1`, either server can unlock clients. Put them in different racks or rooms.
+1. **Run at least two.** With `sss` and `t=1`, either server can unlock clients. Put them in different racks or rooms. (The alternative is two Tang servers with *identical* `/var/db/tang` contents behind one load-balanced name. Clients then need only one URL, but you must rotate keys on both at once, and a leaked copy of the directory compromises both.)
 2. **Back up `/var/db/tang`.** Losing Tang's keys means every client falls back to passphrases. The directory is small and has no per-client state, so a nightly copy to your backup system is enough. Treat that backup as sensitive: with it plus a stolen disk, an attacker can unlock.
 3. **Keep Tang inside.** Only client subnets should reach the port. Firewall it ([module 12](12-firewalld.md)).
 4. **Rotate keys** periodically, and after any suspected compromise.
@@ -684,11 +714,11 @@ $ sudo dnf install tang clevis clevis-luks tpm2-tools cryptsetup
         $ sudo cryptsetup luksDump $LOOP | grep -A3 -E '^(Keyslots|Tokens):'
         ```
 
-    3. Unlock without typing anything, put a filesystem on it, and close it:
+    3. Unlock without typing anything, put a filesystem on it, and close it. (ext4, because `mkfs.xfs` refuses anything under 300 MB, and only 48 MiB is left after the 16 MiB LUKS2 header.)
 
         ```console
         $ sudo clevis luks unlock -d $LOOP -n nbdetest
-        $ sudo mkfs.xfs -q /dev/mapper/nbdetest
+        $ sudo mkfs.ext4 -q /dev/mapper/nbdetest
         $ sudo cryptsetup close nbdetest
         ```
 
@@ -792,14 +822,16 @@ $ sudo dnf install tang clevis clevis-luks tpm2-tools cryptsetup
 
     **Goal:** A VM with an encrypted root that reboots unattended while Tang is reachable, and stops at the prompt when it isn't.
 
-    **You'll need:** two Rocky 10 VMs on the same libvirt network: `tang1` running Tang on port 7500 (as in Lab 1, plus `sudo firewall-cmd --permanent --add-port=7500/tcp; sudo firewall-cmd --reload`), and `client1` installed with **"Encrypt my data"** ticked in the installer. Snapshot `client1` first.
+    **You'll need:** two Rocky 10 VMs on the same libvirt network: `tang1` running Tang on port 7500 (as in Lab 1, plus `sudo firewall-cmd --permanent --add-port=7500/tcp; sudo firewall-cmd --reload`), and `client1` installed with **"Encrypt my data"** ticked in the installer.
 
-    1. On `client1`, find the LUKS device holding root and bind it:
+    **Snapshot `client1` first.** This lab rebuilds its initramfs, and a mistake leaves it waiting at a passphrase prompt. libvirt only takes internal snapshots of UEFI VMs while they're shut off, so on the host: `sudo virsh shutdown client1`, then `sudo virsh snapshot-create-as client1 pre-nbde`, then `sudo virsh start client1`.
+
+    1. On the host, find `tang1`'s IP address (`sudo virsh domifaddr tang1`). Use the IP, not the name: the initramfs may not be able to resolve VM hostnames. Then on `client1`, find the LUKS device holding root and bind it (replace `192.168.122.50` with `tang1`'s address and `/dev/vda3` with your LUKS device):
 
         ```console
         $ lsblk -o NAME,TYPE,FSTYPE,MOUNTPOINTS
         $ sudo dnf install clevis-dracut
-        $ sudo clevis luks bind -d /dev/vda3 tang '{"url":"http://tang1:7500"}'
+        $ sudo clevis luks bind -d /dev/vda3 tang '{"url":"http://192.168.122.50:7500"}'
         $ sudo dracut -fv --regenerate-all --hostonly-cmdline
         $ sudo lsinitrd | grep -E 'clevis|cmdline.d'
         ```
@@ -809,7 +841,7 @@ $ sudo dnf install tang clevis clevis-luks tpm2-tools cryptsetup
 
     **Check your work:** `journalctl -b | grep -i clevis` on the client shows the unlock, and `clevis luks list` shows the tang binding.
 
-    **Clean up:** revert the snapshot (`sudo virsh snapshot-revert client1 <name>`) or `sudo clevis luks unbind -d /dev/vda3 -s 1; sudo dracut -f --regenerate-all`.
+    **Clean up:** shut `client1` down and revert the snapshot (`sudo virsh snapshot-revert client1 pre-nbde`), or `sudo clevis luks unbind -d /dev/vda3 -s 1; sudo dracut -f --regenerate-all`.
 
 ## Common pitfalls
 
@@ -878,7 +910,7 @@ What must you back up on a Tang server?
 
 Which PCR is the usual choice for a TPM2 policy, and why?
 
-PCR 7 (Secure Boot state and keys). It blocks booting foreign code but survives kernel updates.
+PCR 7 (Secure Boot state and keys). It survives kernel updates and blocks boot loaders signed by strangers, but it doesn't measure the initramfs, so on its own it protects a removed disk, not a stolen machine.
 
 </div>
 
@@ -921,7 +953,7 @@ They all share one LUKS volume key. Clevis adds keyslots; it never changes the v
 !!! recap "Key takeaways"
     - Clevis adds a **keyslot plus a token** to LUKS2; your passphrase stays as the fallback.
     - **Tang** unlocks while the machine can reach your network. It's stateless, never sees the key, and must not be reachable from outside.
-    - **TPM2** seals the key to this machine and, with a PCR policy, to its boot state. **PCR 7** is the practical default.
+    - **TPM2** seals the key to this machine and, with a PCR policy, to its boot state. **PCR 7** is the practical default, but it doesn't measure the initramfs: pair it with Tang if a whole stolen machine is in your threat model.
     - **`sss`** combines pins with a threshold: `t=1` for "any of", `t=2` for "Tang AND TPM".
     - Root unlock needs **`clevis-dracut`**, a rebuilt initramfs and **network in early boot** (`rd.neednet=1`, `ip=`).
     - Rotate Tang keys with `tangd-rotate-keys`, then **`clevis luks regen`** every client, then delete the old hidden keys.

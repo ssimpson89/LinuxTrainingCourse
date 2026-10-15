@@ -215,7 +215,20 @@ $ modinfo -F sig_hashalgo xfs
 sha256
 ```
 
-An empty `signer` means the module is unsigned. Rocky's choice of shim, keys and signing infrastructure is covered in [module 21](21-inside-rocky-linux.md); this module picks up where that one stops.
+An empty `signer` means the module is unsigned.
+
+??? question "Under the hood: which keyring trusts which key?"
+    The kernel keeps its trusted keys in named **keyrings**, and you can list them with `keyctl` (package `keyutils`):
+
+    ```console
+    $ sudo keyctl list %:.builtin_trusted_keys    # compiled into the kernel: Rocky's module-signing key
+    $ sudo keyctl list %:.platform                # imported at boot from firmware db and the MOK list
+    $ sudo keyctl list %:.blacklist               # hashes and certs from dbx and MokListX
+    ```
+
+    The RHEL-family kernels that Rocky rebuilds trust the `.platform` keyring for module signatures. That's why enrolling a MOK is enough. Upstream kernels are stricter: there, `.platform` keys only verify `kexec` images, and MOK keys must be marked as CAs to sign modules. The surprising consequence: on Rocky, a key in your firmware's `db` can sign kernel modules too. Every certificate in `db` (including your hardware vendor's) is part of your kernel's trust base, not just your boot loader's.
+
+Rocky's choice of shim, keys and signing infrastructure is covered in [module 21](21-inside-rocky-linux.md); this module picks up where that one stops.
 
 ## Kernel lockdown and module signature enforcement
 
@@ -226,6 +239,14 @@ An empty `signer` means the module is unsigned. Rocky's choice of shim, keys and
 | `none` | Nothing | Secure Boot off |
 | `integrity` | Anything that could *modify* the running kernel: unsigned modules, unsigned `kexec` images, writing `/dev/mem`, `/dev/kmem` and `/dev/port`, some debugfs and MSR access, ACPI table overrides | Automatically, when booted with Secure Boot |
 | `confidentiality` | Everything in `integrity`, plus things that could *read* kernel secrets (for example `/proc/kcore`, some tracing) | Only if you ask for it with `lockdown=confidentiality` |
+
+??? question "Under the hood: what lockdown quietly breaks in production"
+    Lockdown is more than a module gate, and a few side effects surprise people on Secure Boot servers:
+
+    - **Hibernation is disabled.** Restoring a hibernation image would load unverified kernel memory, so `dmesg` shows `Lockdown: … hibernation is restricted`. Suspend-to-RAM still works.
+    - **Tools that poke `/dev/mem` or MSRs fail.** Some vendor BIOS flashers, older hardware-inventory agents and overclocking tools stop working. The error looks like an ordinary `Operation not permitted`, even for root.
+    - **kdump still works**, because the crash kernel it loads is Rocky-signed. Hand-built kernels you `kexec` into are refused unless they're signed by a trusted key.
+    - **You can't switch lockdown off at runtime.** You can raise it (`echo confidentiality > /sys/kernel/security/lockdown`), but never lower it without a reboot. That one-way ratchet is the whole point.
 
 **Module signature enforcement** is the part you'll meet most. Each `.ko` file can carry a **PKCS#7 signature** appended to its end. When you load it, the kernel checks the signature against its keyrings. There are three outcomes:
 
@@ -305,9 +326,8 @@ The `mokutil` commands you'll use most:
 Here is what a stock Rocky machine shows:
 
 ```console
-$ mokutil --list-enrolled | grep -E 'Subject:|Not After'
-            Not After : Jun … 2031 GMT
-        Subject: C=US, ST=Delaware, L=Dover, O=Rocky Enterprise Software Foundation, OU=Release engineering team, CN=Rocky Linux Secure Boot Root CA/emailAddress=security@rockylinux.org
+$ mokutil --list-enrolled | grep 'Subject:'
+        Subject: … O=Rocky Enterprise Software Foundation, … CN=Rocky Linux Secure Boot Root CA …
 ```
 
 That's the Rocky CA that shim carries, mirrored into the runtime MOK list so the kernel can see it. Your own keys appear after it once enrolled.
@@ -467,17 +487,18 @@ Both flavors are *out-of-tree* modules and both need a signature Rocky's kernel 
 
 === "ELRepo (prebuilt kmod)"
 
-    ELRepo builds `kmod-nvidia` packages (and `kmod-nvidia-open` for newer GPUs) against the RHEL kABI and signs them with ELRepo's key. No compiler needed on the box. New EL major releases often start in the `elrepo-testing` repository.
+    ELRepo builds `kmod-nvidia` packages (and `kmod-nvidia-open` for Turing and newer GPUs) against the RHEL kABI and signs them with ELRepo's key. No compiler needed on the box. For EL10, the NVIDIA kmods first appeared in the `elrepo-testing` repository, so you may need to enable it.
 
     ```console
     $ sudo dnf install elrepo-release
-    $ sudo dnf install nvidia-detect && nvidia-detect
-    $ sudo dnf --enablerepo=elrepo-testing install kmod-nvidia   # if not yet in elrepo
+    $ sudo dnf install nvidia-detect && nvidia-detect    # suggests the right package
+    $ sudo dnf --enablerepo=elrepo-testing install kmod-nvidia-open
+    $ ls /etc/pki/elrepo/                                # ELRepo's Secure Boot certificate (.der)
     $ sudo mokutil --import /etc/pki/elrepo/SECURE-BOOT-KEY-elrepo.org.der
-    $ sudo reboot                                                # confirm in MokManager
+    $ sudo reboot                                        # confirm in MokManager
     ```
 
-    Check ELRepo's site for current package names and which repo carries them for your release before relying on these exact names.
+    ELRepo's file names and repository layout change between releases. Check ELRepo's Secure Boot page for the current certificate name before you rely on the exact path above.
 
 === "Disable Secure Boot (last resort)"
 
@@ -490,7 +511,7 @@ $ sudo grubby --update-kernel=ALL --args="nouveau.modeset=0 rd.driver.blacklist=
 ```
 
 !!! note "Why some other distributions 'just work'"
-    Some RHEL-compatible distributions build and sign the NVIDIA modules with the same key as their kernel, so no enrollment is needed. RHEL itself offers precompiled, Red Hat-signed NVIDIA open modules through a partner repository for RHEL customers. Rocky does not currently ship signed NVIDIA modules, so on Rocky you always enroll *some* key: DKMS's, ELRepo's, or your own.
+    Some RHEL-compatible distributions build and sign the NVIDIA modules with the same key as their kernel, so no enrollment is needed. RHEL 10 ships precompiled, Red Hat-signed NVIDIA open modules (`kmod-nvidia-open`) in its Extensions repository for subscribers. At the time of writing, Rocky does not ship signed NVIDIA modules (a proposal to add them is being tracked by the Rocky project), so on Rocky you enroll *some* key: DKMS's, ELRepo's, or your own.
 
 ### What breaks after a kernel update, and how to recover
 
@@ -564,7 +585,7 @@ SecureBoot enabled
 
 </div>
 
-<div class="task" data-expect="cat /sys/kernel/security/lockdown" data-hint="The lockdown mode is a file under /sys/kernel/security." markdown>
+<div class="task" data-expect="cat /sys/kernel/security/lockdown||sudo cat /sys/kernel/security/lockdown" data-hint="The lockdown mode is a file under /sys/kernel/security." markdown>
 
 **Step 2.** Confirm the kernel's lockdown mode.
 
@@ -594,7 +615,7 @@ modprobe: ERROR: could not insert 'nvidia': Key was rejected by service
 
 </div>
 
-<div class="task" data-expect="sudo mokutil --import /var/lib/dkms/mok.pub" data-hint="The module is signed by DKMS's key. Queue /var/lib/dkms/mok.pub for enrollment with mokutil." markdown>
+<div class="task" data-expect="sudo mokutil --import /var/lib/dkms/mok.pub||mokutil --import /var/lib/dkms/mok.pub" data-hint="The module is signed by DKMS's key. Queue /var/lib/dkms/mok.pub for enrollment with mokutil." markdown>
 
 **Step 5.** The module is signed, but the key isn't trusted. Queue the DKMS key for enrollment.
 
@@ -623,15 +644,20 @@ timeline
     2011 : Original Microsoft KEK and UEFI CAs created
     2023 : Replacement 2023 CAs created
     2024-2025 : Firmware and OS updates start adding 2023 CAs to KEK and db
+              : Microsoft starts dual-signing shims (late 2025)
     June 2026 : 2011 KEK and third-party UEFI CA reach expiry
-    : Rocky announces dual-signed shims
+              : Rocky confirms dual-signed shims
+    October 2026 : Windows Production PCA 2011 expires
     After 2026 : New shims and dbx updates signed only with 2023 keys
 ```
 
 Two facts keep this from being scary:
 
 1. **Expiry doesn't stop existing binaries booting.** UEFI firmware generally doesn't check certificate dates (it has no trustworthy clock at boot). A shim signed in 2024 keeps booting after June 2026. What changes is that Microsoft *stops issuing new signatures* with the old CAs, so future shims and future `dbx` revocations will carry only 2023 signatures.
-2. **Rocky ships dual-signed shims.** Rocky Linux announced in June 2026 that its shim carries signatures from both the old and the new Microsoft CA in one binary, so the same shim boots on older firmware that only trusts the 2011 CA and on newer firmware with the 2023 CA. This relies on the firmware handling a binary with two signatures correctly.
+2. **Rocky ships dual-signed shims.** Rocky Linux said in June 2026 that its shim carries signatures from both the old and the new Microsoft CA in one binary, so the same shim boots on older firmware that only trusts the 2011 CA and on newer firmware with the 2023 CA. (Red Hat did the same starting with RHEL 9.8 and 10.2.) This relies on the firmware handling a PE binary with two signatures correctly, which some old firmware gets wrong.
+
+!!! note "aarch64 is different"
+    Arm servers generally shipped with the 2023 Microsoft CA already in `db`, so other EL rebuilds sign their aarch64 shim (`shim-aa64`) with the 2023 CA only. On Arm hardware, run `sudo mokutil --db | grep 'UEFI CA 2023'` before you rely on a new shim, and check Rocky's release notes for the current aarch64 signing status.
 
 What can still bite you:
 
@@ -653,7 +679,28 @@ CN=Windows UEFI CA 2023
 $ rpm -q shim-x64        # keep this package current
 ```
 
+In a lab VM, the CAs come from the OVMF firmware's variable template, not from Microsoft. RHEL 10's `edk2-ovmf` has shipped both the 2011 and 2023 certificates since build `20241117-2`, so a fresh Rocky 10 VM normally shows both. A VM created years ago keeps the `db` in its own NVRAM file and won't pick up a newer template on its own.
+
 If the 2023 entries are missing, the normal fix is a **firmware update from your hardware vendor** (or `fwupdmgr` where the vendor publishes through LVFS), plus keeping `shim-x64` updated. Don't hand-edit `KEK` or `db` on production machines: a mistake there can leave a system that won't boot anything.
+
+??? question "Under the hood: SBAT, the revocation that doesn't fill up dbx"
+    `dbx` has room for only a few hundred entries, and every vulnerable GRUB build ever signed would need its own hash. **SBAT** solves this with a generation number. Each shim and GRUB binary carries a small `.sbat` section, a CSV that says "I am grub, generation 4". Shim keeps the minimum acceptable generation in an EFI variable (`SbatLevel`). Bump the minimum, and every older GRUB is revoked at once, from every vendor.
+
+    You can read both sides on a Rocky machine (`objcopy` is in `binutils`):
+
+    ```console
+    $ objcopy -O binary --only-section=.sbat /boot/efi/EFI/rocky/grubx64.efi /dev/stdout
+    sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md
+    grub,…
+    grub.rh,…
+    …
+    $ mokutil --list-sbat-revocations
+    sbat,1,…
+    shim,…
+    grub,…
+    ```
+
+    The production trap: SBAT revocations are written into NVRAM by a newer shim and are **one-way**. Once a machine has booted a shim that raised the GRUB generation, older Rocky install media (with an older GRUB) refuses to boot on it with a `Verification failed: (0x1A) Security Violation` message. Keep rescue and install media current, and don't be surprised when an old ISO "suddenly" stops working on a patched server.
 
 !!! warning "Measured boot side effect"
     Updating `db`, `dbx` or `KEK` changes **PCR 7** in the TPM. If you seal disk keys to PCR 7 (see [module 30](30-network-bound-encryption.md)), plan for a passphrase prompt or a rebind after these updates.
@@ -677,8 +724,20 @@ If the 2023 entries are missing, the normal fix is a **firmware update from your
 
         (Newer `virt-install` releases also accept the shorter `--boot uefi,secure-boot=on`. Secure Boot needs the `q35` machine type and SMM.)
 
-    2. Install Rocky as normal. After the first boot, take a snapshot from the host: `sudo virsh snapshot-create-as sblab clean`.
-    3. Inside the VM:
+    2. Install Rocky as normal. After the first boot, update it so the running kernel matches the repositories (Lab 2 installs `kernel-devel` for it): `sudo dnf -y update && sudo reboot`.
+    3. Shut the VM down and take a snapshot from the host. libvirt refuses internal snapshots of a *running* UEFI VM, but allows them while it's shut off:
+
+        ```console
+        $ sudo virsh shutdown sblab
+        $ sudo virsh domstate sblab                       # repeat until it says "shut off"
+        $ sudo virsh snapshot-create-as sblab clean
+        $ sudo virsh dumpxml sblab | grep nvram          # where this VM's EFI variables live
+        $ sudo cp /var/lib/libvirt/qemu/nvram/sblab_VARS.* /root/   # back them up
+        $ sudo virsh start sblab
+        ```
+
+        The snapshot covers the disk, **not** the NVRAM file that holds `db`, `dbx` and the MOK list. To truly undo a MOK enrollment, restore the NVRAM copy as well as the snapshot.
+    4. Inside the VM:
 
         ```console
         $ mokutil --sb-state
@@ -794,7 +853,7 @@ If the 2023 entries are missing, the normal fix is a **firmware update from your
     $ rm -rf ~/hello
     ```
 
-    Or revert the snapshot from the host: `sudo virsh snapshot-revert sblab clean`.
+    Or, with the VM shut off, revert the snapshot from the host (`sudo virsh snapshot-revert sblab clean`) and copy your saved `sblab_VARS.*` file back over the one in `/var/lib/libvirt/qemu/nvram/`. Reverting the disk alone leaves your key enrolled in NVRAM.
 
 !!! lab "Lab 3: Let DKMS rebuild and sign for you"
 

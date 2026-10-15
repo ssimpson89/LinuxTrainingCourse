@@ -200,6 +200,15 @@ $ sudo umount /mnt/snap && sudo lvremove -y rl/data_snap
   Logical volume "data_snap" successfully removed.
 ```
 
+??? question "Under the hood: what a classic snapshot costs while it exists"
+    A classic (thick) LVM snapshot is **copy-on-write**: the first time any chunk of the origin is written after the snapshot, LVM first copies the old chunk into the snapshot's space. So while a snapshot exists:
+
+    - Every first write to a chunk costs an extra read and write. On a busy database volume that can be a noticeable latency hit, so keep the snapshot's life short.
+    - `sudo lvs` shows the snapshot's `Data%` filling up. At 100% the snapshot is marked **invalid**, and the half-written backup is useless. `snapshot_autoextend_threshold` in `/etc/lvm/lvm.conf` can grow it automatically if the VG has free space.
+    - When it's created, LVM suspends the device, which **freezes** the filesystem (the same thing `fsfreeze` does) so the snapshot is clean. That's why the snapshot mounts without log recovery.
+
+    **Thin** snapshots (from a thin pool, [module 10](10-lvm-raid-and-encryption.md)) work differently: no `-L`, no per-snapshot size limit, and far less write penalty, but they share the pool's free space with everything else, so a full pool hurts every thin volume at once.
+
 !!! pitfall "XFS and nouuid"
     A snapshot of an XFS filesystem has the same filesystem UUID as the original. XFS refuses to mount two filesystems with the same UUID at once, so you must add `-o nouuid` (and `ro`, so the backup can't change it). Size the snapshot (`-L`) for the writes that will happen during the backup: if it fills, it becomes invalid and the backup fails.
 
@@ -209,30 +218,30 @@ $ sudo umount /mnt/snap && sudo lvremove -y rl/data_snap
 
 | Tool | Highlights | Where it comes from |
 |---|---|---|
-| **restic** | Single binary; backs up to local disk, SFTP, S3-compatible object storage and more; encrypted by default | EPEL |
-| **borg** (BorgBackup) | Very efficient deduplication and compression; local or SSH targets; encrypted repositories | EPEL |
+| **restic** | Single binary; backs up to local disk, SFTP, S3-compatible object storage and more; encrypted by default | EPEL (`restic`, 0.18 on EPEL 10) |
+| **borg** (BorgBackup) | Very efficient deduplication and compression; local or SSH targets; encrypted repositories | EPEL (`borgbackup`, 1.4 on EPEL 10) |
 
-Check availability for your release with `dnf info restic borgbackup` after enabling EPEL. Both keep extended attributes and ACLs on Linux, but test a restore of a labelled file before you rely on it, and still capture `semanage export` separately.
+Install them with `sudo dnf install epel-release` followed by `sudo dnf install restic` or `sudo dnf install borgbackup`. Both keep extended attributes and ACLs on Linux, but test a restore of a labelled file before you rely on it, and still capture `semanage export` separately.
 
 !!! tip "The 3-2-1 rule"
     Keep **3** copies of important data, on **2** different kinds of storage, with **1** copy off-site (and ideally one offline or immutable, so ransomware with your admin credentials can't delete it). A backup on the same SAN as the server isn't a disaster-recovery backup.
 
 ## Relax-and-Recover: bare-metal recovery
 
-File backups restore *files*. They don't recreate an empty disk's partition table, LVM layout, RAID arrays, LUKS containers and boot loader. That's what **Relax-and-Recover** (ReaR, package `rear` in AppStream) is for. It's the bare-metal recovery tool Red Hat documents for RHEL, and it works the same on Rocky.
+File backups restore *files*. They don't recreate an empty disk's partition table, LVM layout, RAID arrays, LUKS containers and boot loader. That's what **Relax-and-Recover** (ReaR, package `rear` in AppStream; version 2.9 on Rocky 10, 2.6 on Rocky 9) is for. It's the bare-metal recovery tool Red Hat documents for RHEL, and it works the same on Rocky.
 
 The idea: ReaR builds a **rescue system** out of *your own running system*: your kernel, your drivers, your tools, plus a description of your disk layout. Boot that rescue image on a blank machine and one command recreates the disks, restores the backup, and reinstalls the boot loader.
 
 ```mermaid
 flowchart TB
-    subgraph MK["rear mkbackup (on the healthy system)"]
+    subgraph MK["rear mkbackup (old system)"]
         L["Save disk layout<br/>/var/lib/rear/layout/disklayout.conf"] --> R["Build rescue system<br/>from running kernel + tools"]
         R --> I["Make bootable ISO<br/>rear-HOST.iso"]
         I --> T["Archive the filesystems<br/>backup.tar.gz (NETFS)"]
     end
     T --> S[("NFS share / ISO / USB")]
     I --> S
-    subgraph RC["rear recover (on the replacement)"]
+    subgraph RC["rear recover (new system)"]
         B["Boot rescue ISO"] --> P["Recreate partitions, RAID,<br/>LUKS, LVM, filesystems"]
         P --> X["Restore backup.tar.gz"]
         X --> G["Reinstall boot loader,<br/>rebuild initramfs if needed"]
@@ -268,7 +277,7 @@ ReaR is a set of bash scripts, and `local.conf` is sourced by bash, so normal ba
 ```console
 $ sudo dnf install rear nfs-utils
 $ sudo rear -v mkbackup
-Relax-and-Recover 2.7 / Git
+Relax-and-Recover 2.9 / …
 Running rear mkbackup (PID 41123 date 2026-10-15 10:12:01)
 Using log file: /var/log/rear/rear-rocky-lab.log
 Running workflow mkbackup on the normal/original system
@@ -327,7 +336,7 @@ Step through a bare-metal restore onto a replacement machine:
 
 <div class="step" data-title="Boot the rescue ISO" markdown>
 
-Attach `rear-rocky-lab.iso` (virtual media through iDRAC/iLO/IPMI, a USB stick, or a VM's CD drive) and boot from it. Boot in the same mode as the original: UEFI if it was UEFI. With Secure Boot on, ReaR's ISO boots through the system's own signed shim, which ReaR detects automatically when `mokutil` reports Secure Boot enabled.
+Attach `rear-rocky-lab.iso` (virtual media through iDRAC/iLO/IPMI, a USB stick, or a VM's CD drive) and boot from it. Boot in the same mode as the original: UEFI if it was UEFI. With Secure Boot on, the ISO must boot through the system's own signed shim. ReaR 2.9 detects Secure Boot when it builds the image and uses the installed shim automatically (the `rear -v mkrescue` output mentions Secure Boot auto-configuration). Older ReaR versions need it set by hand: `SECURE_BOOT_BOOTLOADER=(/boot/efi/EFI/*/shimx64.efi)` in `local.conf`.
 
 The boot menu offers "Recover rocky-lab". Choose it.
 
@@ -349,7 +358,7 @@ RESCUE rocky-lab:~ #
 
 ```console
 RESCUE rocky-lab:~ # rear recover
-Relax-and-Recover 2.7 / Git
+Relax-and-Recover 2.9 / …
 Running rear recover (PID 712 date 2026-10-15 11:02:44)
 Using log file: /var/log/rear/rear-rocky-lab.log
 Running workflow recover within the ReaR rescue/recovery system
@@ -380,7 +389,12 @@ If the replacement disks *don't* match (different sizes, more than one candidate
 
 ReaR mounts the new filesystems under `/mnt/local` and extracts `backup.tar.gz` into them. Progress is shown as it goes.
 
-By default ReaR creates `/mnt/local/.autorelabel`, so SELinux relabels every file at first boot. That costs a few minutes of boot time and guarantees correct labels.
+By default ReaR creates `/mnt/local/.autorelabel`, so SELinux relabels every file at first boot. That costs a few minutes of boot time and makes every label match the policy.
+
+??? question "Under the hood: the labels a relabel destroys"
+    A relabel sets every file to what the policy's file-context rules say it should be. Rules you added with `semanage fcontext` live in the policy store under `/etc/selinux/`, which is in the backup, so they survive. Labels applied with **`chcon`** were never in any rule, so the relabel silently replaces them with the default for that path.
+
+    Find them *before* you need a restore: `sudo restorecon -Rnv /srv /var/www /opt` (`-n` changes nothing) lists every file whose current label differs from policy. Each line is either a bug or a missing `semanage fcontext` rule. This is also why a ReaR restore can make an application that "worked for years" fail with AVC denials on its first boot.
 
 </div>
 
@@ -492,6 +506,14 @@ $ rpm2cpio /tmp/pristine/chrony-*.rpm | cpio -i --to-stdout ./etc/chrony.conf 2>
 > server ntp1.lab iburst
 ```
 
+??? question "Under the hood: the config changes `rpm -Va` can't see"
+    `rpm -Va` compares files with what *the currently installed package* shipped. Two kinds of drift slip past it:
+
+    - **`.rpmnew` files.** When a package update ships a new default for a `%config(noreplace)` file you'd edited, RPM keeps your file and writes the new default beside it as `file.rpmnew`. Your file still matches nothing, so it shows in `rpm -Va`, but the *upstream change you never merged* is easy to miss. On a box that has been updated for years, `sudo find /etc -name '*.rpmnew' -o -name '*.rpmsave'` often turns up a dozen of them, and each is a question for the rebuild: did you mean to keep the old behaviour?
+    - **`%ghost` and generated files.** Files a package declares but doesn't ship content for (logs, some state files under `/etc`) are never content-checked.
+
+    `rpm -Va` also trusts the RPM database it reads from. For forensics after a compromise, verify against packages from a known-good source, not the suspect machine's own database.
+
 Those three lists (modified config files, unowned files, the diffs) are the specification for rebuilding the machine with kickstart or Ansible.
 
 ### Practice: inventory a server
@@ -507,7 +529,7 @@ bash-completion-1:2.11-16.el10.noarch
 chrony-4.6.1-1.el10.x86_64
 httpd-2.4.63-1.el10.x86_64
 mod_ssl-1:2.4.63-1.el10.x86_64
-rear-2.7-…el10.x86_64
+rear-2.9-…el10.x86_64
 …
 ```
 
@@ -764,7 +786,9 @@ The options are `-r` (convert to Rocky) and `-V` (verify all RPMs afterwards). P
 
     **Goal:** Destroy a VM's disk and bring it back with ReaR.
 
-    **You'll need:** a KVM host ([module 27](27-virtualization-kvm.md)) and a Rocky 10 VM called `drlab` (UEFI, default LVM layout). An NFS export the VM can write to: on the host or another VM, export `/srv/rear` read-write for the VM's network ([module 13](13-nfs-and-samba.md)). This lab destroys the VM's disk: use a throwaway VM.
+    **You'll need:** a KVM host ([module 27](27-virtualization-kvm.md)) and a Rocky 10 VM called `drlab` (UEFI, default LVM layout). An NFS export the VM can write to: on the host or another VM, export `/srv/rear` for the VM's network with `rw,no_root_squash` (ReaR writes as root; with root squashing it can't create its per-host directory) ([module 13](13-nfs-and-samba.md)).
+
+    **This lab destroys the VM's disk.** Use a throwaway VM, and keep a copy of its disk image so you can get back if the recovery fails (step 4 does this).
 
     1. In `drlab`, leave a marker so you can prove the restore worked:
 
@@ -792,19 +816,21 @@ The options are `-r` (convert to Rocky) and `-V` (verify all RPMs afterwards). P
         ```console
         $ sudo virsh destroy drlab
         $ sudo virsh domblklist drlab          # note the disk's path
+        $ sudo cp --sparse=always /var/lib/libvirt/images/drlab.qcow2 /var/lib/libvirt/images/drlab.qcow2.safe
         $ sudo qemu-img create -f qcow2 /var/lib/libvirt/images/drlab.qcow2 20G
         ```
 
-        Use the path `domblklist` printed; the command replaces the disk image with a blank one of the same size.
+        Use the path `domblklist` printed. The `cp` is your safety net; `qemu-img create` then replaces the disk image with a blank one of the same size.
 
     5. Attach the rescue ISO and boot from it:
 
         ```console
         $ sudo virsh change-media drlab sda /srv/rear/drlab/rear-drlab.iso --insert --config
-        $ sudo virsh start drlab --console
+        $ sudo virsh start drlab
+        $ virt-viewer drlab                    # or open the console in virt-manager
         ```
 
-        (If the VM has no CD drive, add one in virt-manager. Choose the CD in the firmware boot menu if the empty disk is tried first.)
+        (If the VM has no CD drive, add one in virt-manager; `virsh domblklist drlab` shows its target name if it isn't `sda`. Choose the CD in the firmware boot menu, reached with ++esc++, if the empty disk is tried first.)
 
     6. At the rescue prompt, log in as `root` and run `rear recover`. Answer `yes` to proceed. When it says `Finished 'recover'`, run `reboot`, eject the ISO (`sudo virsh change-media drlab sda --eject --config` on the host), and let it boot. The first boot relabels SELinux and reboots.
 
@@ -813,7 +839,7 @@ The options are `-r` (convert to Rocky) and `-V` (verify all RPMs afterwards). P
     ??? success "What just happened?"
         ReaR's rescue ISO contained your own kernel and tools plus `disklayout.conf`. `rear recover` recreated the GPT, the ESP, `/boot`, the LVM PV, VG and LVs with the original UUIDs, restored the tar archive into them, reinstalled the UEFI boot entry, and created `/.autorelabel` so every file got a correct SELinux label.
 
-    **Clean up:** `sudo rm -rf /srv/rear/drlab` on the NFS server; remove `rear` from the VM if you don't want it (`sudo dnf remove rear`), or delete the VM.
+    **Clean up:** `sudo rm -rf /srv/rear/drlab` on the NFS server and `sudo rm /var/lib/libvirt/images/drlab.qcow2.safe` on the host; remove `rear` from the VM if you don't want it (`sudo dnf remove rear`), or delete the VM. If the recovery failed, shut the VM off and copy `drlab.qcow2.safe` back over `drlab.qcow2` instead.
 
 !!! lab "Lab 3: Snapshot-consistent backup on loop devices"
 
