@@ -270,6 +270,22 @@ $ ls -l /usr/bin/passwd /etc/shadow
 
 The `s` in the owner's execute position is **setuid**. When any user runs this program, the kernel gives the new process the *file owner's* effective UID, which is root. `passwd` is carefully written to only let you change *your own* password (unless you are already root), and then it writes the file with root's power.
 
+```mermaid
+sequenceDiagram
+    participant B as bob's shell (uid 1001)
+    participant K as Kernel
+    participant P as passwd process
+    participant S as /etc/shadow (mode 000)
+    B->>K: exec /usr/bin/passwd
+    K->>K: file has setuid bit, owner is root
+    K->>P: start with real uid 1001, effective uid 0
+    P->>P: real uid says "bob": only allow bob's own entry
+    P->>S: write new hash (effective uid 0 passes the check)
+    P-->>B: exit, bob's shell is still uid 1001
+```
+
+The kernel keeps two identities for the process: the **real UID** (who started it, bob) and the **effective UID** (whose permissions are checked, root). `passwd` uses the real UID to decide *whose* password you may change, and the effective UID to actually write the file.
+
 setuid root programs are powerful and dangerous: any bug in one can give an attacker root. Rocky ships very few, and you should know which:
 
 ```console

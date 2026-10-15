@@ -573,7 +573,7 @@ Here is what happens, step by step, when alice logs in over SSH with a password.
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. Who is alice?" markdown>
+<div class="step" data-title="Who is alice?" markdown>
 
 sshd receives the user name `alice`. Before doing anything else it asks NSS whether she exists.
 
@@ -586,7 +586,7 @@ If NSS finds no such user, sshd still goes through the motions (so an attacker c
 
 </div>
 
-<div class="step" data-title="2. auth: prove it" markdown>
+<div class="step" data-title="auth: prove it" markdown>
 
 sshd starts PAM with the service name `sshd`, which loads `/etc/pam.d/sshd` and through it `password-auth`. The **auth** stack runs:
 
@@ -598,7 +598,7 @@ With SSH key login, sshd checks the key itself and skips the password part of th
 
 </div>
 
-<div class="step" data-title="3. account: allowed now?" markdown>
+<div class="step" data-title="account: allowed now?" markdown>
 
 A correct password is not enough. The **account** stack asks whether the account may log in *right now*:
 
@@ -610,7 +610,7 @@ A correct password is not enough. The **account** stack asks whether the account
 
 </div>
 
-<div class="step" data-title="4. session: set up" markdown>
+<div class="step" data-title="session: set up" markdown>
 
 The **session** stack prepares the environment:
 
@@ -621,7 +621,7 @@ The **session** stack prepares the environment:
 
 </div>
 
-<div class="step" data-title="5. Become alice" markdown>
+<div class="step" data-title="Become alice" markdown>
 
 sshd now switches the process to alice's identity: it sets her supplementary groups from NSS, then her GID, then her UID. Once it gives up root, it cannot get it back.
 
@@ -635,7 +635,7 @@ SESSION  UID USER  SEAT TTY
 
 </div>
 
-<div class="step" data-title="6. Logged" markdown>
+<div class="step" data-title="Logged" markdown>
 
 Every step is logged to the journal and `/var/log/secure`:
 
