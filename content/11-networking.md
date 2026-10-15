@@ -1,5 +1,6 @@
 ---
-title: Networking description: How Rocky Linux moves packets, from cables and MAC addresses to IP routing, DNS and NetworkManager, with a toolkit for fixing it when it breaks.
+title: Networking
+description: How Rocky Linux moves packets, from cables and MAC addresses to IP routing, DNS and NetworkManager, with a toolkit for fixing it when it breaks.
 ---
 
 # 11 · Networking
@@ -91,9 +92,8 @@ $ ip neigh
 $ ip -br link
 lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP>
 enp1s0           UP             52:54:00:3a:91:c2 <BROADCAST,MULTICAST,UP,LOWER_UP>
-$ ethtool -i enp1s0 | head -2
+$ ethtool -i enp1s0 | head -1
 driver: virtio_net
-version: 1.0.0
 ```
 
 </div>
@@ -228,7 +228,7 @@ $ ip route get 192.168.122.10
 
 The first goes through the gateway (`via`). The second is local, so it goes straight to the target. `ip route get` is the single most useful routing command: it answers "which interface and source address would be used?" for any destination, including tricky multi-homed servers.
 
-??? question "For the curious: there is more than one routing table"
+??? question "Under the hood: there is more than one routing table"
     `ip route` shows the **main** table, but the kernel actually consults a list of **routing policy rules** first, and each rule points at a table:
 
     ```console
@@ -283,6 +283,19 @@ fe80::5054:ff:fe9c:1e7a dev enp1s0 lladdr 52:54:00:9c:1e:7a router STALE
 ```
 
 `REACHABLE` was confirmed recently. `STALE` is cached but will be re-checked on next use. `FAILED` or `INCOMPLETE` means nobody answered, which usually means the target is down, on a different VLAN, or the IP is wrong. That is a powerful clue: if the gateway's entry is `FAILED`, the problem is below IP, not in DNS or a firewall far away.
+
+??? question "Under the hood: ARP flux on servers with two NICs"
+    By default Linux treats IP addresses as belonging to the *host*, not to an interface. If a machine has `10.0.0.5` on `enp1s0` and `10.0.0.6` on `enp2s0` in the same subnet, **both** NICs will answer ARP for **both** addresses. Switches then learn the "wrong" MAC for an IP, and traffic arrives on an unexpected card. This is called **ARP flux**, and it breaks load balancer health checks and asymmetric firewalls in confusing ways.
+
+    The behaviour is controlled by two sysctls, both `0` by default:
+
+    ```console
+    $ sysctl net.ipv4.conf.all.arp_ignore net.ipv4.conf.all.arp_announce
+    net.ipv4.conf.all.arp_ignore = 0
+    net.ipv4.conf.all.arp_announce = 0
+    ```
+
+    Setting `arp_ignore = 1` (answer only for addresses on the receiving interface) and `arp_announce = 2` (use the best local address as the ARP source) in a file under `/etc/sysctl.d/` makes each NIC answer only for its own IPs. Better still, avoid two NICs in the same subnet, or use a bond.
 
 ## NetworkManager: the one way to configure networking
 
@@ -340,6 +353,19 @@ Oct 15 09:12:41 web01 NetworkManager[903]: <info>  [1760519561.2151] dhcp4 (enp1
 ```
 
 The lease is renewed halfway through its lifetime. If the DHCP server disappears, the address keeps working until the lease expires, which is why DHCP outages often show up hours later.
+
+??? question "Under the hood: where NetworkManager keeps its state"
+    NetworkManager reads connection profiles from **three** directories, not one:
+
+    | Directory | What lives there |
+    |---|---|
+    | `/etc/NetworkManager/system-connections/` | Profiles you create. Persistent. |
+    | `/run/NetworkManager/system-connections/` | In-memory profiles, gone at reboot. The initramfs (`nm-initrd-generator`) writes here when the root filesystem needs the network, and so does `nmcli connection add … save no`. |
+    | `/usr/lib/NetworkManager/system-connections/` | Read-only profiles shipped by packages or image builders. |
+
+    That explains a classic puzzle: "`nmcli connection show` lists a profile, but there is no file for it in `/etc`." Check `/run`. `nmcli -f NAME,FILENAME connection show` prints the backing file of every profile.
+
+    DHCP leases from the internal client are saved in `/var/lib/NetworkManager/` (files named `internal-<uuid>-<device>.lease`), so after a reboot NetworkManager asks for the same address again. To see the configuration NetworkManager actually merged from `NetworkManager.conf` and its drop-in directories, run `NetworkManager --print-config`.
 
 ### Static vs DHCP
 
@@ -407,7 +433,7 @@ $ nmcli -f GENERAL.STATE,IP4.ADDRESS device show enp1s0
 
 ### Hostnames
 
-The **hostname** is the machine's own name. `hostnamectl` shows and sets it, and NetworkManager keeps it in `/etc/hostname`.
+The **hostname** is the machine's own name. `hostnamectl` shows and sets it (through the `systemd-hostnamed` service), and the static name is stored in `/etc/hostname`. If no static name is set, NetworkManager can take one from DHCP or reverse DNS.
 
 ```console
 $ hostnamectl
@@ -421,6 +447,7 @@ $ hostnamectl
          CPE OS Name: cpe:/o:rocky:rocky:10::baseos
               Kernel: Linux 6.12.0-124.8.1.el10_1.x86_64
         Architecture: x86-64
+…
 $ sudo hostnamectl set-hostname db01.example.lan
 ```
 
@@ -593,8 +620,10 @@ $ curl -sv -o /dev/null https://rockylinux.org 2>&1 | grep -E '^\* (SSL|TLS|Serv
 * TLSv1.3 (OUT), TLS handshake, Client hello (1):
 * TLSv1.3 (IN), TLS handshake, Server hello (2):
 …
-* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / x25519 / id-ecPublicKey
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / id-ecPublicKey
 ```
+
+`X25519MLKEM768` is the key exchange group: a **hybrid post-quantum** exchange (classic X25519 plus ML-KEM). Rocky 10.1's `DEFAULT` crypto policy prefers it when the server supports it; against an older server you will see plain `X25519`.
 
 </div>
 
@@ -651,7 +680,8 @@ $ cat /proc/net/bonding/bond0
 **VLAN.** A **VLAN** (virtual LAN) lets one physical cable carry several separate networks. Each frame carries a tag (a number from 1 to 4094), and the switch port must be configured as a "trunk" to pass tagged frames.
 
 ```console
-$ sudo nmcli connection add type vlan con-name vlan10 dev enp1s0 id 10 \
+$ sudo nmcli connection add type vlan con-name vlan10 ifname enp1s0.10 \
+    vlan.parent enp1s0 vlan.id 10 \
     ipv4.method manual ipv4.addresses 192.168.10.5/24
 $ ip -d link show enp1s0.10 | grep vlan
     vlan protocol 802.1Q id 10 <REORDER_HDR> …
@@ -735,6 +765,29 @@ listening on enp1s0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
 ```
 
 `[S]` is SYN, `[S.]` is SYN-ACK, `[.]` is ACK, `[P.]` is data. If you see your SYNs going out and nothing coming back, the problem is on the path or the remote side. If you see `[R]` (reset) come back, the remote host is reachable but nothing is listening on that port.
+
+??? question "Under the hood: the connection that works until it doesn't (MTU black holes)"
+    A nasty production failure: SSH logs in fine, but `ls` on a big directory hangs. `curl` gets the headers and then stalls. Small packets pass, large ones vanish.
+
+    The usual cause is a **path MTU black hole**. Somewhere on the path (a VPN, a tunnel, a cloud overlay) the MTU is smaller than 1500. A router there must tell your host "too big, use a smaller size" with an ICMP "fragmentation needed" message. If a firewall drops all ICMP, that message never arrives, and your host keeps sending full-size packets into the void. The TCP handshake works because SYN packets are tiny.
+
+    Prove it with a ping that forbids fragmentation (`-M do`) and a fixed size. 1472 bytes of data plus 28 bytes of headers is exactly 1500:
+
+    ```console
+    $ ping -c2 -W2 -M do -s 1472 10.8.0.7
+    PING 10.8.0.7 (10.8.0.7) 1472(1500) bytes of data.
+
+    --- 10.8.0.7 ping statistics ---
+    2 packets transmitted, 0 received, 100% packet loss, time 1023ms
+    $ ping -c2 -M do -s 1392 10.8.0.7
+    PING 10.8.0.7 (10.8.0.7) 1392(1420) bytes of data.
+    1400 bytes from 10.8.0.7: icmp_seq=1 ttl=61 time=12.1 ms
+    1400 bytes from 10.8.0.7: icmp_seq=2 ttl=61 time=11.9 ms
+    ```
+
+    Full-size packets die silently, smaller ones get through: that is the signature. Lower the size until it works to find the real path MTU (here 1420). `tracepath` reports the `pmtu` it discovers too, when the ICMP messages are not filtered.
+
+    Fixes, best first: let ICMP "fragmentation needed" through the firewalls on the path; set the right MTU on the connection (`nmcli connection modify <con> 802-3-ethernet.mtu 1420`); or clamp TCP MSS on the tunnel endpoint. Never "fix" it by blocking all ICMP harder.
 
 Follow the tree. It is the same order an experienced admin uses.
 
@@ -1114,6 +1167,7 @@ LISTEN 0      128             [::]:22           [::]:*     users:(("sshd",pid=10
 | Timeouts to one port only | Firewall drop, or SELinux port label | `firewall-cmd --list-all`; `semanage port -l` |
 | Lost SSH while changing the network | Re-applied the profile of the interface you were on | Use console access; `nmcli` changes with care; test on a second NIC |
 | Teaming config fails on Rocky 10 | `teamd` was removed | Use a bond (`type bond`) |
+| SSH logs in but large output hangs | Path MTU black hole (ICMP "fragmentation needed" filtered) | `ping -M do -s <size>` to find the MTU; fix the MTU or let that ICMP through |
 
 !!! pitfall "Ping is not a reachability test for services"
     Many networks block ICMP. A failed ping does not prove the host is down, and a working ping does not prove the service port is open. Test the real port with `curl -v telnet://host:port` or the actual client.

@@ -148,12 +148,22 @@ The second search returns nothing: no rule, so no access (unless a boolean adds 
     container
     ssh
     $ ls /etc/selinux/targeted/contexts/files/
-    file_contexts  file_contexts.bin  file_contexts.homedirs  file_contexts.local  file_contexts.subs  file_contexts.subs_dist  media
+    file_contexts  file_contexts.bin  file_contexts.homedirs  file_contexts.homedirs.bin  file_contexts.local  file_contexts.subs  file_contexts.subs_dist  media
     ```
 
     Run `seinfo` yourself: the policy has thousands of types and tens of thousands of allow rules. `file_contexts` is the shipped path-to-label database that `restorecon` and `matchpathcon` read; `file_contexts.local` is where your `semanage fcontext` rules end up. You never edit these files directly: `semanage` writes them and rebuilds the policy.
 
 **How does a process get its domain?** Through **type transitions**: rules that say "when a process in domain A executes a file of type B, the new process runs in domain C". systemd runs in `init_t`; when it executes `/usr/sbin/httpd` (type `httpd_exec_t`), the new process enters `httpd_t`. That is why starting a service by hand from your shell can behave differently from starting it with `systemctl`: from an unconfined shell, the transition may not happen.
+
+??? question "Under the hood: your own app is probably not confined at all"
+    The targeted policy only confines programs it has a policy for. So what happens when systemd starts *your* service, say `/opt/myapp/bin/myapp`? That binary has a generic type (`usr_t` under `/opt`, `bin_t` under `/usr/local/bin`). The policy has a catch-all transition for exactly this case: systemd executing a generic binary lands it in **`unconfined_service_t`**, a domain with almost no restrictions.
+
+    ```console
+    $ ps -eZ | grep myapp
+    system_u:system_r:unconfined_service_t:s0 4410 ?    00:00:02 myapp
+    ```
+
+    That is why third-party software "just works" under SELinux, and also why it gets no protection from it. Audit your servers for it: `ps -eZ | grep unconfined_service_t` lists every service running unconfined. To confine one, generate a starting policy with `sepolicy generate --init /opt/myapp/bin/myapp` (package `policycoreutils-devel`), which writes a `.te`, `.fc` and build script. Running it in permissive first and iterating on the denials is a project, not a quick fix, but for an internet-facing app it is worth it.
 
 ### What happens on every access
 
@@ -269,6 +279,11 @@ $ sudo semanage permissive -d httpd_t
 
 Everything else stays enforcing, and `httpd_t` denials are logged with `permissive=1` so you can collect them all in one go.
 
+??? question "Under the hood: why permissive mode logs each denial only once"
+    In enforcing mode, a denied access is denied (and usually logged) every time. In permissive mode, after logging a denial the kernel records that access in the AVC as allowed, so the *same* source, target, class and permission is not reported again. You get one line per distinct problem instead of a flood.
+
+    Two consequences. First, a permissive run gives you a compact, complete list of what the application needs, which is exactly the input `audit2allow` wants. Second, if you fix something and retest in permissive mode, an old denial will not reappear even if your fix did not work. Reloading the policy (for example `sudo semodule -R`) or a reboot clears the cache.
+
 !!! warning "Do not disable SELinux"
     Since Rocky 9, setting `SELINUX=disabled` in `/etc/selinux/config` is no longer the supported way to turn SELinux off; the supported way is the `selinux=0` kernel argument. Either way, disabling is almost always the wrong answer. While SELinux is disabled, new files get no labels, so turning it back on later forces a full **relabel** of every file at boot (`/.autorelabel`), which can take a long time on big filesystems. If you must, use permissive mode, and better still, a permissive domain.
 
@@ -336,6 +351,17 @@ SELinux fcontext                                   type               Context
 ```
 
 `-C` lists only your local customizations. The pattern `'/srv/site(/.*)?'` is a regular expression meaning "the directory and everything under it". Quote it, or the shell may mangle it.
+
+??? question "Under the hood: equivalence rules and what restorecon leaves alone"
+    If a new location should be labeled *exactly like* an existing one (a second web root, `/home` moved to `/data/home`), an **equivalence rule** is better than copying patterns. It tells the labeling database "treat this path as if it were that path", including every sub-rule underneath:
+
+    ```console
+    $ sudo semanage fcontext -a -e /var/www /srv/www
+    $ matchpathcon /srv/www/cgi-bin/app.cgi
+    /srv/www/cgi-bin/app.cgi	system_u:object_r:httpd_sys_script_exec_t:s0
+    ```
+
+    Two `restorecon` details that surprise people. By default it only fixes the **type** and leaves the SELinux user (`unconfined_u` vs `system_u`) alone; `restorecon -F` forces the whole context. And some types are **customizable** (listed in `/etc/selinux/targeted/contexts/customizable_types`): `restorecon` will not overwrite them without `-F`, because an admin presumably set them on purpose. To relabel an entire system at the next boot, run `sudo fixfiles -F onboot` (or `sudo touch /.autorelabel`) and reboot.
 
 Pick the type that matches what the service should do. For the web server: `httpd_sys_content_t` for read-only content, `httpd_sys_rw_content_t` for directories the app writes to (uploads, caches), `httpd_log_t` for logs. Find the types a policy offers with `man httpd_selinux` (install `selinux-policy-doc` for these per-service man pages).
 
@@ -423,7 +449,7 @@ type=SYSCALL msg=audit(1760522601.448:1021): arch=c000003e syscall=257 success=n
 type=AVC msg=audit(1760522601.448:1021): avc:  denied  { read } for  pid=1452 comm="httpd" name="page.html" dev="vda4" ino=3412290 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
 ```
 
-`-ts recent` means the last 10 minutes; `-ts today` and `-ts boot` also work. Add `-c httpd` to filter by command. Here is how to read the AVC line:
+`-ts recent` means the last 10 minutes; `-ts today` and `-ts boot` also work. Add `-c httpd` to filter by command, and `-i` to translate numbers into names (it decodes the hex `proctitle` into the real command line, `/usr/sbin/httpd -DFOREGROUND`). Here is how to read the AVC line:
 
 | Field | Value | Meaning |
 |---|---|---|
@@ -932,7 +958,7 @@ When something fails with "Permission denied" (or a service fails to start, or a
 
     ```bash
     sudo semanage permissive -d httpd_t
-    sudo rm /var/www/html/p.html
+    sudo rm /var/www/html/p.html /var/www/html/index.html
     sudo systemctl disable --now httpd
     ```
 

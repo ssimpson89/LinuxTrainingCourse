@@ -134,7 +134,7 @@ When a new packet arrives, firewalld checks **sources first**, then interfaces, 
 ```mermaid
 flowchart TB
     P["New inbound packet<br/>src 10.0.5.20, arrives on enp1s0"] --> S{"Does the source address<br/>match a zone's sources?"}
-    S -- "yes" --> SZ["Use that zone<br/>(most specific source wins)"]
+    S -- "yes" --> SZ["Use that zone"]
     S -- "no" --> I{"Is the incoming interface<br/>bound to a zone?"}
     I -- "yes" --> IZ["Use the interface's zone"]
     I -- "no" --> DZ["Use the default zone"]
@@ -176,6 +176,13 @@ Right. The source matches `trusted`, so that zone handles the packet and its tar
 
 </div>
 
+??? question "Under the hood: zone drifting, and why old answers on forums are wrong"
+    Before firewalld 1.0, a packet that matched a *source* zone but was not accepted there could "drift" on to the *interface* zone and be accepted by that zone's rules instead. A subnet you meant to restrict could still reach everything the `public` zone allowed. This was called **zone drifting** and was controlled by `AllowZoneDrifting=` in `firewalld.conf`.
+
+    firewalld 1.0 removed it. On Rocky 9 and 10 a packet is handled by **exactly one** zone, and if that zone does not allow it, it is rejected. If you copy a `firewalld.conf` from a Rocky 8 system or follow an old guide that sets `AllowZoneDrifting`, do not expect the old drifting behaviour: it is gone.
+
+    The consequence in practice: when you bind a source subnet to a zone, that subnet loses whatever the interface's zone allowed. If admins from `10.0.5.0/24` are moved to `internal` and `internal` does not list `ssh`, they can no longer SSH in. Check what a source will get with `firewall-cmd --zone=<z> --list-all` before you bind it.
+
 ## Services and ports
 
 You can open a raw port (`--add-port=8443/tcp`), but firewalld prefers **services**: named definitions that bundle one or more ports and helpers. A service name says *why* a port is open, which makes the config readable months later.
@@ -193,13 +200,13 @@ samba
   ports: 137/udp 138/udp 139/tcp 445/tcp
   protocols:
   source-ports:
-  modules: netbios_ns
+  modules:
   destination:
   includes:
   helpers: netbios-ns
 ```
 
-The built-in definitions live in `/usr/lib/firewalld/services/` as XML. Opening `samba` opens four ports and loads a helper, which is much better than remembering the port list.
+The built-in definitions live in `/usr/lib/firewalld/services/` as XML. Opening `samba` opens four ports and attaches the `netbios-ns` connection-tracking **helper** (kernel code that understands a protocol well enough to let its reply packets back in), which is much better than remembering the port list.
 
 ```console
 $ sudo firewall-cmd --add-service=https
@@ -281,11 +288,10 @@ There are two good workflows. Pick one and use it every time.
 To check whether runtime and permanent differ, compare them:
 
 ```console
-$ diff <(sudo firewall-cmd --list-all) <(sudo firewall-cmd --permanent --list-all)
-6c6
-<   services: cockpit dhcpv6-client http ssh
----
->   services: cockpit dhcpv6-client ssh
+$ sudo firewall-cmd --zone=public --list-services
+cockpit dhcpv6-client http ssh
+$ sudo firewall-cmd --permanent --zone=public --list-services
+cockpit dhcpv6-client ssh
 ```
 
 Here `http` is open *now* but will vanish at the next reload. That is the bug from this module's opening story.
@@ -316,6 +322,18 @@ LogDenied=off
 ```
 
 Want to reset a zone to the shipped default? Delete its file from `/etc/firewalld/zones/` and run `sudo firewall-cmd --reload`. Configuration management tools (Ansible's `firewalld` module, for example) simply drive the same `--permanent` interface or drop these XML files in place.
+
+??? question "Under the hood: reload, complete reload, and offline changes"
+    `firewall-cmd --reload` rebuilds firewalld's nftables table from the permanent config but keeps connection-tracking state, so established sessions (your SSH) survive. `firewall-cmd --complete-reload` also throws away that state. Established connections that are no longer allowed can be cut, which is why you should never reach for it over SSH.
+
+    When firewalld is **not running** (a kickstart `%post` script, an image build, a rescue shell), `firewall-cmd` cannot talk to the daemon. Use `firewall-offline-cmd` instead. It takes the same options and edits the permanent XML files directly:
+
+    ```console
+    $ sudo firewall-offline-cmd --zone=public --add-service=https
+    success
+    ```
+
+    And remember where interface zones really live: for NetworkManager-managed devices, `nmcli connection modify <con> connection.zone internal` writes `zone=internal` into the `[connection]` section of the keyfile. That is why the interface does not appear in `/etc/firewalld/zones/*.xml` and `--permanent --list-all` shows an empty `interfaces:` line.
 
 ??? question "For the curious: what does conntrack actually remember?"
     Install `conntrack-tools` and list the kernel's connection table. Each entry stores both directions of a flow, its state, and a timeout:
@@ -470,6 +488,29 @@ The parts are: an optional `family`, an optional `source`/`destination`, one ele
 
 !!! tip "Source zone or rich rule?"
     "Admins from 10.0.5.0/24 may reach PostgreSQL" works either way. If a subnet needs access to several services, binding the subnet to its own zone is cleaner. If it is one exception, a rich rule is fine.
+
+??? question "Under the hood: blocking 10,000 addresses without 10,000 rules"
+    Each rich rule becomes at least one nftables rule, and rules are checked one after another. A blocklist of thousands of addresses as rich rules makes every new connection slower and every `--reload` painfully long.
+
+    Use an **ipset** instead. firewalld turns it into an nftables **set**, a hash table the kernel checks in a single lookup no matter how many entries it holds:
+
+    ```console
+    $ sudo firewall-cmd --permanent --new-ipset=blocklist --type=hash:net
+    success
+    $ sudo firewall-cmd --permanent --ipset=blocklist --add-entries-from-file=/root/bad-nets.txt
+    success
+    $ sudo firewall-cmd --permanent --zone=drop --add-source=ipset:blocklist
+    success
+    $ sudo firewall-cmd --reload
+    success
+    $ sudo nft list set inet firewalld blocklist | head -4
+    table inet firewalld {
+    	set blocklist {
+    		type ipv4_addr
+    		flags interval
+    ```
+
+    Binding the ipset as a *source* of the `drop` zone means "anything from these networks is handled by `drop`", which silently discards it. The file holds one address or CIDR per line.
 
 ## Port forwarding and masquerading
 
@@ -673,7 +714,7 @@ If you want firewalld to stay the single gatekeeper, firewalld 2.x on Rocky 10 h
 StrictForwardPorts=yes
 ```
 
-With `StrictForwardPorts=yes`, published ports are blocked until you open them with firewalld forward-ports. It is off (`no`) by default because it changes how containers behave. Containers are covered in depth in [Containers from the Ground Up](18-containers.md).
+With `StrictForwardPorts=yes`, published ports are blocked until you open them with firewalld forward-ports. It is off (`no`) by default because it changes how containers behave. After enabling it, restart firewalld and test a published port from another machine: early Rocky 10.0 builds of netavark did not detect the setting. Containers are covered in depth in [Containers from the Ground Up](18-containers.md).
 
 <div class="quiz" data-answer="1" markdown>
 
@@ -902,7 +943,7 @@ Right. Publishing a port is itself a "please expose this" instruction. Bind it t
     rm -rf ~/fwlab
     ```
 
-    A reboot resets `ip_forward` to its configured value.
+    firewalld turned on `net.ipv4.ip_forward` for the masquerade but does not turn it off again. If it was `0` before the lab (and nothing else on the VM, such as rootful containers, needs it), run `sudo sysctl -w net.ipv4.ip_forward=0`, or simply reboot.
 
 ## Common pitfalls
 

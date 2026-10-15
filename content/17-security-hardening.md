@@ -175,7 +175,7 @@ $ sudo dnf upgrade --advisory=RLSA-2026:1234
 $ sudo dnf upgrade --security --sec-severity=Critical
 ```
 
-An updated library only protects you once programs using it are restarted, and a new kernel only once you reboot. `dnf needs-restarting` tells you what is still running old code:
+An updated library only protects you once programs using it are restarted, and a new kernel only once you reboot. `dnf needs-restarting` (from `dnf-plugins-core`, installed by default) tells you what is still running old code:
 
 ```console
 $ sudo dnf needs-restarting -r
@@ -231,7 +231,12 @@ NEXT                        LEFT     LAST PASSED UNIT                ACTIVATES
 Fri 2026-10-16 06:23:11 UTC 19h left -    -      dnf-automatic.timer dnf-automatic.service
 ```
 
-`dnf-automatic` does not reboot for you. Pair it with a maintenance window (or the `reboot` option in `automatic.conf` if your service can tolerate it) and monitor `needs-restarting -r`.
+By default `dnf-automatic` does not reboot. Pair it with a maintenance window (or the `reboot = when-needed` option in `automatic.conf` if your service can tolerate it) and monitor `needs-restarting -r`.
+
+??? question "Under the hood: four timers, and only one reads your settings"
+    The package ships four timer units: `dnf-automatic.timer`, `dnf-automatic-download.timer`, `dnf-automatic-install.timer` and `dnf-automatic-notifyonly.timer`. They all run the same program, but the three specialised ones pass command-line flags that **override** `download_updates` and `apply_updates` in `automatic.conf`. Only plain `dnf-automatic.timer` obeys the file.
+
+    So if a colleague enabled `dnf-automatic-install.timer`, updates are installed no matter what `apply_updates` says. Check which are active with `systemctl list-timers 'dnf-automatic*'`. The schedule (daily around 06:00 with a random delay) is in the timer unit; change it with `sudo systemctl edit dnf-automatic.timer`, not by editing the packaged file.
 
 ## SSH hardening
 
@@ -306,6 +311,17 @@ maxauthtries 3
 ```
 
 `sshd -T` prints the configuration sshd will actually use, after merging all files. It is the only reliable way to know which value won.
+
+??? question "Under the hood: Match blocks, and the new sshd-session process"
+    Plain `sshd -T` shows the settings for a connection that matches no `Match` block. If you use `Match Group contractors` or `Match Address 10.0.5.0/24` to give some users different rules, test the result for a specific connection with `-C`:
+
+    ```console
+    $ sudo sshd -T -C user=bob,host=laptop.example.lan,addr=10.0.5.20 | grep -E '^(passwordauthentication|allowtcpforwarding) '
+    passwordauthentication no
+    allowtcpforwarding no
+    ```
+
+    Rocky 10 ships OpenSSH 9.9, where the server is split in two. The listening `sshd` daemon only accepts connections, and each connection is handled by a separate **`sshd-session`** program. You will see it in `ps` and, importantly, in the journal: login and failure messages are now tagged `sshd-session[PID]` rather than `sshd[PID]`. Scripts, log alerts and fail2ban filters that match only `sshd` miss them. `journalctl -u sshd` still finds everything, because the unit is the same.
 
 !!! danger "Do not lock yourself out"
     Before disabling passwords, confirm key login works in a **new** terminal while your current session stays open. A reload does not drop existing sessions, so the old one is your safety net. On a remote server, know how to reach the console (hypervisor, cloud serial console, BMC) before you start.
@@ -387,7 +403,7 @@ Status for the jail: sshd
 |- Filter
 |  |- Currently failed:	1
 |  |- Total failed:	14
-|  `- Journal matches:	_SYSTEMD_UNIT=sshd.service + _COMM=sshd
+|  `- Journal matches:	…
 `- Actions
    |- Currently banned:	1
    |- Total banned:	2
@@ -421,7 +437,7 @@ The policy levels are:
 |---|---|
 | `DEFAULT` | Almost always. Secure settings that still talk to the modern world. |
 | `LEGACY` | You must talk to very old systems. Weakens everything; use only temporarily. |
-| `FUTURE` | You want stronger, forward-looking settings and can accept that some older peers will fail. |
+| `FUTURE` | You want stronger, forward-looking settings and can accept that many peers will fail. On Rocky 10.1 it allows **only** hybrid post-quantum key exchange, which most of the internet does not offer yet. Lab and isolated networks only. |
 | `FIPS` | Required by regulation, together with a FIPS-mode installation (see below). |
 
 You can also add **subpolicies** to adjust one aspect, written with a colon: `DEFAULT:NO-SHA1` or `DEFAULT:SHA1`. The available modules are in `/usr/share/crypto-policies/policies/modules/`. Prefer a narrow subpolicy over switching the whole machine to `LEGACY`.
@@ -435,15 +451,27 @@ to fully take place.
 $ sudo update-crypto-policies --set DEFAULT
 ```
 
-Note the message: running programs keep the old settings until restarted.
+Note the message: running programs keep the old settings until restarted. Switch back to `DEFAULT` right away on a lab VM: under `FUTURE` on Rocky 10.1, even `dnf` may fail to reach mirrors that do not offer post-quantum key exchange.
+
+??? question "Under the hood: what a policy really is"
+    A policy is a small text file of algorithm lists (`/usr/share/crypto-policies/policies/DEFAULT.pol`) plus optional subpolicy modules (`.pmod`). `update-crypto-policies` compiles them into one config snippet per library, in that library's own syntax, under `/etc/crypto-policies/back-ends/`. Each library is patched to read its snippet. For example, OpenSSH's `/etc/ssh/ssh_config.d/50-redhat.conf` includes `/etc/crypto-policies/back-ends/openssh.config`.
+
+    That design gives you two escape hatches that are much better than `LEGACY`:
+
+    - A **custom subpolicy**: write `/etc/crypto-policies/policies/modules/MYCOMPANY.pmod` (for example `cipher@SSH = -AES-128-CBC`) and apply `DEFAULT:MYCOMPANY`.
+    - A **per-application override**: an application config that sets its own algorithms explicitly wins over the back-end file. Use it sparingly, because it silently stops following future policy updates.
+
+    `update-crypto-policies --check` tells you whether the generated back-ends still match the configured policy (someone may have hand-edited them).
 
 !!! version "Rocky 10: post-quantum cryptography and FIPS"
-    Large future quantum computers could break today's key exchange algorithms, and an attacker can record traffic now to decrypt it later. **Post-quantum cryptography** (PQC) uses new algorithms, such as **ML-KEM** for key exchange, that resist this. In Rocky 10.0 PQC was a technology preview (`DEFAULT:TEST-PQ`). In **Rocky 10.1 and later, the `DEFAULT` policy enables and prefers post-quantum hybrid key exchange** for TLS and SSH where both sides support it. You can see it in OpenSSH:
+    Large future quantum computers could break today's key exchange algorithms, and an attacker can record traffic now to decrypt it later. **Post-quantum cryptography** (PQC) uses new algorithms, such as **ML-KEM** for key exchange, that resist this. In Rocky 10.0 PQC was a preview you had to switch on yourself. In **Rocky 10.1 and later, the predefined policies (including `DEFAULT`) enable and prefer hybrid ML-KEM key exchange** for TLS and SSH where both sides support it. If an old peer chokes on it, the `NO-PQ` subpolicy turns it off (`DEFAULT:NO-PQ`). You can see the preference in the SSH client's effective settings:
 
     ```console
-    $ ssh -Q kex | grep -i mlkem
-    mlkem768x25519-sha256
+    $ ssh -G localhost | grep '^kexalgorithms'
+    kexalgorithms mlkem768x25519-sha256,curve25519-sha256,curve25519-sha256@libssh.org,…
     ```
+
+    The first entry is the hybrid post-quantum exchange, offered first. (`ssh -Q kex` only lists what the binary *supports*, not what the policy *allows*.)
 
     **FIPS mode** also changed: on Rocky 10, the `fips-mode-setup` tool is gone and switching an installed system to FIPS mode is not supported. Enable FIPS by booting the installer with the `fips=1` kernel argument. Check with `cat /proc/sys/crypto/fips_enabled` (`1` means FIPS mode). Setting the `FIPS` crypto policy alone does not make a system FIPS-compliant.
 
@@ -508,7 +536,7 @@ $ sudo aureport --login --failed | tail -3
 ```
 
 !!! warning "Immutable audit rules"
-    Many hardening guides end the rules with `-e 2`, which makes the loaded rules **immutable** until the next reboot: nobody, not even root, can change or delete them. That is the point (an intruder cannot quietly turn auditing off), but it also means your own fixes need a reboot. Also note that `auditd` should be restarted with `sudo service auditd restart`, not `systemctl restart`, which the unit refuses by design.
+    Many hardening guides end the rules with `-e 2`, which makes the loaded rules **immutable** until the next reboot: nobody, not even root, can change or delete them. That is the point (an intruder cannot quietly turn auditing off), but it also means your own fixes need a reboot. Also note that on Red Hat family systems `auditd.service` has historically set `RefuseManualStop=yes`, so `systemctl restart auditd` is refused and `sudo service auditd restart` is the supported way (check with `systemctl cat auditd | grep Refuse`). You rarely need it: `augenrules --load` reloads rules without restarting the daemon.
 
 <div class="quiz" data-answer="3" markdown>
 
@@ -523,6 +551,18 @@ Right. `uid` and `euid` are `0` (root) after `sudo`, but `auid` was set at login
 
 </div>
 
+??? question "Under the hood: who sets the auid, and why services have none"
+    The `auid` is stored per process in `/proc/<pid>/loginuid`. It is written exactly once, at login, by the `pam_loginuid` PAM module (it is in the `sshd` and `login` PAM stacks), and child processes inherit it. With the default kernel settings it cannot be changed afterwards, which is what makes it trustworthy.
+
+    ```console
+    $ cat /proc/self/loginuid; echo
+    1000
+    $ sudo cat /proc/1/loginuid; echo
+    4294967295
+    ```
+
+    `4294967295` is `-1` as an unsigned number, shown by `ausearch -i` as `unset`. Services started by systemd at boot never went through a login, so their `auid` is unset. That is why the rule above filters on `auid>=1000 -F auid!=unset`: it captures root commands typed by *people* and skips the thousands of commands that daemons and timers run.
+
 ## File integrity with AIDE
 
 If an attacker replaces `/usr/bin/ssh` with a password-stealing copy, how would you notice? **AIDE** (Advanced Intrusion Detection Environment) takes a **baseline**: checksums, permissions, owners and SELinux labels of important files. Later it compares the system against that baseline and reports every difference.
@@ -530,8 +570,8 @@ If an attacker replaces `/usr/bin/ssh` with a password-stealing copy, how would 
 ```console
 $ sudo dnf install -y aide
 $ sudo aide --init
-…
-New AIDE database written to /var/lib/aide/aide.db.new.gz
+Start timestamp: 2026-10-15 11:40:02 +0000 (AIDE 0.18.6)
+AIDE initialized database at /var/lib/aide/aide.db.new.gz
 …
 $ sudo mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
 $ sudo aide --check
@@ -565,10 +605,10 @@ $ sudo dnf install -y openscap-scanner scap-security-guide
 $ ls /usr/share/xml/scap/ssg/content/
 ```
 
-The content is a **datastream** file named after the distribution and version, such as `ssg-<product>-ds.xml`. Use the one matching your release, and list its **profiles** (sets of rules):
+The content is a **datastream** file named after the distribution and version: `ssg-<product>-ds.xml`. Rocky's builds use an `rl` tag (Rocky 9 has `ssg-rl9-ds.xml`), so on Rocky 10 look for `ssg-rl10-ds.xml`. Use the file that matches your release, and list its **profiles** (sets of rules):
 
 ```console
-$ DS=/usr/share/xml/scap/ssg/content/ssg-<product>-ds.xml    # use the file you found above
+$ DS=/usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml    # use the file you found above
 $ oscap info --profiles "$DS"
 xccdf_org.ssgproject.content_profile_cis_server_l1:CIS … Benchmark for Level 1 - Server
 xccdf_org.ssgproject.content_profile_cis:CIS … Benchmark for Level 2 - Server
@@ -595,6 +635,11 @@ Result  pass
 ```
 
 Open the HTML report in a browser: every rule has a description, a rationale, the result, and remediation steps. `oscap` exits with code `2` when some rules fail, which is normal for a first scan.
+
+??? question "Under the hood: why a scan says notapplicable for everything"
+    Every rule in a datastream carries a **CPE** platform check: "this rule applies to Red Hat Enterprise Linux 10", for example. `oscap` first asks "is this machine that platform?" by looking at files such as `/etc/os-release`. If you scan a Rocky machine with the RHEL datastream (`ssg-rhel10-ds.xml`), many rules come back `notapplicable` instead of `pass` or `fail`, and the report looks oddly clean. It is a common "OpenSCAP is broken" report on the Rocky forums.
+
+    The fix is to use the datastream built for your distribution. If you see a wall of `notapplicable`, check which file you passed. The datastream is just XML: `oscap info "$DS"` shows its product, version and generation date, which also tells you whether your content is older than the benchmark revision an auditor is asking about.
 
 OpenSCAP can also *generate* fixes as a Bash script or Ansible playbook:
 
@@ -840,9 +885,11 @@ maxauthtries 3
     1. Create a key for yourself and authorize it on this same machine:
 
         ```bash
+        mkdir -p -m 700 ~/.ssh
         ssh-keygen -t ed25519 -N '' -f ~/.ssh/lab_ed25519 -C "lab key"
         cat ~/.ssh/lab_ed25519.pub >> ~/.ssh/authorized_keys
         chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
+        restorecon -R ~/.ssh
         ssh -i ~/.ssh/lab_ed25519 -o StrictHostKeyChecking=accept-new localhost whoami
         ```
 
@@ -947,23 +994,26 @@ maxauthtries 3
         sudo mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
         ```
 
-    2. Simulate tampering: change a config file, its permissions, and its SELinux label:
+    2. Simulate tampering: change a file's content, another file's permissions and SELinux label, and drop a new file into `/etc`:
 
         ```bash
         sudo cp -a /etc/hosts /root/hosts.bak
         echo "203.0.113.66 updates.example.com" | sudo tee -a /etc/hosts
-        sudo chmod 666 /etc/issue
+        sudo chmod 666 /etc/motd
         sudo chcon -t user_home_t /etc/motd
+        sudo touch /etc/lab-dropped-file
         ```
 
-    3. Check:
+    3. Check once, save the report, and read it:
 
         ```bash
-        sudo aide --check | sed -n '/Summary/,/^$/p;/Changed entries/,/^$/p'
-        sudo aide --check | grep -A8 'File: /etc/issue'
+        sudo aide --check > /tmp/aide-report.txt; echo "exit: $?"
+        sed -n '/^Summary/,/^$/p' /tmp/aide-report.txt
+        grep -E ': /etc/(hosts|motd|lab-dropped-file)$' /tmp/aide-report.txt
+        grep -A6 'File: /etc/motd' /tmp/aide-report.txt
         ```
 
-    **Check your work:** AIDE reports changed entries for `/etc/hosts` (content and size), `/etc/issue` (permissions) and `/etc/motd` (SELinux context). `aide --check` exits with a non-zero status.
+    **Check your work:** the summary shows at least 1 added and 2 changed entries. `/etc/lab-dropped-file` is listed as added, `/etc/hosts` as changed (size and checksum), and the detail section for `/etc/motd` shows the old and new permissions and SELinux context. The exit status is non-zero (AIDE uses it as a bit mask of what kind of differences it found).
 
     ??? success "What just happened?"
         AIDE compared checksums, metadata and labels against the baseline. A real attacker with root could also update `/var/lib/aide/aide.db.gz`, which is why production setups keep a copy of the baseline off the host.
@@ -972,9 +1022,9 @@ maxauthtries 3
 
     ```bash
     sudo cp -a /root/hosts.bak /etc/hosts && sudo rm /root/hosts.bak
-    sudo chmod 644 /etc/issue
+    sudo chmod 644 /etc/motd
     sudo restorecon -v /etc/motd
-    sudo rm -f /var/lib/aide/aide.db.gz
+    sudo rm -f /etc/lab-dropped-file /tmp/aide-report.txt /var/lib/aide/aide.db.gz
     ```
 
 !!! lab "Lab 5: Scan against a CIS profile"
@@ -988,7 +1038,7 @@ maxauthtries 3
         ```bash
         sudo dnf install -y openscap-scanner scap-security-guide
         ls /usr/share/xml/scap/ssg/content/
-        DS=$(ls /usr/share/xml/scap/ssg/content/ssg-*-ds.xml | head -1); echo "$DS"
+        DS=$(ls /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml /usr/share/xml/scap/ssg/content/ssg-rhel10-ds.xml 2>/dev/null | head -1); echo "$DS"
         oscap info --profiles "$DS"
         ```
 
