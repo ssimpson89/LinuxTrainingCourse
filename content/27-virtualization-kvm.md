@@ -72,6 +72,20 @@ $ ps -o pid,user,cmd -C qemu-kvm | cut -c1-90
 
 The key insight: **a VM is just a process**. `top` shows it, cgroups limit it, SELinux confines it, `kill` ends it (please don't). Everything you learned in the core track about processes ([module 06](06-processes-and-signals.md)) applies.
 
+??? question "Under the hood: each vCPU is a host thread you can see"
+    Inside the `qemu-kvm` process, every virtual CPU is its own host thread. libvirt starts QEMU with `debug-threads=on`, so the threads carry readable names:
+
+    ```console
+    $ ps -T -o spid,comm,psr,pcpu -p $(pgrep -f 'guest=web1')
+       SPID COMMAND         PSR %CPU
+       4211 qemu-kvm          3  0.4
+       4230 CPU 0/KVM         2 11.8
+       4231 CPU 1/KVM         5  9.1
+    …
+    ```
+
+    `PSR` is the host CPU each thread last ran on. A guest that is "slow for no reason" often turns out to be a vCPU thread competing with something else on the host, which `top -H` shows at a glance. The guest's RAM is ordinary anonymous memory of this process, which is why the host's OOM killer can kill a VM ([module 25](25-memory-deep-dive.md)), and why `systemd-cgls` shows each VM in its own scope under `machine.slice`.
+
 ## How hardware virtualization works
 
 The guest kernel believes it owns the machine. It wants to write CPU control registers, program interrupt controllers and talk to disks. If it really did those things, it would crash the host. So something must catch those privileged actions and fake them.
@@ -97,6 +111,16 @@ sequenceDiagram
 ```
 
 Every VM exit costs time (from hundreds of nanoseconds to microseconds). A fast VM is one that exits rarely. That's the whole reason **virtio** devices exist, as you'll see below.
+
+??? question "Under the hood: count the VM exits yourself"
+    You don't have to take exits on faith. The kernel has tracepoints for every exit, and `perf` (package `perf`) can summarise them live per exit reason:
+
+    ```console
+    $ sudo dnf install -y perf
+    $ sudo perf kvm stat live
+    ```
+
+    Leave it running while the guest is idle, then while it does disk or network I/O. Idle guests mostly show `HLT` exits (the guest's idle loop). A guest hammering an emulated device shows a storm of `IO_INSTRUCTION` or `EPT_MISCONFIG` (memory-mapped I/O) exits. When someone says "the VM is slow", a sudden exit storm is hard evidence that the bottleneck is device emulation, not the guest's own code. Press `++ctrl+c++` to stop.
 
 Memory works similarly. The guest has its own page tables mapping guest-virtual to guest-physical addresses. **EPT/NPT** adds a second table in hardware mapping guest-physical to host-physical, so the CPU does both lookups itself without the hypervisor intervening on every page table change.
 
@@ -217,7 +241,7 @@ For years libvirt ran as one big daemon, **libvirtd**, which handled VMs, networ
 You rarely need to think about this, except: guides on the internet that say `systemctl restart libvirtd` are out of date for Rocky 10. Restart the specific daemon (`virtqemud`, `virtnetworkd`) instead. Logs are in the journal: `journalctl -u virtqemud`.
 
 !!! version "Rocky 9 vs 10"
-    Rocky 9 already used modular daemons on fresh installs, but hosts upgraded from older releases might still run monolithic `libvirtd`. The virt-manager desktop GUI is still available on Rocky 9, but Rocky's own documentation notes it is not in Rocky 10. Use Cockpit on the host, or run virt-manager on a separate Linux workstation and connect remotely (see the end of this module).
+    Rocky 9 already used modular daemons on fresh installs, but hosts upgraded from older releases might still run monolithic `libvirtd`. The virt-manager desktop GUI is a supported AppStream package on Rocky 9. In Rocky 10 (following RHEL 10) it was dropped from the supported set: Rocky's documentation says to use Cockpit instead. See "Graphical management" at the end of this module for your options.
 
 ### system vs session: two separate worlds
 
@@ -289,11 +313,14 @@ Key options:
 | Option | Meaning |
 |---|---|
 | `--import` | The disk already has an OS; skip the installer and just boot it |
-| `--osinfo linux2022` | Which OS profile to use for sensible defaults. `virt-install --osinfo list` shows the IDs your system knows; use a `rocky` ID if one matches |
+| `--osinfo linux2022` | Which OS profile to use for sensible defaults (virtio devices, memory). `linux2022` is a generic "modern Linux" profile that every Rocky 10 host knows. `osinfo-query os \| grep -i rocky` shows whether your osinfo-db has a Rocky-specific ID you'd rather use |
 | `--cpu host-passthrough` | Give the guest the host's real CPU model (see the CPU section) |
 | `--cloud-init user-data=` | Build a small config ISO with your user-data and attach it for the first boot |
 | `--graphics none` | No graphical display; use the serial console |
 | `--noautoconsole` | Return to the shell instead of attaching to the console |
+
+!!! tip "Why `--osinfo` isn't optional"
+    Since virt-install 4.0, it refuses to create a VM when it can't tell what OS is going in, with an error asking for `--osinfo`. With `--import` there is no installer to inspect, so you must name one. The guessing game used to give silently bad defaults (an IDE disk, an e1000 NIC, too little RAM); now it fails loudly instead. `osinfo-query os` lists every ID.
 
 After 20 to 40 seconds the VM is up. Find its address and log in:
 
@@ -407,6 +434,23 @@ Everything libvirt knows about a VM is in its XML. Tools like `virt-install` and
 
 Always change XML with `virsh edit` (which validates it), never by editing `/etc/libvirt/qemu/web1.xml` directly: libvirt doesn't re-read that file, and the next change from libvirt overwrites yours. Most changes take effect on the next full power off and start, not on a reboot from inside the guest.
 
+??? question "Under the hood: three copies of a VM's truth, and the real QEMU command line"
+    A running VM has three descriptions on disk, and support engineers check all three:
+
+    | File | What it is |
+    |---|---|
+    | `/etc/libvirt/qemu/web1.xml` | The **persistent** definition: what the VM will be at its next cold start |
+    | `/run/libvirt/qemu/web1.xml` | The **live** status XML: what is running right now, including hot-plugged devices and runtime details |
+    | `/var/log/libvirt/qemu/web1.log` | The exact **QEMU command line** libvirt ran at each start, plus QEMU's own errors |
+
+    `virsh dumpxml web1` shows the live view; `virsh dumpxml --inactive web1` shows the persistent one. When they differ, a change was made with `--live` only, or a `--config` change is waiting for the next power cycle. That gap is behind many "I changed it but nothing happened" tickets.
+
+    When a VM refuses to start, read the end of the QEMU log first: it holds the error QEMU printed before it exited, which `virsh start` often summarises unhelpfully.
+
+    ```console
+    $ sudo tail -n 3 /var/log/libvirt/qemu/web1.log
+    ```
+
 ## Storage: pools, volumes and qcow2
 
 libvirt groups disk images into **storage pools** (a directory, an LVM volume group, an iSCSI target, a Ceph pool…) that contain **volumes**. The default pool is the directory `/var/lib/libvirt/images`, which already has the right SELinux label (`virt_image_t`).
@@ -443,7 +487,7 @@ flowchart TB
 Three VMs, one base, a few hundred megabytes of extra disk each. That's how you build lab clusters cheaply.
 
 ```console
-$ qemu-img info /var/lib/libvirt/images/web1.qcow2
+$ sudo qemu-img info -U /var/lib/libvirt/images/web1.qcow2
 image: /var/lib/libvirt/images/web1.qcow2
 file format: qcow2
 virtual size: 20 GiB (21474836480 bytes)
@@ -459,24 +503,26 @@ Format specific information:
     corrupt: false
     extended l2: false
 …
-$ qemu-img info --backing-chain /var/lib/libvirt/images/web1.qcow2 | grep -E '^image|disk size'
+$ sudo qemu-img info -U --backing-chain /var/lib/libvirt/images/web1.qcow2 | grep -E '^image|disk size'
 image: /var/lib/libvirt/images/web1.qcow2
 disk size: 1.12 GiB
 image: /var/lib/libvirt/images/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2
 disk size: 549 MiB
 ```
 
-"virtual size" is what the guest sees; "disk size" is what the file really uses on the host.
+"virtual size" is what the guest sees; "disk size" is what the file really uses on the host. The `-U` (`--force-share`) flag is needed because `web1` is running: QEMU holds a lock on images in use, and without `-U` even a read-only `info` fails with `Failed to get shared "write" lock`. That lock is a safety feature, so only use `-U` for reading.
 
-Other `qemu-img` jobs:
+??? example "Other `qemu-img` jobs: create, flatten, convert, resize, check"
 
-```console
-$ qemu-img create -f qcow2 data.qcow2 50G                  # empty thin disk
-$ qemu-img convert -O qcow2 web1.qcow2 web1-flat.qcow2     # flatten: merge the chain into one standalone file
-$ qemu-img convert -O raw disk.vmdk disk.raw               # import from VMware
-$ qemu-img resize web1.qcow2 +10G                          # grow (VM off; then grow the partition in the guest)
-$ qemu-img check web1.qcow2                                # consistency check (VM off)
-```
+    ```console
+    $ qemu-img create -f qcow2 data.qcow2 50G                  # empty thin disk
+    $ qemu-img convert -O qcow2 web1.qcow2 web1-flat.qcow2     # flatten: merge the chain into one standalone file
+    $ qemu-img convert -O raw disk.vmdk disk.raw               # import from VMware
+    $ qemu-img resize web1.qcow2 +10G                          # grow (VM off; then grow the partition in the guest)
+    $ qemu-img check web1.qcow2                                # consistency check (VM off)
+    ```
+
+    Never run `resize`, `check -r` or `convert` on an image a running VM has open. QEMU holds a lock on images in use, so recent `qemu-img` versions refuse with a "Failed to get write lock" error. Only use `-U` for read-only `info`.
 
 !!! danger "Never modify a backing file"
     Every overlay depends on the base image's exact blocks. If you boot the base image itself, or write to it, all overlays built on it are silently corrupted. Make base images read-only (`chmod 444`) and never attach them to a VM directly.
@@ -587,25 +633,25 @@ QEMU can emulate real hardware like an Intel e1000 NIC or an IDE disk. The guest
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. Guest queues work" markdown>
+<div class="step" data-title="Guest queues work" markdown>
 
 The guest's `virtio_net` driver writes descriptors for 32 outgoing packets into the transmit virtqueue, a ring buffer in guest memory that the host can also read. No exits yet.
 
 </div>
 
-<div class="step" data-title="2. One kick" markdown>
+<div class="step" data-title="One kick" markdown>
 
 The driver writes to a notification register: one VM exit for the whole batch. With `vhost-net` (default on Rocky), that notification goes straight to a host kernel thread, not up to QEMU in user space.
 
 </div>
 
-<div class="step" data-title="3. Host does the I/O" markdown>
+<div class="step" data-title="Host does the I/O" markdown>
 
 The `vhost` thread reads the 32 packets from guest memory and writes them to the tap device `vnet0`, which delivers them to the bridge. No copies through QEMU.
 
 </div>
 
-<div class="step" data-title="4. One interrupt back" markdown>
+<div class="step" data-title="One interrupt back" markdown>
 
 The host marks the descriptors as used and injects one interrupt into the guest. The guest frees the buffers. Compare that to dozens of exits per packet with an emulated NIC.
 
@@ -763,31 +809,31 @@ Pair `cache='none'` with `io='native'` for the lowest overhead on local disks.
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. Prepare" markdown>
+<div class="step" data-title="Prepare" markdown>
 
 libvirt on the source connects to libvirt on the destination (usually over SSH: `qemu+ssh://host2/system`). The destination starts an empty QEMU process with the same virtual hardware, waiting for state.
 
 </div>
 
-<div class="step" data-title="2. Copy memory while running" markdown>
+<div class="step" data-title="Copy memory while running" markdown>
 
 The source copies all guest RAM to the destination while the guest keeps running. KVM tracks which pages the guest writes to (**dirty page tracking**).
 
 </div>
 
-<div class="step" data-title="3. Re-copy dirty pages" markdown>
+<div class="step" data-title="Re-copy dirty pages" markdown>
 
 Pages the guest changed during the copy are sent again. Each round should be smaller than the last. This is **pre-copy** migration. A guest that writes memory faster than the network can send it never converges; libvirt can then throttle its vCPUs (`--auto-converge`) or switch to post-copy.
 
 </div>
 
-<div class="step" data-title="4. Stop and copy" markdown>
+<div class="step" data-title="Stop and copy" markdown>
 
 When the remaining dirty set is small, the source pauses the guest, sends the last pages and the CPU and device state. This pause is the **downtime**, usually tens to hundreds of milliseconds.
 
 </div>
 
-<div class="step" data-title="5. Resume on the destination" markdown>
+<div class="step" data-title="Resume on the destination" markdown>
 
 The destination resumes the guest. It announces its MAC address on the new host's network so switches learn the new port. The source QEMU exits. TCP connections inside the guest survive.
 
@@ -813,13 +859,20 @@ $ sudo firewall-cmd --permanent --add-service=cockpit && sudo firewall-cmd --rel
 
 Browse to `https://<host>:9090` and log in with a local account that has sudo rights.
 
-**virt-manager** is a desktop GUI. It isn't in Rocky 10, but it runs fine on another Linux desktop (Fedora, or a Rocky 9 workstation) and connects to your Rocky 10 host over SSH, using the same libvirt API:
+**virt-manager** is a desktop GUI. It isn't in Rocky 10's AppStream or BaseOS. Two ways to still use it:
 
-```console
-$ virt-manager -c qemu+ssh://alex@kvmhost.example.com/system
-```
+- **Remotely (recommended).** Run it on another Linux desktop (Fedora, or a Rocky 9 workstation) and connect to your Rocky 10 host over SSH, using the same libvirt API:
 
-The same URI works with `virsh -c` from any machine, which is handy for scripts.
+    ```console
+    $ virt-manager -c qemu+ssh://alex@kvmhost.example.com/system
+    ```
+
+- **From CRB, unsupported.** The `virt-manager` package is still built from the same source as `virt-install`, and the noarch RPM appears in Rocky 10's **CRB** (CodeReady Builder) repository, which carries build dependencies with no support promise. `sudo dnf --enablerepo=crb install virt-manager` works on a desktop install today, but treat it as "may vanish in a point release". Run `dnf --enablerepo=crb info virt-manager` first to see whether your release still has it.
+
+The same `qemu+ssh://` URI works with `virsh -c` from any machine, which is handy for scripts.
+
+??? question "Under the hood: what a remote `qemu+ssh://` connection really does"
+    There is no libvirt network port to open. The client runs `ssh user@host` and, on the far side, starts a small helper (`virt-ssh-helper` on current libvirt) that connects to the local libvirt UNIX socket in `/run/libvirt/`. Your SSH session *is* the transport. So the remote user needs SSH access plus membership in the `libvirt` group (or polkit rules) on the host, and nothing else. If remote connections hang, test the pieces separately: `ssh host true`, then on the host `virsh -c qemu:///system list` as that same user.
 
 ## Practice
 
@@ -860,9 +913,9 @@ Virtualization:                       VT-x
 
 </div>
 
-<div class="task" data-expect="qemu-img info /var/lib/libvirt/images/web1.qcow2" data-match="^(sudo )?qemu-img info (--backing-chain )?/var/lib/libvirt/images/web1\.qcow2$" data-hint="qemu-img info followed by the full path /var/lib/libvirt/images/web1.qcow2." markdown>
+<div class="task" data-expect="qemu-img info -U /var/lib/libvirt/images/web1.qcow2" data-match="^(sudo )?qemu-img info( (-U|--force-share|--backing-chain))* /var/lib/libvirt/images/web1\.qcow2$" data-hint="qemu-img info -U followed by the full path /var/lib/libvirt/images/web1.qcow2 (-U because web1 is running)." markdown>
 
-**Step 4.** Show the format, sizes and backing file of `/var/lib/libvirt/images/web1.qcow2`.
+**Step 4.** Show the format, sizes and backing file of `/var/lib/libvirt/images/web1.qcow2`. Remember that web1 is running.
 
 ```text
 image: /var/lib/libvirt/images/web1.qcow2
@@ -1015,7 +1068,7 @@ Domain 'web1' is being shutdown
     2. Compare virtual and real sizes:
 
         ```bash
-        sudo qemu-img info --backing-chain /var/lib/libvirt/images/node1.qcow2 | grep -E '^image|size'
+        sudo qemu-img info -U --backing-chain /var/lib/libvirt/images/node1.qcow2 | grep -E '^image|size'
         sudo du -h /var/lib/libvirt/images/*.qcow2
         ```
 
@@ -1141,7 +1194,7 @@ Domain 'web1' is being shutdown
 | `virsh domifaddr <vm>` | Show the VM's IP addresses |
 | `virsh undefine <vm> --remove-all-storage` | Delete a VM and its disks |
 | `qemu-img create -f qcow2 -F qcow2 -b BASE NEW` | Create an overlay on a backing file |
-| `qemu-img info --backing-chain FILE` | Show format, sizes and backing chain |
+| `qemu-img info -U --backing-chain FILE` | Show format, sizes and backing chain |
 | `qemu-img convert -O qcow2 IN OUT` | Convert or flatten an image |
 | `virsh net-list --all`, `net-define`, `net-start` | Manage virtual networks |
 | `virsh net-dhcp-leases default` | Show DHCP leases on a network |

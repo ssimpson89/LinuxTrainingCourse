@@ -271,35 +271,37 @@ Starting cluster on hosts: 'node1', 'node2'...
 Enabling cluster on hosts: 'node1', 'node2'...
 ```
 
-`pcs` wrote `/etc/corosync/corosync.conf` on both nodes. It's short, and worth reading once:
+`pcs` wrote `/etc/corosync/corosync.conf` on both nodes: the cluster name, the **knet** transport with encryption, the node list, and `two_node: 1` in the quorum section.
 
-```ini title="/etc/corosync/corosync.conf (trimmed)"
-totem {
-    version: 2
-    cluster_name: webcluster
-    transport: knet
-    crypto_cipher: aes256
-    crypto_hash: sha256
-}
+??? example "Read the generated `corosync.conf` (it's short)"
 
-nodelist {
-    node {
-        ring0_addr: node1
-        name: node1
-        nodeid: 1
+    ```ini title="/etc/corosync/corosync.conf (trimmed)"
+    totem {
+        version: 2
+        cluster_name: webcluster
+        transport: knet
+        crypto_cipher: aes256
+        crypto_hash: sha256
     }
-    node {
-        ring0_addr: node2
-        name: node2
-        nodeid: 2
-    }
-}
 
-quorum {
-    provider: corosync_votequorum
-    two_node: 1
-}
-```
+    nodelist {
+        node {
+            ring0_addr: node1
+            name: node1
+            nodeid: 1
+        }
+        node {
+            ring0_addr: node2
+            name: node2
+            nodeid: 2
+        }
+    }
+
+    quorum {
+        provider: corosync_votequorum
+        two_node: 1
+    }
+    ```
 
 Never edit it on one node only. Use `pcs` commands (or edit, then `pcs cluster sync` and `pcs cluster reload corosync`).
 
@@ -317,7 +319,7 @@ Cluster Summary:
   * Stack: corosync (Pacemaker is running)
   * Current DC: node1 (version 3.0.1-3.el10-…) - partition with quorum
   * Last updated: Thu Oct 15 10:31:44 2026 on node1
-  * Last change:  Thu Oct 15 10:30:12 2026 by root via root on node1
+  * Last change:  Thu Oct 15 10:30:12 2026 by root via cibadmin on node1
   * 2 nodes configured
   * 3 resource instances configured
 
@@ -358,17 +360,39 @@ $ pcs resource agents ocf:heartbeat | grep -E '^(IPaddr2|apache|Filesystem)$'
 Filesystem
 IPaddr2
 apache
-$ pcs resource describe ocf:heartbeat:IPaddr2 | head -12
-ocf:heartbeat:IPaddr2 - Manages virtual IPv4 and IPv6 addresses (Linux specific version)
-
-This Linux-specific resource manages IP alias IP addresses. It can add an IP alias, or remove one…
-
-Resource options:
-  ip (required) (unique): The IPv4 (dotted quad notation) or IPv6 address (colon hexadecimal notation) example IPv4 "192.168.1.1". example IPv6 "2001:db8:DC28:0:0:FC57:D4C8:1FFF".
-  nic: The base network interface on which the IP address will be brought online. …
-  cidr_netmask: The netmask for the interface in CIDR format …
-…
 ```
+
+`pcs resource describe <agent>` lists every parameter an agent takes, marking the required ones.
+
+??? example "What `pcs resource describe ocf:heartbeat:IPaddr2` prints"
+
+    ```console
+    $ pcs resource describe ocf:heartbeat:IPaddr2 | head -12
+    ocf:heartbeat:IPaddr2 - Manages virtual IPv4 and IPv6 addresses (Linux specific version)
+
+    This Linux-specific resource manages IP alias IP addresses. It can add an IP alias, or remove one…
+
+    Resource options:
+      ip (required) (unique): The IPv4 (dotted quad notation) or IPv6 address (colon hexadecimal notation) example IPv4 "192.168.1.1". example IPv6 "2001:db8:DC28:0:0:FC57:D4C8:1FFF".
+      nic: The base network interface on which the IP address will be brought online. …
+      cidr_netmask: The netmask for the interface in CIDR format …
+    …
+    ```
+
+??? question "Under the hood: a resource agent is just a script with exit codes"
+    Open `/usr/lib/ocf/resource.d/heartbeat/IPaddr2` in a pager: it's a shell script. Pacemaker passes the parameters as environment variables named `OCF_RESKEY_<param>` (so `ip=` becomes `OCF_RESKEY_ip`) and the action as the first argument. Everything the cluster knows comes from the **exit code**:
+
+    | Exit code | Meaning | What Pacemaker does |
+    |---|---|---|
+    | `0` (`OCF_SUCCESS`) | Action worked / resource is running | Nothing more |
+    | `7` (`OCF_NOT_RUNNING`) | Cleanly stopped | Expected after `stop`; a failure if a `monitor` returns it unexpectedly |
+    | `1` (`OCF_ERR_GENERIC`) | Something failed, may be recoverable | Recover: stop, then start (here or elsewhere) |
+    | `5` (`OCF_ERR_INSTALLED`) | Software missing on this node | Never try this node again until cleanup |
+    | `6` (`OCF_ERR_CONFIGURED`) | Bad parameters | Stop the resource everywhere: no node can fix a bad config |
+
+    The production rule hidden in that table: a **`stop` that fails** is the one failure Pacemaker can't recover from politely. If it can't prove a resource is stopped, it fences the node to make it stopped. A slow `stop` that exceeds its timeout (an Apache with long-lived connections, a database flushing) gets your node power-cycled. Give `stop` operations realistic timeouts.
+
+    `sudo pcs resource debug-monitor vip` (and `debug-start`, `debug-stop`) runs the agent by hand with the cluster's parameters and full shell tracing, which is the fastest way to see *why* an agent returns what it returns.
 
 ### The floating IP
 
@@ -428,9 +452,11 @@ The two-line colocation-plus-order pattern is exactly what a group does internal
 $ sudo pcs constraint location web prefers node1=50
 $ sudo pcs constraint
 Location Constraints:
-  Started resource 'web' prefers node 'node1' (score: 50)
+  resource 'web' prefers node 'node1' with score 50
 …
 ```
+
+(The exact wording of this listing changed across pcs 0.11 releases; the information is the same.)
 
 ### Stickiness: don't move back and forth
 
@@ -439,6 +465,8 @@ Suppose node1 fails, `web` moves to node2, then node1 returns. Should `web` move
 ```console
 $ sudo pcs resource defaults update resource-stickiness=100
 ```
+
+You may already have a little stickiness without asking. On Rocky, Pacemaker adds a `build-resource-defaults` set with `resource-stickiness=1` to a new cluster; `pcs resource defaults` shows it, and `update` changes that value.
 
 With stickiness 100 and a location preference of 50, `web` stays on node2 after node1 returns (100 beats 50). If you set the preference above the stickiness, it fails back automatically. That arithmetic is the whole model: Pacemaker sums the scores and picks the highest. `crm_simulate -sL` prints every score it calculated, which is the best way to answer "why is it running *there*?".
 
@@ -461,15 +489,15 @@ Walk through a real failover, step by step:
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. node2 dies" markdown>
+<div class="step" data-title="node2 dies" markdown>
 
 node2 runs the `web` group. Its power supply fails. It stops sending anything at all.
 
 </div>
 
-<div class="step" data-title="2. Corosync notices" markdown>
+<div class="step" data-title="Corosync notices" markdown>
 
-Corosync passes a token around the ring. When the token doesn't come back within the **token timeout** (a few seconds by default), Corosync declares node2 lost and forms a new membership with just node1.
+Corosync passes a token around the ring. When the token doesn't come back within the **token timeout** (3 seconds by default in Corosync 3), Corosync declares node2 lost and forms a new membership with just node1.
 
 ```text
 corosync[1123]:   [KNET  ] link: host: 2 link: 0 is down
@@ -479,19 +507,19 @@ corosync[1123]:   [QUORUM] Members[1]: 1
 
 </div>
 
-<div class="step" data-title="3. Quorum check" markdown>
+<div class="step" data-title="Quorum check" markdown>
 
 votequorum recalculates. With `two_node` set, node1 alone stays quorate. In a three-node cluster, the two survivors would still have 2 of 3 votes. Without quorum, node1 would stop here and run nothing.
 
 </div>
 
-<div class="step" data-title="4. The DC plans" markdown>
+<div class="step" data-title="The DC plans" markdown>
 
 If node2 was the DC, node1 elects itself. The scheduler sees that node2's resources are in an unknown state: they might still be running. The only safe plan is "fence node2 first, then start `web` on node1". `pcs status` shows node2 as `UNCLEAN (offline)` at this moment.
 
 </div>
 
-<div class="step" data-title="5. Fence" markdown>
+<div class="step" data-title="Fence" markdown>
 
 `pacemaker-fenced` runs the fence agent (for KVM labs, `fence_xvm`), which asks the hypervisor to power node2 off. The agent reports success.
 
@@ -501,19 +529,32 @@ pacemaker-fenced[1210]:  notice: Operation 'reboot' [3021] targeting node2 using
 
 </div>
 
-<div class="step" data-title="6. Recover" markdown>
+<div class="step" data-title="Recover" markdown>
 
 Now that node2 is certainly off, node1 starts the group in order: `vip` (adds the IP and sends gratuitous ARP), then `website` (starts Apache and checks `server-status`). Clients reconnect. Total time is typically 10 to 60 seconds, most of it detection and fencing.
 
 </div>
 
-<div class="step" data-title="7. node2 returns" markdown>
+<div class="step" data-title="node2 returns" markdown>
 
 After repair, node2 boots, Corosync rejoins it, and it shows `Online`. Because of stickiness, `web` stays on node1. You move it back only when *you* choose to, in a quiet moment.
 
 </div>
 
 </div>
+
+??? question "Under the hood: the token timeout, and why a VM pause can get a node fenced"
+    The whole "is node2 alive?" decision hangs on one number. Read the value actually in use (Corosync adds `token_coefficient`, 650 ms, for each node beyond two):
+
+    ```console
+    $ sudo corosync-cmapctl | grep -E 'runtime.config.totem.(token|consensus) '
+    runtime.config.totem.consensus (u32) = 3600
+    runtime.config.totem.token (u32) = 3000
+    ```
+
+    Anything that freezes a node for longer than that looks exactly like a dead node: a live migration's final pause on a busy VM, a hypervisor snapshot, a long storage stall, a kernel soft lockup. The survivors fence it, and the post-mortem says "node was healthy, cluster killed it".
+
+    The fix is not "disable fencing". Raise the timeout to cover your platform's real pauses (`pcs cluster config update totem token=10000`, then check the runtime value again) and accept that real failures are detected that much later. Public cloud HA guides typically use much larger values than bare metal. It's a trade-off, so write the chosen number and the reason in your runbook.
 
 ## Testing failover
 
@@ -522,7 +563,7 @@ A cluster that hasn't been tested will fail in a way you didn't expect. Test eac
 | Test | How | Expected result |
 |---|---|---|
 | Planned move | `pcs node standby node2` | Resources stop on node2 and start on node1. No fencing. Undo with `pcs node unstandby node2` |
-| Move one resource | `pcs resource move web node1` | `web` moves. pcs 0.11+ removes the temporary constraint once the move is done |
+| Move one resource | `pcs resource move web node1` | `web` moves. Since pcs 0.11 (Rocky 9 and 10), pcs removes its temporary constraint once the move is done, so the resource may later drift back if scores favour another node. `pcs resource move-with-constraint` keeps the old "pin it there" behaviour |
 | Service crash | `killall -9 httpd` on the active node | The monitor notices within 10 s and restarts Apache on the *same* node. Fail count goes to 1 |
 | Repeated crashes | Set `migration-threshold=3`, crash it three times | After the third failure the resource moves to the other node |
 | Network loss | Cut the node's cluster link (Lab 3) | The other node fences it, then takes over |
@@ -564,6 +605,17 @@ Right. A failed monitor first triggers a local recovery (stop, then start) on th
 | `pcs status --full` | Current state, including node attributes and recent failures |
 | `crm_simulate -sL` | Placement scores calculated from the live CIB |
 
+??? question "Under the hood: replay the cluster's decision offline"
+    Every time the scheduler makes a plan (a **transition**), it saves the exact input it used, the whole CIB plus node state, to a compressed file and logs where:
+
+    ```console
+    $ sudo grep 'saving inputs' /var/log/pacemaker/pacemaker.log | tail -1
+    … pacemaker-schedulerd[1214] … notice: Calculated transition 12, saving inputs in /var/lib/pacemaker/pengine/pe-input-41.bz2
+    $ sudo crm_simulate -Ss -x /var/lib/pacemaker/pengine/pe-input-41.bz2
+    ```
+
+    `crm_simulate -x` re-runs the scheduler on that saved input and prints the scores and the actions it chose, on any node, at any later time. This is how support engineers answer "why did the cluster move the database at 03:12?" days after the fact: find the transition in the log, replay its input, read the scores. Attach those files to a support case rather than describing the problem in prose.
+
 When something surprising happened, find the moment in the journal first, then read the detailed log around that time. The scheduler records a "transition" for every decision; search for `pacemaker-schedulerd` lines showing actions like `Move`, `Recover`, `Start` or `Fence`:
 
 ```console
@@ -589,6 +641,9 @@ flowchart LR
     FVD -- "TCP 1229 reply" --> FX
     LV -.-> N2["node2 (VM)"]
 ```
+
+!!! note "Where the fence-virt packages live"
+    On Rocky 10 the `fence-virt` (agent) and `fence-virtd*` (host daemon) packages are built from the `fence-agents` source and ship in **AppStream**, so the KVM host does *not* need the HighAvailability repository enabled. On any release, `dnf provides /usr/sbin/fence_virtd` (host) or `dnf provides /usr/sbin/fence_xvm` (nodes) tells you which repository has them, so you never have to guess.
 
 On the **host**:
 
@@ -859,17 +914,17 @@ All labs use one KVM host (bare metal or nested, see [module 27](27-virtualizati
 
     **Goal:** See how quorum changes with three nodes, or with a quorum device.
 
-    **You'll need:** Lab 4 done, and a third small VM `node3` (`192.168.150.13`), prepared like Lab 1, step 3, with names for all three nodes in every `/etc/hosts`.
+    **You'll need:** Lab 4 done, and a third small VM `node3` (`192.168.150.13`, built like node1 and node2 in module 27 with a `labnet` NIC), prepared like Lab 1, step 3, plus `fence-virt` and the key file from Lab 4, step 2. Put names for all three nodes in every node's `/etc/hosts`.
 
     1. On node1: `sudo pcs host auth node3 -u hacluster -p 'Cluster-Lab-123'`, then `sudo pcs cluster node add node3 --start --enable`. Add `node3:node3` to the fence map: `sudo pcs stonith update fence-xvm pcmk_host_map="node1:node1;node2:node2;node3:node3"`.
     2. Run `sudo corosync-quorumtool` and note the `Quorum` line and the flags.
-    3. Cut *two* nodes' `labnet` links at once from the host. Watch the remaining node with `sudo pcs status`.
-    4. Restore the links.
+    3. Find the node running `web` and cut *only its* `labnet` link from the host (`virsh domif-setlink <vm> <vnetN> down`, as in Lab 3). Watch `sudo pcs status` from one of the other two nodes.
+    4. When the isolated node has been fenced and rebooted, check `pcs status` again.
 
-    **Check your work:** with three nodes, the `2Node` flag is gone and `Quorum: 2`. In step 3 the lone node reports `partition WITHOUT quorum` and stops its resources instead of fencing the majority.
+    **Check your work:** with three nodes, the `2Node` flag is gone and `Quorum: 2`. In step 3 the two connected nodes stay `partition with quorum`, fence the isolated node, and start `web` themselves. The isolated node (if you watch its console) reports `partition WITHOUT quorum` and stops its resources: it never races to fence anyone.
 
     ??? success "What just happened?"
-        With three votes, any single node is a minority. It can't win a fence race against two others because it isn't allowed to act at all. That's why three nodes (or two plus a qdevice) is a more robust design than two.
+        With three votes, a single node is a minority, so it isn't allowed to act at all, and the majority side fences it without a race. No `pcmk_delay_max` lottery is needed. That's why three nodes (or two plus a qdevice) is a more robust design than two. Because a fence reboot starts a fresh QEMU process, the isolated node usually comes back with its link up and rejoins on its own.
 
     **Clean up:** `sudo pcs cluster node remove node3` on node1, then delete the `node3` VM. Tear down the rest as in Lab 4.
 
@@ -885,7 +940,7 @@ All labs use one KVM host (bare metal or nested, see [module 27](27-virtualizati
     **Symptom:** an old failure blocks a resource from a node long after you fixed the cause. **Cause:** Pacemaker remembers fail counts. **Fix:** `pcs resource cleanup <resource>` once the cause is fixed. Optionally set `failure-timeout` so old failures expire.
 
 !!! pitfall "pcs resource move left a constraint behind"
-    **Symptom:** a resource refuses to go back to a node. **Cause:** `pcs resource ban`, or a `move` on older pcs, created a `cli-ban` or `cli-prefer` location constraint. **Fix:** list with `pcs constraint`, remove with `pcs resource clear <resource>`.
+    **Symptom:** a resource refuses to go back to a node. **Cause:** `pcs resource ban`, `pcs resource move-with-constraint`, a `move` on old pcs (Rocky 8), or a `move` that failed part way created a `cli-ban` or `cli-prefer` location constraint. Current pcs prints a warning when a move leaves one behind. **Fix:** list with `pcs constraint`, remove with `pcs resource clear <resource>`. Clearing can itself make the resource move, so do it in a quiet moment.
 
 !!! pitfall "Two-node cluster fences in a loop"
     **Symptom:** after a network blip, nodes keep fencing each other. **Cause:** both start at boot, can't see each other, and race again. **Fix:** fix the network first; add a fencing delay (`pcmk_delay_max`, or `priority-fencing-delay`); consider not enabling the cluster at boot, or use a qdevice.
@@ -915,7 +970,7 @@ All labs use one KVM host (bare metal or nested, see [module 27](27-virtualizati
 | `pcs constraint order A then B` | Start A before B |
 | `pcs resource defaults update resource-stickiness=100` | Prefer staying put after failover |
 | `pcs node standby NODE` / `unstandby NODE` | Drain a node / return it to service |
-| `pcs resource move R NODE` / `pcs resource clear R` | Move a resource / remove move constraints |
+| `pcs resource move R NODE` / `pcs resource clear R` | Move a resource (constraint removed afterwards) / remove leftover move or ban constraints |
 | `pcs resource failcount show R` / `cleanup R` | Show / reset failure history |
 | `pcs stonith create NAME fence_xvm …` | Create a fence device |
 | `pcs stonith fence NODE` | Fence a node now (test fencing) |

@@ -141,16 +141,27 @@ The directory itself. sssd finds servers through DNS **SRV records**, binds to L
 You can see the processes on a joined client:
 
 ```console
-$ ps -o user,pid,cmd -C sssd,sssd_be,sssd_nss,sssd_pam
-USER         PID CMD
-root         812 /usr/sbin/sssd -i --logger=files
-root         845 /usr/libexec/sssd/sssd_be --domain lab.test --logger=files
-root         846 /usr/libexec/sssd/sssd_nss --logger=files
-root        1290 /usr/libexec/sssd/sssd_pam --logger=files
+$ ps -o pid,cmd -C sssd,sssd_be,sssd_nss,sssd_pam
+    PID CMD
+    812 /usr/sbin/sssd -i --logger=files
+    845 /usr/libexec/sssd/sssd_be --domain lab.test --logger=files
+    846 /usr/libexec/sssd/sssd_nss --logger=files
+   1290 /usr/libexec/sssd/sssd_pam --logger=files
 ```
 
-!!! note "Which user does sssd run as?"
-    Upstream SSSD 2.10 can run as an unprivileged `sssd` user, and distributions choose the default. Check your own system with the `ps` command above, and make sure `/etc/sssd/sssd.conf` is owned by that user and mode `0600`. If the ownership or mode is wrong, sssd refuses to start.
+Add `user` to the `-o` list to see which account they run as. The answer changed recently, as the next box explains.
+
+??? question "Under the hood: which user does sssd run as, and why it matters"
+    Older SSSD ran every process as root. Since SSSD 2.10 (the version family in Rocky 10), the project's default is to start the service as an unprivileged **`sssd`** user through `User=`/`Group=` in the systemd unit, and to give elevated rights only to three small helpers (`krb5_child`, `ldap_child`, `selinux_child`) through **file capabilities** rather than setuid. Distributions can override that choice, so prove it on the box rather than trusting a blog:
+
+    ```console
+    $ systemctl show sssd -p User -p Group
+    $ getcap /usr/libexec/sssd/krb5_child /usr/libexec/sssd/ldap_child
+    ```
+
+    If `getcap` lists capabilities such as `cap_dac_read_search` and `cap_setuid`, you are looking at the reduced-privilege design: a bug in the big, network-facing `sssd_be` no longer hands an attacker root.
+
+    The production failure mode is file ownership. When the service user is `sssd`, it must be able to read `/etc/sssd/sssd.conf`, its cache in `/var/lib/sss/db/` and its logs. A config file someone created as `root:root 0600` with a text editor, or a cache restored from a backup with the wrong owner, makes sssd fail at start with a permission error in `sssd.log` or the journal. Red Hat's guidance for SSSD 2.10 and later is `root:sssd` with mode `0640` for `sssd.conf`; on a release where sssd still runs as root, `root:root 0600` is fine. Either way, sssd refuses to start if "other" users can read the file, because it may hold an LDAP bind password.
 
 ### Life of a domain login
 
@@ -158,37 +169,37 @@ Here is the whole stack in motion when alice SSHes into `client1`:
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. sshd asks who alice is" markdown>
+<div class="step" data-title="sshd asks who alice is" markdown>
 
 `sshd` calls `getpwnam("alice")`. NSS checks `files` first (`/etc/passwd`, no alice there), then `sss`. If the memory cache has her, the answer comes back without waking sssd at all. Otherwise `libnss_sss` asks `sssd_nss` over its socket.
 
 </div>
 
-<div class="step" data-title="2. sssd looks her up" markdown>
+<div class="step" data-title="sssd looks her up" markdown>
 
 `sssd_nss` checks the LDB cache. If the entry is missing or older than `entry_cache_timeout` (default 5400 seconds), it asks the backend, which does an LDAP search on the directory and stores the result. alice exists: UID `1234400003`, home `/home/alice`, shell `/bin/bash`.
 
 </div>
 
-<div class="step" data-title="3. PAM auth: check the password" markdown>
+<div class="step" data-title="PAM auth: check the password" markdown>
 
 `sshd` runs the PAM `auth` stack in `password-auth`. `pam_unix` doesn't know alice, so `pam_sss` sends the password to `sssd_pam`, which hands it to `krb5_child`. That process performs a Kerberos **AS exchange** with the KDC. If the KDC issues a ticket, the password was right. No password hash is ever sent to or stored on the client.
 
 </div>
 
-<div class="step" data-title="4. PAM account: may she log in here?" markdown>
+<div class="step" data-title="PAM account: may she log in here?" markdown>
 
 The `account` stack calls `pam_sss` again. sssd evaluates the **access provider**: on FreeIPA, that means HBAC rules ("group webadmins may use sshd on hosts in hostgroup webservers"). On AD, it can mean GPO logon rights. A "no" here gives the classic "correct password, still denied".
 
 </div>
 
-<div class="step" data-title="5. Session: home directory and ticket" markdown>
+<div class="step" data-title="Session: home directory and ticket" markdown>
 
 The `session` stack runs. With the `with-mkhomedir` authselect feature, `pam_oddjob_mkhomedir` asks the `oddjobd` service to create `/home/alice`. sssd stores alice's fresh Kerberos ticket in her credential cache, so her next `ssh db01` needs no password at all.
 
 </div>
 
-<div class="step" data-title="6. Later: offline" markdown>
+<div class="step" data-title="Later: offline" markdown>
 
 If the directory goes down tomorrow, sssd marks the domain **offline**. NSS answers come from the cache. If `cache_credentials = True`, sssd stored a salted hash of alice's last successful password, so she can still log in. A user who has never logged in on this machine cannot.
 
@@ -218,23 +229,30 @@ $ authselect list
 - local     Local users only
 - sssd      Enable SSSD for system authentication (also for local users only)
 - winbind   Enable winbind for system authentication
-$ authselect list-features sssd
-with-faillock
-with-fingerprint
-with-mkhomedir
-with-pam-gnome-keyring
-with-pam-u2f
-with-pam-u2f-2fa
-with-pamaccess
-with-silent-lastlog
-with-smartcard
-with-smartcard-lock-on-removal
-with-smartcard-required
-with-subid
-with-sudo
-without-nullok
-…
 ```
+
+??? example "The full feature list: `authselect list-features sssd`"
+
+    ```console
+    $ authselect list-features sssd
+    with-faillock
+    with-fingerprint
+    with-mkhomedir
+    with-pam-gnome-keyring
+    with-pam-u2f
+    with-pam-u2f-2fa
+    with-pamaccess
+    with-silent-lastlog
+    with-smartcard
+    with-smartcard-lock-on-removal
+    with-smartcard-required
+    with-subid
+    with-sudo
+    without-nullok
+    …
+    ```
+
+    `authselect show sssd` prints the profile's description with what each feature does.
 
 The features you will use most:
 
@@ -303,7 +321,7 @@ homedir_substring = /home
 
 A few rules that bite people:
 
-- File mode must be `0600` and owned by the sssd user. `sudo chmod 600 /etc/sssd/sssd.conf`.
+- No access for "other" users, and the file must be readable by the account sssd runs as (see "which user does sssd run as" above). `sudo chmod 600 /etc/sssd/sssd.conf` on a root-run sssd, or `sudo chown root:sssd` plus `chmod 640` when it runs as `sssd`.
 - Check syntax before restarting: `sudo sssctl config-check`.
 - Comments must be on their own line in real files (the `# (1)!` markers above are page annotations only).
 - After editing, `sudo systemctl restart sssd`.
@@ -347,6 +365,13 @@ $ sudo sss_cache -E              # expire everything
 $ id alice
 uid=1234400003(alice) gid=1234400003(alice) groups=1234400003(alice),1234400005(webadmins)
 ```
+
+??? question "Under the hood: the negative cache, and why a brand-new user \"doesn't exist\""
+    sssd also remembers **misses**. When a lookup for `newhire` fails, sssd stores that "not found" answer in a **negative cache** for `entry_negative_timeout` seconds (15 by default, in the `[nss]` section). That protects the directory from a flood of repeated failed lookups, for example from a cron job looking up a deleted user every second.
+
+    The trap: someone runs `id newhire` on a client *before* the account exists, the admin creates it a moment later, and the next `id newhire` still says "no such user". It's the negative cache, not replication. Wait 15 seconds or run `sudo sss_cache -u newhire`.
+
+    The **memory cache** in `/var/lib/sss/mc/` (`passwd`, `group`, `initgroups`) is a different beast: memory-mapped files that `libnss_sss` reads directly in the calling process, with no socket round trip to sssd. That's why `getent passwd alice` can answer even while sssd is busy, and why `sss_cache` also invalidates those files. If you ever see stale answers that survive an sssd restart, `ls -l /var/lib/sss/mc/` and `sss_cache -E` are where to look.
 
 !!! warning "Don't `rm -rf /var/lib/sss/db/*` as a reflex"
     Deleting the cache also deletes the stored offline credentials. If the directory is unreachable when you do it, nobody from the domain can log in until it comes back. Expire with `sss_cache -E` first; only remove the cache when you know the server is reachable.
@@ -594,6 +619,31 @@ Default principal: host/client1.lab.test@LAB.TEST
 
 The repeated lines are the same key in different encryption types (`klist -ke` shows them). **KVNO** is the key version number. If someone re-joins the machine or resets its key on the server, the KVNO in the directory goes up and the old keytab no longer matches.
 
+??? question "Under the hood: exporting a keytab can break the machine that already has one"
+    With MIT `kadmin`, `ktadd` doesn't just *copy* a principal's key into a file. By default it **generates a new random key**, bumps the KVNO, and writes that to the keytab. FreeIPA's `ipa-getkeytab` does the same unless you pass `-r` (retrieve the existing key).
+
+    So the innocent-looking "let me grab a keytab for `HTTP/www` on the second web server too" silently invalidates the keytab on the first one. Its next ticket check fails, and the symptom shows up hours later (when cached tickets expire) on a machine nobody touched. When several hosts must share one service principal, export the key once and copy the file, or use the retrieve option. Lab 3 makes you watch the KVNO move.
+
+??? question "Under the hood: how SSH single sign-on actually happens (GSSAPI)"
+    Password-free `ssh` with Kerberos is **GSSAPI** authentication, and both ends must opt in. Rocky ships it switched on in the Red Hat drop-ins under `/etc/ssh/sshd_config.d/` and `/etc/ssh/ssh_config.d/`. Prove what is really in effect rather than reading files:
+
+    ```console
+    $ sudo sshd -T | grep -i '^gssapi'
+    gssapiauthentication yes
+    gssapicleanupcredentials no
+    …
+    $ ssh -G client1.lab.test | grep -i '^gssapi'
+    gssapiauthentication yes
+    gssapidelegatecredentials no
+    …
+    ```
+
+    Three non-obvious rules decide whether it works:
+
+    - **The name you type picks the principal.** `ssh client1.lab.test` asks the KDC for `host/client1.lab.test`. `ssh 192.168.150.20` has no matching principal, so GSSAPI silently fails and you get a password prompt.
+    - **Delegation is off by default.** Your TGT is *not* forwarded, so from `client1` a second hop (`ssh db01`) asks for a password again. `ssh -K` (or `GSSAPIDelegateCredentials yes`) forwards it. Only do that to hosts you trust, because root there can use your ticket.
+    - **`ssh -vvv` tells you which step failed**: look for lines mentioning `gssapi-with-mic` and the error text from the Kerberos library.
+
 !!! danger "A keytab is a password"
     Anyone who can read `/etc/krb5.keytab` can impersonate the machine. Keep it `0600 root:root`, never copy it into a container image or a Git repository, and never send it by email.
 
@@ -795,27 +845,31 @@ ad.example.com
   login-policy: allow-realm-logins
 ```
 
-The generated configuration:
+Behind that one command, realmd installed the missing packages, used `adcli` to create a computer account in AD and write `/etc/krb5.keytab`, wrote `sssd.conf`, and ran authselect. Three defaults in the generated file shape everything that follows: `id_provider = ad`, `use_fully_qualified_names = True` and `ldap_id_mapping = True`.
 
-```ini title="/etc/sssd/sssd.conf (written by realm join)"
-[sssd]
-domains = ad.example.com
-config_file_version = 2
-services = nss, pam
+??? example "The full `sssd.conf` that `realm join` writes"
 
-[domain/ad.example.com]
-default_shell = /bin/bash
-krb5_store_password_if_offline = True
-cache_credentials = True
-krb5_realm = AD.EXAMPLE.COM
-realmd_tags = manages-system joined-with-adcli
-id_provider = ad
-fallback_homedir = /home/%u@%d
-ad_domain = ad.example.com
-use_fully_qualified_names = True
-ldap_id_mapping = True
-access_provider = ad
-```
+    ```ini title="/etc/sssd/sssd.conf (written by realm join)"
+    [sssd]
+    domains = ad.example.com
+    config_file_version = 2
+    services = nss, pam
+
+    [domain/ad.example.com]
+    default_shell = /bin/bash
+    krb5_store_password_if_offline = True
+    cache_credentials = True
+    krb5_realm = AD.EXAMPLE.COM
+    realmd_tags = manages-system joined-with-adcli
+    id_provider = ad
+    fallback_homedir = /home/%u@%d
+    ad_domain = ad.example.com
+    use_fully_qualified_names = True
+    ldap_id_mapping = True
+    access_provider = ad
+    ```
+
+    Useful `realm join` options when the defaults don't suit you: `--computer-ou="OU=Linux,DC=ad,DC=example,DC=com"` to place the computer account, `--automatic-id-mapping=no` to use POSIX attributes from AD instead of SID mapping, and `--membership-software=samba` if you also need Samba file sharing on the host.
 
 ### Fully qualified names
 
@@ -843,6 +897,15 @@ flowchart LR
     R --> UID
 ```
 
+??? question "Under the hood: ID-mapping slices, and how two clients end up with different UIDs"
+    The ID space between `ldap_idmap_range_min` and `ldap_idmap_range_max` is cut into **slices** of `ldap_idmap_range_size` IDs (200,000 by default). The hash of a domain SID picks the slice, and a user's RID is the offset inside it. Three consequences that bite in production:
+
+    - **Every client must use identical range settings.** If one server was joined with a tweaked `ldap_idmap_range_size`, the same user gets a different UID there. NFS and shared storage then show the wrong owner. Keep the settings in configuration management, not hand edits.
+    - **Large RIDs spill over.** In an old, busy AD domain, RIDs above 200,000 don't fit in the first slice. sssd assigns extra slices automatically, but the UID is no longer simply "base + RID", so don't write scripts that assume it.
+    - **Hash collisions are possible.** Two trusted domains can hash to the same slice. sssd detects it and logs an error rather than hand out overlapping UIDs, and users of the second domain can't be resolved until you configure ranges explicitly ([[man:sssd-ldap(5)]] documents the `ldap_idmap_*` options).
+
+    `sss_cache` won't fix a mapping mistake: changing any of these settings needs `sssctl cache-remove` and a re-own of existing files.
+
 The alternative, `ldap_id_mapping = False`, reads `uidNumber` and `gidNumber` attributes (POSIX attributes) that someone maintains in AD. Use that when Linux UIDs must match an existing NFS estate. Changing the setting on a live system changes every UID, so file ownership breaks: decide once, before you join.
 
 ### Controlling who may log in
@@ -857,7 +920,7 @@ $ sudo realm permit -g 'linux-admins@ad.example.com'
 That switches sssd to `access_provider = simple` with `simple_allow_groups`.
 
 !!! warning "Crypto policy and old AD domains"
-    Rocky's default crypto policy disables the RC4 Kerberos encryption type. Modern AD supports AES, and the right fix is to make sure AES is enabled for the computer and user accounts in AD. If you can't, Red Hat documents `update-crypto-policies --set DEFAULT:AD-SUPPORT` as a fallback, which weakens the whole host's crypto policy ([module 33](33-tls-and-crypto-policies.md)).
+    Rocky's default crypto policy disables the RC4 Kerberos encryption type. Modern AD supports AES, and the right fix is to make sure AES is enabled for the computer and user accounts in AD. If you can't, Red Hat documents a crypto **subpolicy** as a fallback: `AD-SUPPORT` on EL8, and `AD-SUPPORT-LEGACY` (the one that re-enables RC4) on EL9. Check which modules your release ships with `ls /usr/share/crypto-policies/policies/modules/` before you run `update-crypto-policies --set DEFAULT:<module>`. Any of them weakens the whole host's crypto policy, not just Kerberos ([module 33](33-tls-and-crypto-policies.md)).
 
 <div class="quiz" data-answer="4" markdown>
 
@@ -1081,7 +1144,7 @@ Labs 1 to 3 need only one Rocky 10 VM. Lab 4 needs two VMs on an isolated networ
         sudo kinit -k -t /root/lab.keytab host/$H
         ```
 
-    **Check your work:** step 2 succeeds with no password prompt. Step 3 shows the KVNO went from 1 to 2, and `kinit -k` now fails with an error like `Password incorrect while getting initial credentials`, because the keytab still holds the version 1 key.
+    **Check your work:** step 2 succeeds with no password prompt. Note the KVNO in step 1's `klist -k`: it is already 2, not 1, because `ktadd` generated a fresh key when it exported (see "exporting a keytab can break the machine" above). Step 3 bumps it to 3, and `kinit -k` now fails with an error like `Password incorrect while getting initial credentials`, because the keytab still holds the version 2 key.
 
     ??? success "What just happened?"
         A keytab is just the principal's secret key, saved to a file. When the KDC's copy changes, the old file stops matching. On a real domain member, this is the "it worked yesterday, now sssd is offline and `ldap_child.log` complains" scenario. The fix is to fetch a fresh keytab (`ipa-getkeytab` on IPA, or re-join).
