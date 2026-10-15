@@ -98,14 +98,15 @@ Storage people speak their own dialect. Here's the minimum you need to read any 
 | **NQN** | NVMe Qualified Name, the NVMe-oF equivalent of an IQN |
 | **ALUA** | Asymmetric Logical Unit Access: the array tells the host which paths are optimal |
 
-Your Rocky host already has an initiator name, generated when `iscsi-initiator-utils` is installed:
+Every initiator has a name. Installing `iscsi-initiator-utils` doesn't create it: a one-shot unit, `iscsi-init.service`, generates it the first time `iscsid` starts (it only runs while the file is missing):
 
 ```console
-$ cat /etc/iscsi/initiatorname.iscsi
+$ sudo systemctl start iscsid
+$ grep '^InitiatorName' /etc/iscsi/initiatorname.iscsi
 InitiatorName=iqn.1994-05.com.redhat:3f9a1c2b7d4e
 ```
 
-The target's ACL must list exactly this name. If you clone VMs, every clone has the same IQN, which confuses targets badly: regenerate it with `echo "InitiatorName=$(iscsi-iname)" | sudo tee /etc/iscsi/initiatorname.iscsi` and restart `iscsid`.
+The target's ACL must list exactly this name. If you clone a VM **after** the name was generated, every clone has the same IQN, which confuses targets badly (sessions from two hosts kick each other off). Regenerate it with `echo "InitiatorName=$(iscsi-iname)" | sudo tee /etc/iscsi/initiatorname.iscsi` and restart `iscsid`. Better: delete the file in your golden image, and each clone generates its own at first boot.
 
 ## Building an iSCSI target with targetcli
 
@@ -197,11 +198,11 @@ Discovery saves one **node record** per target and portal under `/var/lib/iscsi/
 $ sudo iscsiadm -m node
 192.168.77.1:3260,1 iqn.2026-10.lab.rocky:storage1
 192.168.78.1:3260,1 iqn.2026-10.lab.rocky:storage1
-$ sudo iscsiadm -m node -T iqn.2026-10.lab.rocky:storage1 -p 192.168.77.1 | grep startup
+$ sudo iscsiadm -m node -T iqn.2026-10.lab.rocky:storage1 -p 192.168.77.1 | grep '^node.startup'
 node.startup = automatic
 ```
 
-`node.startup = automatic` is what makes `iscsi.service` log in at boot. Editing `iscsid.conf` later does **not** change existing records: update them with `iscsiadm -m node -o update`.
+`node.startup = automatic` is what makes `iscsi.service` log in at boot. (Upstream open-iscsi defaults to `manual`; Rocky's package patches `iscsid.conf` to `automatic`.) Editing `iscsid.conf` later does **not** change existing records: update them with `iscsiadm -m node -o update`.
 
 </div>
 
@@ -333,6 +334,24 @@ Line by line:
 
 Here both paths sit in one group because the target reports both as optimised, so I/O is spread across them. On an active/passive array, you'd see **two** groups: the optimised paths (`prio=50 status=active`) and the non-optimised ones (`prio=10 status=enabled`), used only if the first group fails. That is ALUA at work: the array tells the host which controller owns the LUN.
 
+??? question "Under the hood: where `LIO-ORG,disk1` and those settings come from"
+    Every SCSI device answers an **INQUIRY** command with a vendor and product string. The kernel's LIO target always reports vendor `LIO-ORG`; its default product is the backstore type (`FILEIO`, `IBLOCK`). targetcli changes that: its global preference `export_backstore_name_as_model` (on by default) turns on the backstore's `emulate_model_alias` attribute, so the product becomes the backstore name, `disk1`.
+
+    multipath then looks that vendor/product pair up in its **built-in hardware table**, a list of per-array defaults compiled into multipath-tools. The LIO entry says: group paths by priority, get priorities from ALUA, check paths with `directio`, and `no_path_retry 12`. That last one is why you see `features='1 queue_if_no_path'` without ever configuring it. The `hwhandler='1 alua'` comes from the kernel, which attaches its ALUA handler to any device that advertises ALUA support when it's scanned.
+
+    To see the merged result of built-ins plus your `multipath.conf`, ask the daemon: `sudo multipathd show config | grep -A10 'vendor "(LIO-ORG'`. When a storage vendor's documentation gives you a `devices { device { … } }` stanza, this is the table it overrides.
+
+??? question "Under the hood: queue_if_no_path, and the server that won't shut down"
+    `no_path_retry 12` means: when **every** path is down, queue I/O for 12 path-checker intervals (the checker runs every 5 seconds, so about 60 seconds), then fail it. That covers a switch reboot or a controller failover without the filesystem ever seeing an error.
+
+    Set `no_path_retry queue` (queue forever), which some old vendor guides recommend, and a dead SAN turns into a different problem: every process that touches the filesystem hangs in uninterruptible sleep (`D` state in `ps`), `umount` hangs, and so does shutdown. The escape hatch is to tell the map to stop queueing so the I/O fails and processes can be killed:
+
+    ```console
+    $ sudo dmsetup message mpatha 0 fail_if_no_path
+    ```
+
+    (`multipathd disablequeueing map mpatha` does the same through the daemon.) Production rule of thumb: a finite `no_path_retry` that's longer than your array's worst failover time, never `queue` unless the vendor insists and you know how to break it.
+
 !!! warning "Set the iSCSI replacement timeout for multipath"
     When an iSCSI connection drops, iscsid waits `node.session.timeo.replacement_timeout` seconds (default **120**) for it to come back before failing I/O to the layer above. With multipath, that means two minutes of frozen I/O before failover. Set it to a few seconds so multipath can switch paths quickly:
 
@@ -343,7 +362,7 @@ Here both paths sit in one group because the target reports both as optimised, s
     Set it in `/etc/iscsi/iscsid.conf` as well, so future discoveries inherit it.
 
 !!! version "Rocky 9 vs 10: NVMe and dm-multipath"
-    dm-multipath for NVMe-oF devices was deprecated in RHEL 9 and is **not supported in RHEL 10**: on Rocky 10, NVMe devices always use the NVMe driver's **native multipath**, and dm-multipath is for SCSI devices (iSCSI, Fibre Channel, SAS) only. A host can run both: dm-multipath for its iSCSI LUNs, native multipath for its NVMe namespaces. If you migrate a Rocky 9 host that put NVMe namespaces under dm-multipath, plan the move to native multipath first.
+    On Rocky 9, native NVMe multipath is the default, but you could switch it off (`nvme_core.multipath=N`) and put NVMe over RDMA or Fibre Channel namespaces under dm-multipath instead (never NVMe/TCP). Rocky 10 removes that choice: native multipath is always on, the `nvme_core.multipath` parameter no longer exists, and dm-multipath is for SCSI devices (iSCSI, Fibre Channel, SAS) only. A host can run both: dm-multipath for its iSCSI LUNs, native multipath for its NVMe namespaces. If you migrate a Rocky 9 host that put NVMe namespaces under dm-multipath, plan the move to native multipath first.
 
 <div class="quiz" data-answer="2" markdown>
 
@@ -394,8 +413,16 @@ $ sudo modprobe nvme-tcp
 $ cat /etc/nvme/hostnqn
 nqn.2014-08.org.nvmexpress:uuid:9b1e5f4c-2d7a-4e3b-8f61-0c5a2b9d7e14
 $ sudo nvme discover -t tcp -a 127.0.0.1 -s 4420
-Discovery Log Number of Records 1, Generation counter 2
+Discovery Log Number of Records 2, Generation counter 2
 =====Discovery Log Entry 0======
+trtype:  tcp
+adrfam:  ipv4
+subtype: current discovery subsystem
+…
+subnqn:  nqn.2014-08.org.nvmexpress.discovery
+traddr:  127.0.0.1
+…
+=====Discovery Log Entry 1======
 trtype:  tcp
 adrfam:  ipv4
 subtype: nvme subsystem
@@ -428,7 +455,7 @@ $ echo round-robin | sudo tee /sys/class/nvme-subsystem/nvme-subsys1/iopolicy
 To reconnect automatically at boot, save the connection parameters in `/etc/nvme/discovery.conf` and enable the `nvmf-autoconnect.service` that ships with `nvme-cli`.
 
 !!! note "The Linux NVMe target in labs"
-    The kernel also contains an NVMe-oF **target**, `nvmet`, configured through configfs under `/sys/kernel/config/nvmet/` (the `nvmetcli` tool wraps it). Rocky 10's kernel ships the `nvmet` and `nvmet-tcp` modules, which makes it perfect for a loopback lab. Red Hat's RHEL 10 documentation states that it does not support `nvmet` as a production target, though, so in production the target side is a storage array.
+    The kernel also contains an NVMe-oF **target**, `nvmet`, configured through configfs under `/sys/kernel/config/nvmet/` (the `nvmetcli` tool in BaseOS wraps it, much as targetcli wraps LIO). Rocky 10's kernel ships the `nvmet` and `nvmet-tcp` modules in `kernel-modules-core`, so they're always installed, which makes them perfect for a loopback lab. Red Hat documents and supports RHEL as an NVMe-oF **host**; treat the in-kernel target as a lab and test tool, and expect the target side in production to be a storage array.
 
 ## Persistent naming and fstab
 
@@ -451,7 +478,7 @@ Then there's timing. Local disks exist before the network; SAN disks exist only 
 UUID=4b1f6c2e-8a0d-4c5e-9f2b-7d3e1a6c9b08  /srv/san  xfs  _netdev,nofail  0 0
 ```
 
-- `_netdev` marks the mount as network-dependent. systemd orders it after the network is online and the iSCSI logins (`iscsi.service`) and places it under **`remote-fs.target`** instead of `local-fs.target`.
+- `_netdev` marks the mount as network-dependent. systemd orders it after `network-online.target` and `remote-fs-pre.target` (which `iscsid` starts before), places it under **`remote-fs.target`** instead of `local-fs.target`, and then waits for the filesystem's device to appear, which happens when `iscsi.service` logs in.
 - `nofail` lets the boot continue if the storage is unavailable, instead of dropping you into emergency mode. Your application should then depend on the mount (`RequiresMountsFor=/srv/san` in its unit).
 
 ```console
@@ -497,12 +524,23 @@ $ cat /sys/block/nvme0n1/queue/scheduler
 
 The kernel picks `mq-deadline` for single-queue devices and `none` for multi-queue devices like NVMe. For a SAN LUN, the array's controller reorders far better than the host can, so `none` or `mq-deadline` are both reasonable: measure before changing anything. Changes via `echo none | sudo tee /sys/block/sdb/queue/scheduler` last until reboot; make them permanent with a udev rule or a tuned profile.
 
-**Queue depth** is how many requests can be outstanding to a device at once. A network LUN needs depth to hide network latency: with one request at a time and 0.5 ms round trips, you can never exceed 2,000 IOPS, however fast the array is. For iSCSI, the per-LUN depth comes from `node.session.queue_depth` in `iscsid.conf`:
+**Queue depth** is how many requests can be outstanding to a device at once. A network LUN needs depth to hide network latency: with one request at a time and 0.5 ms round trips, you can never exceed 2,000 IOPS, however fast the array is. For iSCSI, the per-LUN depth comes from `node.session.queue_depth` in `iscsid.conf` (default 32):
 
 ```console
 $ cat /sys/block/sdb/device/queue_depth
 32
 ```
+
+??? question "Under the hood: three queue limits stacked on top of each other"
+    The 32 you just read is only the first of three limits a request has to get past:
+
+    | Limit | Where it's set | Default |
+    |---|---|---|
+    | Per LUN | `node.session.queue_depth` (initiator) | 32 |
+    | Per session (all LUNs on that login) | `node.session.cmds_max` (initiator) | 128 |
+    | Per session, granted by the target | iSCSI **CmdSN window**; on LIO the TPG attribute `default_cmdsn_depth` | 64 on LIO |
+
+    The target has the final word: it hands the initiator a window of command sequence numbers, and the initiator can't send past it. So eight LUNs behind one LIO session can't each run 32 deep: together they're capped at 64 outstanding commands, and fio will show latency rising while IOPS stay flat. Arrays document their own window; raise the initiator values only to match it, and only after a benchmark shows you're hitting it. Multipath helps here too: each path is its own session with its own window.
 
 ## Benchmarking with fio, done right
 
@@ -624,20 +662,23 @@ $ sudo dnf install -y targetcli iscsi-initiator-utils device-mapper-multipath nv
 
     **Goal:** Export a file-backed LUN on two IP addresses and log in to both.
 
-    1. Create two "storage networks" on a dummy interface:
+    1. Create two "storage networks" on a dummy interface. Use NetworkManager so the addresses come back after the reboot in Lab 3:
 
         ```bash
-        sudo ip link add sanlab type dummy
-        sudo ip addr add 192.168.77.1/24 dev sanlab
-        sudo ip addr add 192.168.78.1/24 dev sanlab
-        sudo ip link set sanlab up
+        sudo nmcli connection add type dummy ifname sanlab con-name sanlab \
+            ipv4.method manual ipv4.addresses 192.168.77.1/24,192.168.78.1/24 \
+            ipv6.method disabled
+        sudo nmcli connection up sanlab
+        ip -br addr show sanlab
         ```
 
     2. Build the target. Use your own initiator name from `/etc/iscsi/initiatorname.iscsi`:
 
         ```bash
         IQN=iqn.2026-10.lab.rocky:storage1
-        INIT=$(sudo awk -F= '/InitiatorName/{print $2}' /etc/iscsi/initiatorname.iscsi)
+        sudo systemctl start iscsid      # generates the initiator name on first start
+        INIT=$(sudo awk -F= '/^InitiatorName=/{print $2}' /etc/iscsi/initiatorname.iscsi)
+        echo "$INIT"
         sudo mkdir -p /var/lib/target-lab
         sudo systemctl enable --now target
         sudo targetcli /backstores/fileio create name=disk1 file_or_dev=/var/lib/target-lab/disk1.img size=1G
@@ -721,6 +762,8 @@ $ sudo dnf install -y targetcli iscsi-initiator-utils device-mapper-multipath nv
         $ sudo iscsiadm -m node -T iqn.2026-10.lab.rocky:storage1 -p 192.168.78.1 -l
         ```
 
+        After the logout the path disappears from the map completely (the disk is gone, not just failed). After the login it comes back, possibly under a new name such as `sdd`: multipath doesn't care, because it matches on the WWID.
+
     **Check your work:** the `dd` loop never errored, and `journalctl -u multipathd` shows the path being marked failed and then reinstated.
 
     **Clean up:** stop the `dd` loop with ++ctrl+c++. Keep multipath for Lab 3.
@@ -751,16 +794,28 @@ $ sudo dnf install -y targetcli iscsi-initiator-utils device-mapper-multipath nv
         ```console
         $ findmnt /srv/san
         TARGET   SOURCE             FSTYPE OPTIONS
-        /srv/san /dev/mapper/mpatha xfs    rw,relatime,seclabel,attr2,inode64,logbufs=8,logbsize=32k,noquota,_netdev
+        /srv/san /dev/mapper/mpatha xfs    rw,relatime,seclabel,attr2,inode64,logbufs=8,logbsize=32k,noquota
         $ systemctl list-dependencies remote-fs.target | grep san
         ● ├─srv-san.mount
         ```
 
-    4. Reboot, and confirm it comes back by itself: `findmnt /srv/san` after login. (Make sure your `target.service` is enabled, since in this lab the target lives on the same machine.)
+    4. This lab has a twist a real SAN doesn't: the target runs on the same machine. `target.service` normally starts after `network.target`, which can be before the `sanlab` addresses exist, and nothing orders it against the initiator. Add a drop-in so the target comes up after the network and before `iscsi.service` logs in (and, in reverse, stops only after the initiator has logged out at shutdown):
 
-    **Check your work:** the mount survives a reboot, and `systemctl show srv-san.mount -p After | tr ' ' '\n' | grep -E 'network|iscsi'` lists network and iSCSI units it waits for.
+        ```bash
+        sudo mkdir -p /etc/systemd/system/target.service.d
+        printf '[Unit]\nWants=network-online.target\nAfter=network-online.target\nBefore=iscsi.service\n' | \
+            sudo tee /etc/systemd/system/target.service.d/lab-order.conf
+        sudo systemctl daemon-reload
+        ```
 
-    **Clean up:** `sudo umount /srv/san`, then remove the line you added from `/etc/fstab` (`sudo sed -i '\#/srv/san#d' /etc/fstab`) and run `sudo systemctl daemon-reload`.
+    5. Reboot, and confirm it comes back by itself: `findmnt /srv/san` and `sudo multipath -ll` after login.
+
+    **Check your work:** the mount survives a reboot, and `systemctl show srv-san.mount -p After | tr ' ' '\n' | grep -E 'network|remote-fs'` lists `network-online.target` and `remote-fs-pre.target`.
+
+    ??? success "What `_netdev` turned into"
+        systemd never reads fstab directly at mount time. At boot (and on `daemon-reload`), `systemd-fstab-generator` turns each line into a `.mount` unit under `/run/systemd/generator/`; `systemctl cat srv-san.mount` shows the generated file. Because of `_netdev`, systemd treats it as a network mount: `systemctl show srv-san.mount -p After -p Wants` lists `network-online.target` and `remote-fs-pre.target`, and the unit hangs under `remote-fs.target` instead of `local-fs.target`. `nofail` means `remote-fs.target` only *wants* it rather than *requires* it, so a missing LUN can't fail the boot. Without the drop-in from step 4, the reboot may still work by luck of timing; the drop-in makes it deterministic.
+
+    **Clean up:** `sudo umount /srv/san`, then remove the line you added from `/etc/fstab` (`sudo sed -i '\#/srv/san#d' /etc/fstab`) and run `sudo systemctl daemon-reload`. Keep the drop-in until the final teardown.
 
 !!! lab "Lab 4: NVMe over TCP on loopback"
 
@@ -868,9 +923,12 @@ $ sudo dnf install -y targetcli iscsi-initiator-utils device-mapper-multipath nv
     sudo iscsiadm -m node -T iqn.2026-10.lab.rocky:storage1 -u
     sudo iscsiadm -m node -T iqn.2026-10.lab.rocky:storage1 -o delete
     sudo targetcli clearconfig confirm=True
+    sudo targetcli saveconfig        # otherwise target.service restores the old config next time
     sudo systemctl disable --now target
-    sudo rm -rf /var/lib/target-lab /etc/multipath.conf /etc/multipath/bindings /etc/multipath/wwids
-    sudo ip link del sanlab
+    sudo rm -rf /etc/systemd/system/target.service.d/lab-order.conf /var/lib/target-lab
+    sudo rm -f /etc/multipath.conf /etc/multipath/bindings /etc/multipath/wwids
+    sudo systemctl daemon-reload
+    sudo nmcli connection delete sanlab
     ```
 
     **Check your work:** `lsblk` shows no `sdb`/`sdc`, `sudo iscsiadm -m node` reports no records, and `sudo targetcli ls` shows empty backstores.
@@ -959,7 +1017,7 @@ Native NVMe multipath in the kernel driver (with ANA). dm-multipath for NVMe isn
 
 What does `_netdev` do in fstab?
 
-Marks the mount as network-dependent, so systemd orders it after the network and iSCSI login and puts it under `remote-fs.target`.
+Marks the mount as network-dependent, so systemd orders it after `network-online.target` and puts it under `remote-fs.target` instead of `local-fs.target`.
 
 </div>
 

@@ -19,7 +19,7 @@ A motion controller has to send a new position to a motor every 250 microseconds
     - Install `kernel-rt` from Rocky's RT repository and know what PREEMPT_RT changes
     - Apply and customise tuned profiles: `realtime`, `cpu-partitioning`, `network-latency`, `realtime-virtual-host`
     - Isolate CPUs with `isolcpus`, `nohz_full`, `rcu_nocbs` and `irqaffinity`, and move IRQs off them
-    - Run a task under `SCHED_FIFO` with `chrt`, set limits safely, and understand RT throttling
+    - Run a task under `SCHED_FIFO` with `chrt`, set limits safely, and know how the kernel protects starving tasks (RT throttling on Rocky 9, the fair server on Rocky 10)
     - Measure with `cyclictest`, `hwlatdetect` and `rteval`, and read a latency histogram
 
 ## The big picture
@@ -69,7 +69,7 @@ Latency comes from every layer of the machine, and the worst offenders are often
 
 <div class="layer" data-label="Scheduler" data-tag="policy, priority" markdown>
 
-**Delays:** other runnable tasks on the same CPU, a normal (`SCHED_OTHER`) policy that time-slices you with everyone else, migration between CPUs, RT throttling.
+**Delays:** other runnable tasks on the same CPU, a normal (`SCHED_OTHER`) policy that time-slices you with everyone else, migration between CPUs, and the kernel's starvation protection taking the CPU back for normal tasks.
 
 **Fixes:** `SCHED_FIFO` priority with `chrt`, pinning with `taskset`, isolated CPUs with nothing else on them.
 
@@ -93,7 +93,7 @@ Latency comes from every layer of the machine, and the worst offenders are often
 
 <div class="layer" data-label="Kernel housekeeping" data-tag="tick, RCU" markdown>
 
-**Delays:** the scheduler tick (1000 times a second on Rocky's kernel), RCU callbacks, kernel worker threads, timers migrated onto your CPU.
+**Delays:** the scheduler tick (1000 times a second on Rocky's x86_64 kernel, 100 on aarch64), RCU callbacks, kernel worker threads, timers migrated onto your CPU.
 
 **Fixes:** `nohz_full=` (stop the tick when one task runs), `rcu_nocbs=` (offload RCU callbacks), workqueue cpumasks. tuned's `cpu-partitioning` and `realtime` profiles set these.
 
@@ -148,10 +148,10 @@ You can see which you're running:
 $ uname -v
 #1 SMP PREEMPT_DYNAMIC Wed Sep 24 14:02:11 UTC 2025
 $ sudo cat /sys/kernel/debug/sched/preempt
-none (voluntary) full
+none (voluntary) full lazy
 ```
 
-`PREEMPT_DYNAMIC` means the standard kernel can switch models at boot: the parentheses show the active one. Add `preempt=full` to the kernel command line (with `grubby`) and it becomes `none voluntary (full)`. That's a cheap improvement for low-latency work, but it's not PREEMPT_RT. On `kernel-rt`, `uname -v` says `PREEMPT_RT`.
+`PREEMPT_DYNAMIC` means the standard kernel can switch models at boot: the parentheses show the active one. (Early Rocky 10 kernels list only `none`, `voluntary` and `full`; `lazy`, a newer model that preempts like `full` but gives normal tasks a little more slack, arrived in a later update.) Add `preempt=full` to the kernel command line (with `grubby`) and it becomes `none voluntary (full) lazy`. That's a cheap improvement for low-latency work, but it's not PREEMPT_RT. On `kernel-rt`, `uname -v` says `PREEMPT_RT`.
 
 ### What PREEMPT_RT changes
 
@@ -176,8 +176,10 @@ Rocky ships the real-time packages in two extra repositories, both **disabled by
 
 | Repo id | What it's for |
 |---|---|
-| `rt` | `kernel-rt` and its modules, plus real-time tooling such as the `tuned-profiles-realtime` and `rteval` packages |
-| `nfv` | Network Functions Virtualization: packages for running real-time workloads inside VMs (NFV tuned profiles, a real-time KVM host stack) |
+| `rt` | `kernel-rt` and its modules, `realtime-setup`, `rteval` (with `rteval-loads`) and `tuned-profiles-realtime` |
+| `nfv` | Network Functions Virtualization: the same `kernel-rt` plus `kernel-rt-kvm` (real-time KVM host support) and the `tuned-profiles-nfv`, `-nfv-host` and `-nfv-guest` profiles for real-time VMs |
+
+The measuring tools are elsewhere: `realtime-tests` (cyclictest, hwlatdetect and friends) is in **AppStream**, and `tuned-profiles-cpu-partitioning` is in **BaseOS**, so you can measure and partition the stock kernel without enabling either repo.
 
 ```console
 $ sudo dnf config-manager --set-enabled rt
@@ -188,10 +190,10 @@ kernel="/boot/vmlinuz-6.12.0-…el10_0.x86_64"
 …
 ```
 
-Use `grubby --set-default` with the RT kernel's path to boot it by default, or pick it once from the GRUB menu ([module 14](14-the-boot-process.md)). The `realtime-tests` package (with `cyclictest` and `hwlatdetect`) is in AppStream, so you can measure the stock kernel without enabling anything.
+Use `grubby --set-default` with the RT kernel's path to boot it by default, or pick it once from the GRUB menu ([module 14](14-the-boot-process.md)).
 
 !!! note "Architecture support"
-    Red Hat supports the real-time kernel on certified x86_64 servers; the aarch64 build is a Technology Preview in RHEL 10. Rocky follows the same packages. Firmware matters more than the kernel: tune the platform (BIOS low-latency settings) before you judge the RT kernel.
+    Red Hat certifies the real-time kernel on specific x86_64 servers. RHEL 10 also builds it for aarch64 (including a 64k-page `kernel-rt-64k` variant) with narrower support, and Rocky builds the same packages. Check the current release notes before you plan an aarch64 real-time deployment. Either way, firmware matters more than the kernel: tune the platform (BIOS low-latency settings) before you judge the RT kernel.
 
 ## Measuring latency: cyclictest, hwlatdetect, rteval
 
@@ -285,7 +287,7 @@ flowchart BT
     LP["latency-performance<br/>performance governor, C-state limit, swappiness 10"]
     NL["network-latency<br/>THP off, busy polling, NUMA balancing off, skew_tick=1"] --> LP
     CP["cpu-partitioning<br/>isolate cores: nohz_full, rcu_nocbs, IRQ and workqueue bans"] --> NL
-    RT["realtime<br/>isolcpus, P-state driver off, RT throttling off"] --> NL
+    RT["realtime<br/>isolcpus, P-state driver off, sched_rt_runtime_us -1"] --> NL
     RVH["realtime-virtual-host"] --> RT
     RVG["realtime-virtual-guest"] --> RT
 ```
@@ -295,8 +297,8 @@ flowchart BT
 | `latency-performance` | `tuned` | Lower latency on any server, no isolation |
 | `network-latency` | `tuned` | Low-latency networking (adds busy polling, THP off) |
 | `cpu-partitioning` | `tuned-profiles-cpu-partitioning` | Dedicated cores for polling apps (DPDK) on the stock kernel |
-| `realtime` | `tuned-profiles-realtime` | Bare-metal hosts running `kernel-rt` |
-| `realtime-virtual-host` / `-guest` | `tuned-profiles-nfv-host` / `-guest` | A real-time KVM host and its guests |
+| `realtime` | `tuned-profiles-realtime` (`rt` repo) | Bare-metal hosts running `kernel-rt` |
+| `realtime-virtual-host` / `-guest` | `tuned-profiles-nfv-host` / `-guest` (`nfv` repo) | A real-time KVM host and its guests |
 
 ```console
 $ tuned-adm active
@@ -352,16 +354,12 @@ include=cpu-partitioning
 [variables]
 isolated_cores=2-3
 
-[sysctl]
-kernel.sched_rt_runtime_us=-1
-
 [bootloader]
 cmdline_motion=+preempt=full
 ```
 
 - `include=cpu-partitioning` inherits the whole parent profile.
 - Setting `isolated_cores` here means you don't need the variables file.
-- The `[sysctl]` section disables RT throttling (see the warning in the scheduling section before you copy this).
 - `cmdline_motion` adds a kernel argument; any `cmdline_*` key in `[bootloader]` is merged into the command line.
 
 ```console
@@ -369,7 +367,7 @@ $ sudo tuned-adm profile motion-control
 ```
 
 !!! version "Rocky 9 vs 10"
-    Rocky 10's tuned keeps system profiles in `/usr/lib/tuned/profiles/` and your custom profiles in `/etc/tuned/profiles/`. Rocky 9's tuned uses the older flat layout: `/usr/lib/tuned/<name>/` and `/etc/tuned/<name>/`. The variables files (`/etc/tuned/realtime-variables.conf`, `/etc/tuned/cpu-partitioning-variables.conf`) are in the same place on both. When you copy a custom profile from a Rocky 9 host, move it into `/etc/tuned/profiles/`.
+    Rocky 10's tuned keeps system profiles in `/usr/lib/tuned/profiles/` and your custom profiles in `/etc/tuned/profiles/`. Older tuned releases, the ones Rocky 9 shipped for most of its life, use a flat layout: `/usr/lib/tuned/<name>/` and `/etc/tuned/<name>/`. `ls /usr/lib/tuned/` tells you which you have. The variables files (`/etc/tuned/realtime-variables.conf`, `/etc/tuned/cpu-partitioning-variables.conf`) are in the same place on both. When you copy a custom profile from an older host, move it into `/etc/tuned/profiles/`.
 
 ## CPU isolation
 
@@ -413,6 +411,15 @@ Rocky's standard kernel is built with `nohz_full` support, so this all works wit
 
 !!! warning "isolcpus is all or nothing"
     CPUs in `isolcpus` are excluded from load balancing. If you start a multi-threaded program and pin it to "2-3", the scheduler will **not** spread its threads across the two CPUs: they can all pile onto one. Pin each real-time thread to its own CPU explicitly. If you want a dedicated but balanced set of CPUs, use cpusets (cgroups, [module 18](18-containers.md)) or tuned's `cpu-partitioning` without `no_balance_cores`, instead of `isolcpus`.
+
+??? question "Under the hood: cpu-partitioning doesn't use isolcpus"
+    Read the `[bootloader]` line of `/usr/lib/tuned/profiles/cpu-partitioning/tuned.conf` and you'll find `nohz_full`, `rcu_nocbs` and `tuned.non_isolcpus`, but **no** `isolcpus`, unless you also set the `no_balance_cores` variable. So how does it keep processes off the isolated CPUs? Three other mechanisms:
+
+    - `[systemd] cpu_affinity=` sets `CPUAffinity=` in systemd's own config, so PID 1 and everything it starts (every service, every login session) inherits a mask of housekeeping CPUs only.
+    - `[scheduler] isolated_cores=` makes tuned walk the existing processes and move them off those CPUs (skipping patterns such as DPDK and `qemu-kvm` threads, which are meant to be there).
+    - `tuned.non_isolcpus=` in the command line is read by a hook tuned adds to the initramfs, which moves kernel workqueues to the housekeeping CPUs before udev even starts. The overlay also carries the systemd `CPUAffinity` setting, so the mask applies from the very first process.
+
+    The consequences are worth knowing. `cat /sys/devices/system/cpu/isolated` prints an **empty line** under cpu-partitioning, because that file only reports `isolcpus=`; check `nohz_full` instead. The scheduler still load-balances across the isolated CPUs, so a multi-threaded app pinned to "2-3" spreads properly (the pitfall in the warning above doesn't apply). And managed IRQs stay on all CPUs, because only the `realtime` profile adds `isolcpus=managed_irq,…`.
 
 Don't set the same arguments with both `grubby` and a tuned profile. tuned manages its own arguments and will add them again; mixing the two leads to duplicated or conflicting values that are hard to untangle. Pick one owner.
 
@@ -521,31 +528,49 @@ LimitMEMLOCK=infinity
 - `CPUAffinity=3` pins it to CPU 3.
 - `LimitMEMLOCK=infinity` lets it `mlockall()` its memory.
 
-### RT throttling: the safety valve
+### Starvation protection: from RT throttling to the fair server
 
-A runaway `SCHED_FIFO` loop would starve the whole CPU, including the shell you need to kill it. So by default the kernel limits all real-time tasks together to 950 ms out of every second, leaving 5% for everyone else:
+A runaway `SCHED_FIFO` loop would starve its CPU of everything else, including the kernel threads that CPU needs and the shell you'd use to kill it. Linux has always had a safety valve for this. Which one you get depends on the kernel, and Rocky 10 is where it changed.
+
+**Rocky 9 (kernel 5.14): RT throttling.** The kernel caps all real-time tasks together at `sched_rt_runtime_us` out of every `sched_rt_period_us`: 950 ms per second by default. When they hit the cap, it logs `sched: RT throttling activated` and simply stops running them for the rest of the period, a 50 ms hole in your real-time schedule. The `realtime` tuned profile sets `sched_rt_runtime_us = -1` to turn that off.
+
+**Rocky 10 (kernel 6.12): the fair server.** Kernel 6.12 replaced that mechanism with a **deadline server**: a per-CPU `SCHED_DEADLINE` reservation that runs normal (`SCHED_OTHER`) tasks on behalf of the fair scheduler. By default it gets 50 ms in every 1 s period on each CPU. It is **deferred**: it does nothing while normal tasks get CPU time on their own, and only steps in once they've been starved for most of a period. Then it runs them, at deadline priority, above every `SCHED_FIFO` task.
 
 ```console
 $ sysctl kernel.sched_rt_period_us kernel.sched_rt_runtime_us
 kernel.sched_rt_period_us = 1000000
 kernel.sched_rt_runtime_us = 950000
+$ sudo cat /sys/kernel/debug/sched/fair_server/cpu3/runtime /sys/kernel/debug/sched/fair_server/cpu3/period
+50000000
+1000000000
 ```
 
-When the limit kicks in, the kernel logs `sched: RT throttling activated` and your RT task simply stops for the rest of that second, which is itself a 50 ms latency spike. The `realtime` tuned profile sets `sched_rt_runtime_us = -1` (no limit), because on a properly isolated system the real-time task must never be throttled. Rocky's kernels don't enable per-cgroup RT bandwidth, so this global setting is the only knob.
+The two sysctls are still there with the same values, but on Rocky's kernel they no longer throttle anything. (Classic throttling now only exists in kernels built with per-cgroup RT bandwidth, `CONFIG_RT_GROUP_SCHED`, which Rocky's are not.) They now set the admission limit for `SCHED_DEADLINE` reservations, so the `realtime` profile's `-1` lifts that limit and leaves the fair server in place. The fair server's own values (in nanoseconds) live in debugfs and are reset at every boot.
 
-!!! danger "Turning off throttling removes the safety net"
-    With `sched_rt_runtime_us = -1`, a bug that makes a `SCHED_FIFO` thread spin will lock that CPU forever. On an isolated CPU that's survivable (housekeeping CPUs still run your shell). On a non-isolated one, or a single-CPU VM, it can hang the machine. Only disable throttling together with isolation, and test with a watchdog.
+??? question "Under the hood: what the fair server means for your latency budget"
+    Picture a busy-polling `SCHED_FIFO` thread that owns isolated CPU 3 at 100%. A per-CPU kernel worker (a `kworker/3:1` flushing a work item, say) becomes runnable on CPU 3. On Rocky 9 with throttling off, the kworker waits forever; if the kernel needed that work done, you'd eventually see hung-task warnings or an RCU stall. On Rocky 10, after roughly 950 ms of starvation the fair server runs the kworker. Good for the kernel, but your poller just lost up to 50 ms of CPU, and nothing in `chrt` or the tuned profile told you it could happen.
 
-<div class="quiz" data-answer="1" markdown>
+    That's why real-time users treat the fair server as "the new RT throttling". Three ways to live with it:
 
-Your `SCHED_FIFO` priority-80 thread is pinned to CPU 3 and wakes every 100 µs. cyclictest-style measurements show it's occasionally 50 ms late, and the journal says `sched: RT throttling activated`. What happened?
+    1. **Keep normal tasks off the CPU** (isolation, IRQ and workqueue masks, `nohz_full`). If nothing `SCHED_OTHER` is ever runnable there, the server never activates. This is the right fix, and `rtla osnoise` or a long cyclictest run proves it.
+    2. **Shrink it** for a CPU: `echo 5000000 | sudo tee /sys/kernel/debug/sched/fair_server/cpu3/runtime` gives starving tasks 5 ms per second instead of 50.
+    3. **Disable it** with `echo 0` to that file. The kernel logs `Fair server disabled on CPU 3`, and you are back to "a spinning FIFO thread owns this CPU forever". Only on isolated CPUs, only with a watchdog.
 
-- All RT tasks on the CPU used their 950 ms per second budget, so the kernel paused them for the rest of the period
-- A higher-priority SCHED_OTHER task preempted it
-- The thread ran out of locked memory
-- irqbalance moved its interrupt
+    Debugfs settings don't survive a reboot, so if you change them, do it from a small systemd unit (or a tuned `[script]`) that runs at boot, and document why.
 
-RT throttling caps real-time tasks to `sched_rt_runtime_us` per `sched_rt_period_us`. Something on that CPU (often a busy-polling thread at RT priority) is using nearly all of it. Either fix the busy loop, or isolate the CPU and disable throttling deliberately.
+!!! danger "Disabling the safety net"
+    On Rocky 9 that means `sched_rt_runtime_us = -1`; on Rocky 10 it means a fair-server runtime of `0`. Either way, a bug that makes a `SCHED_FIFO` thread spin will own that CPU forever. On an isolated CPU that's survivable (housekeeping CPUs still run your shell). On a non-isolated one, or a single-CPU VM, it can hang the machine. Only do it together with isolation, and test with a watchdog.
+
+<div class="quiz" data-answer="2" markdown>
+
+On Rocky 10, a `SCHED_FIFO` busy-polling thread owns isolated CPU 3 at 100%, and `kernel.sched_rt_runtime_us` is `-1`. A kernel worker thread becomes runnable on CPU 3. What happens?
+
+- The kworker never runs, because `-1` disabled every limit on real-time tasks
+- After it has been starved for most of a second, the fair server runs it for up to 50 ms, preempting the FIFO thread
+- The kernel logs `sched: RT throttling activated` and pauses the FIFO thread for 50 ms every second regardless
+- The scheduler migrates the FIFO thread to a housekeeping CPU
+
+On kernel 6.12 the RT throttling sysctls only set the admission limit for `SCHED_DEADLINE`. Starving normal tasks are rescued by the per-CPU fair server (50 ms per 1 s by default, deferred until they've been starved), which outranks `SCHED_FIFO`. Keep normal tasks off the CPU, or shrink the server's runtime in `/sys/kernel/debug/sched/fair_server/`.
 
 </div>
 
@@ -602,9 +627,9 @@ Current active profile: cpu-partitioning
 
 </div>
 
-<div class="task" data-expect="cat /sys/devices/system/cpu/isolated" data-hint="The kernel lists isolated CPUs in /sys/devices/system/cpu/." markdown>
+<div class="task" data-expect="cat /sys/devices/system/cpu/nohz_full" data-hint="The kernel lists tickless CPUs in /sys/devices/system/cpu/." markdown>
 
-**Step 2.** Which CPUs are isolated from the scheduler?
+**Step 2.** Which CPUs run without the periodic tick (`nohz_full`)?
 
 ```text
 2-3
@@ -633,12 +658,12 @@ pid 4410's current scheduling priority: 80
 
 </div>
 
-<div class="task" data-expect="sysctl kernel.sched_rt_runtime_us||cat /proc/sys/kernel/sched_rt_runtime_us" data-hint="It's the sysctl kernel.sched_rt_runtime_us." markdown>
+<div class="task" data-expect="sudo cat /sys/kernel/debug/sched/fair_server/cpu3/runtime||cat /sys/kernel/debug/sched/fair_server/cpu3/runtime" data-hint="debugfs needs root: sudo cat the runtime file." markdown>
 
-**Step 5.** Is RT throttling enabled? Read `kernel.sched_rt_runtime_us`.
+**Step 5.** How much CPU 3's fair server reserves for starving normal tasks: read its `runtime` file under `/sys/kernel/debug/sched/fair_server/cpu3/` (as root).
 
 ```text
-kernel.sched_rt_runtime_us = 950000
+50000000
 ```
 
 </div>
@@ -756,29 +781,44 @@ $ sudo dnf install -y realtime-tests stress-ng tuned-profiles-cpu-partitioning k
 
     **Clean up:** `sudo kill %1` (or `sudo pkill -f 'sleep 0.001'` from another shell); `rm -f /tmp/irq1 /tmp/irq2`. IRQ affinity resets at reboot.
 
-!!! lab "Lab 4: RT throttling in action"
+!!! lab "Lab 4: Watch the kernel rescue a starving task"
 
-    **Goal:** See the kernel's safety valve stop a runaway real-time task.
+    **Goal:** Starve a normal task with a runaway `SCHED_FIFO` loop, and measure the slice the kernel's starvation protection gives back.
 
-    1. Confirm throttling is on: `sysctl kernel.sched_rt_runtime_us` should show `950000`. (If it's `-1`, you applied the `realtime` profile; **stop here** and don't run this lab on that VM.)
-    2. Start a CPU-burning FIFO task, confined to isolated CPU 3 and limited to 20 seconds:
-
-        ```console
-        $ sudo timeout 20 taskset -c 3 chrt -f 50 bash -c 'while :; do :; done' &
-        ```
-
-    3. Check the kernel log:
+    1. Look at the protection on CPU 3. On Rocky 10 that's the fair server (values in nanoseconds):
 
         ```console
-        $ sudo dmesg | grep -i throttl
-        [ 1843.220114] sched: RT throttling activated
+        $ sudo cat /sys/kernel/debug/sched/fair_server/cpu3/runtime
+        50000000
         ```
 
-    4. While it runs, open a second shell and type a few commands. Everything on the housekeeping CPUs is unaffected, and the kernel keeps a slice of CPU 3 back from the FIFO task for normal work.
+        If the file doesn't exist, you're on an older kernel (Rocky 9) that uses RT throttling instead: `sysctl kernel.sched_rt_runtime_us` must show `950000`. If it shows `-1` there, **stop**: nothing would protect the CPU.
 
-    **Check your work:** the system stays responsive throughout, and the kernel log records that it throttled the RT task. (The message is printed only once per boot, so it may already be there from an earlier test. Newer kernels, including 6.12, also have a "deadline server" that reserves time for normal tasks, so exactly how the CPU time splits can vary.)
+    2. Start an ordinary CPU-burning task pinned to CPU 3, then a `SCHED_FIFO` one on the same CPU. Both end on their own:
 
-    **Clean up:** the `timeout` ends the task after 20 seconds.
+        ```console
+        $ timeout 40 taskset -c 3 bash -c 'while :; do :; done' &
+        $ sudo timeout 30 taskset -c 3 chrt -f 50 bash -c 'while :; do :; done' &
+        ```
+
+    3. Measure how CPU 3 is shared over a 5 second window (the second `top` sample is the one that counts):
+
+        ```console
+        $ top -b -d 5 -n 2 -o %CPU | grep -A2 '^ *PID' | tail -2
+           4471 root     -51   0  226112   3584   3200 R  95.0   0.1   0:24.37 bash
+           4466 alex      20   0  226112   3456   3072 R   5.0   0.1   0:02.71 bash
+        ```
+
+        `PR -51` is the FIFO task (priority 50); `PR 20` is the normal one.
+
+    4. While it runs, use your shell normally. It lives on the housekeeping CPUs and is unaffected.
+
+    **Check your work:** the FIFO task gets about 95% of CPU 3 and the normal task about 5%, not 0%. On Rocky 10 that 5% is the fair server's 50 ms per second; on Rocky 9 it's RT throttling, and `sudo dmesg | grep -i throttl` shows `sched: RT throttling activated` (printed once per boot). On Rocky 10 that message never appears.
+
+    ??? success "Why is the normal task's share lumpy?"
+        The fair server is deferred: it waits until normal tasks have been starved for about 950 ms, then runs them for up to 50 ms. Watch `top -d 1` and you'll see the normal task jump between 0% and a few percent rather than sit at a steady 5%. For a real-time thread on that CPU, those 50 ms bursts are exactly the latency spike the "Under the hood" box above warns about.
+
+    **Clean up:** both tasks exit by themselves (the FIFO one after 30 seconds, the normal one after 40). To stop them early: `sudo pkill -f 'while :; do :; done'`.
 
 !!! lab "Lab 5 (optional): kernel-rt and hwlatdetect"
 
@@ -839,14 +879,15 @@ $ sudo dnf install -y realtime-tests stress-ng tuned-profiles-cpu-partitioning k
 | `sudo tuned-adm profile cpu-partitioning` | Apply a profile (reboot if it sets kernel args) |
 | `/etc/tuned/cpu-partitioning-variables.conf` | Set `isolated_cores=` for the profile |
 | `sudo grubby --update-kernel=ALL --args="…"` | Add kernel arguments by hand |
-| `cat /sys/devices/system/cpu/isolated` | Show isolated CPUs |
+| `cat /sys/devices/system/cpu/isolated` / `nohz_full` | CPUs isolated with `isolcpus=` / running tickless |
 | `cat /proc/interrupts` | Interrupt counts per CPU |
 | `echo 0-1 > /proc/irq/N/smp_affinity_list` | Move an IRQ (as root) |
 | `IRQBALANCE_BANNED_CPULIST=2-3` | Keep irqbalance off CPUs (in `/etc/sysconfig/irqbalance`) |
 | `taskset -c 3 cmd` | Run pinned to CPU 3 |
 | `chrt -f 80 cmd` / `chrt -p PID` | Run as SCHED_FIFO 80 / show policy |
 | `ps -eLo pid,tid,class,rtprio,psr,comm` | Policy, priority and CPU of every thread |
-| `sysctl kernel.sched_rt_runtime_us` | RT throttling budget (`-1` = off) |
+| `sysctl kernel.sched_rt_runtime_us` | Rocky 9: RT throttling budget (`-1` = off). Rocky 10: deadline admission limit only |
+| `/sys/kernel/debug/sched/fair_server/cpuN/runtime` | Rocky 10: CPU time (ns per second) reserved for starving normal tasks |
 | `cpupower idle-info` / `monitor` / `frequency-info` | C-states, residency, frequency |
 | `sudo cyclictest -m -S -p95 -i200 -D 60 -q` | Measure scheduling latency on every CPU |
 | `sudo hwlatdetect --duration=60 --threshold=10` | Detect firmware or hypervisor stalls |
@@ -898,9 +939,9 @@ Both use priorities 1 to 99 and beat normal tasks. FIFO runs until it blocks; RR
 
 <div class="card" markdown>
 
-What is RT throttling?
+How does the kernel stop a runaway SCHED_FIFO task from starving a CPU?
 
-A cap (default 950,000 µs per 1,000,000 µs) on CPU time for all RT tasks, so a runaway RT task can't starve the system. `-1` disables it.
+Rocky 9: RT throttling caps RT tasks at 950 ms per second (`sched_rt_runtime_us`). Rocky 10 (6.12): a per-CPU fair server runs starved normal tasks for up to 50 ms per second, preempting RT tasks.
 
 </div>
 
@@ -938,7 +979,7 @@ They're managed IRQs: the driver and kernel own their affinity. Use `isolcpus=ma
     - Rocky's standard kernel uses voluntary preemption (switchable with `preempt=full`); `kernel-rt` from the disabled-by-default `rt` repo brings PREEMPT_RT.
     - tuned's `cpu-partitioning` and `realtime` profiles coordinate isolation, IRQ bans, workqueues, kernel arguments and power settings; customise them with a child profile.
     - Isolate CPUs (`isolcpus`, `nohz_full`, `rcu_nocbs`, `irqaffinity`), move IRQs off them, and pin each RT thread with `taskset` and `chrt`.
-    - RT throttling protects you from runaway RT tasks; disable it only together with proper isolation.
+    - The kernel protects starving tasks from runaway RT threads: RT throttling on Rocky 9, the per-CPU fair server on Rocky 10. Shrink or disable it only together with proper isolation.
     - `cyclictest`, `hwlatdetect` and `rteval` turn tuning from guesswork into evidence.
 
 ## Go deeper

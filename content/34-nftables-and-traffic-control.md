@@ -344,6 +344,23 @@ There's `ssh`, `dhcpv6-client` and `cockpit`, the three services in the default 
 !!! warning "Look, don't touch"
     Never add rules to `inet firewalld` with `nft`. firewalld rebuilds that table from its own configuration on every reload, so your change silently disappears. On Rocky 10 (and since Rocky 9.5) firewalld also creates the table with `flags owner,persist`: the kernel lets only firewalld modify it, and a global `nft flush ruleset` skips it. Change firewalld's behaviour with `firewall-cmd` (zones, policies, rich rules) instead.
 
+??? question "Under the hood: how the kernel knows the table is firewalld's"
+    When firewalld starts, it probes whether the kernel and `nft` support table ownership, and if so creates its table with two flags:
+
+    - **owner** binds the table to firewalld's own netlink socket. Any other process (your `nft`, Ansible, a script) that tries to add, change or delete it gets `Operation not permitted`. A global `flush ruleset` silently skips it.
+    - **persist** keeps the table in the kernel if that socket closes. Without it, an owned table is destroyed the moment its owner exits. With it, a crashed or restarting firewalld leaves the last good rules in place instead of opening the host, and the restarted daemon takes ownership back.
+
+    You can see the owner when you list it: `nft` prints the owning program's name as a comment on the table line.
+
+    ```console
+    $ sudo nft list table inet firewalld | head -3
+    table inet firewalld { # progname firewalld
+    	flags owner,persist
+    …
+    ```
+
+    The production consequence: a ruleset dump from a firewalld host (`nft list ruleset > backup.nft`) can no longer be reloaded as a whole. The file contains `table inet firewalld { … }`, the kernel refuses that part with `Operation not permitted`, and because `nft -f` is all or nothing, **your** tables in the same file don't load either. Back up and restore your own tables one by one (`nft list table inet mytable`).
+
 ### Raw nftables or firewalld?
 
 <div class="decision" markdown>
@@ -389,7 +406,7 @@ There's `ssh`, `dhcpv6-client` and `cockpit`, the three services in the default 
 
 ## Writing a persistent ruleset
 
-On Rocky, `nftables.service` loads one file at boot: `/etc/sysconfig/nftables.conf`. Rocky ships it with only comments and commented-out `include` lines, plus some sample files in `/etc/nftables/`. The convention is to keep your real rules in `/etc/nftables/*.nft` and include them:
+On Rocky, `nftables.service` loads one file at boot: `/etc/sysconfig/nftables.conf`. Rocky ships it with only comments and a commented-out `include` line, plus three sample files in `/etc/nftables/` (`main.nft`, `nat.nft` and `router.nft`). The convention is to keep your real rules in `/etc/nftables/*.nft` and include them. Give your files their own names so a package update never touches them:
 
 ```console
 $ systemctl cat nftables | grep -E 'Exec'
@@ -406,7 +423,7 @@ Notice `ExecStop` and `ExecReload`: they flush the **whole** ruleset in that nam
 
 To make a file safe to load again and again, start it by removing your own table, and only your own table:
 
-```bash title="/etc/nftables/router.nft"
+```bash title="/etc/nftables/lab-router.nft"
 table inet router          # (1)!
 delete table inet router   # (2)!
 
@@ -429,15 +446,15 @@ table inet router {
 Always check the syntax first. `-c` parses and validates against the running kernel without applying anything:
 
 ```console
-$ sudo nft -c -f /etc/nftables/router.nft && echo OK
+$ sudo nft -c -f /etc/nftables/lab-router.nft && echo OK
 OK
-$ sudo nft -f /etc/nftables/router.nft
+$ sudo nft -f /etc/nftables/lab-router.nft
 ```
 
 Then include the file from `/etc/sysconfig/nftables.conf` and enable the service:
 
 ```ini title="/etc/sysconfig/nftables.conf"
-include "/etc/nftables/router.nft"
+include "/etc/nftables/lab-router.nft"
 ```
 
 ```console
@@ -448,13 +465,13 @@ $ sudo systemctl enable --now nftables
     When you change a firewall over SSH, a typo in a `policy drop` chain can lock you out. Schedule a rollback before loading, then cancel it once you've confirmed you can still connect:
 
     ```console
-    $ sudo nft list ruleset > /root/nft-before.nft
-    $ sudo systemd-run --on-active=5m --unit=nft-rollback /bin/sh -c 'nft -f /root/nft-before.nft'
-    $ sudo nft -f /etc/nftables/new.nft
+    $ { echo 'table inet router'; echo 'delete table inet router'; sudo nft list table inet router; } | sudo tee /root/nft-before.nft >/dev/null
+    $ sudo systemd-run --on-active=5m --unit=nft-rollback nft -f /root/nft-before.nft
+    $ sudo nft -f /etc/nftables/lab-router.nft
     $ sudo systemctl stop nft-rollback.timer     # still connected? cancel the undo
     ```
 
-    For the rollback file to be a full replacement, it needs the same "declare, delete, redefine" header for each of your tables.
+    The backup holds only **your** table, with the same "declare, delete, redefine" header, so loading it replaces exactly that table. Don't use a whole `nft list ruleset` dump for this on a firewalld host: it contains firewalld's owned table, which the kernel won't let you load, so the entire rollback would fail.
 
 <div class="quiz" data-answer="1" markdown>
 
@@ -492,6 +509,11 @@ Reading it: protocol, the seconds left before the entry expires (431999 is about
 
 !!! pitfall "nf_conntrack: table full, dropping packet"
     Busy NAT gateways and load balancers can fill the conntrack table. New connections then fail at random while existing ones keep working. Compare `conntrack -C` with `sysctl net.netfilter.nf_conntrack_max`, check the journal for the message above, and raise the limit (in a file under `/etc/sysctl.d/`) or exempt high-volume stateless traffic with a `notrack` rule in a `raw` priority chain.
+
+??? question "Under the hood: a conntrack entry isn't real until it's confirmed"
+    Conntrack creates an entry for a new flow at the start of the packet's path (prerouting or output), but it only **inserts** it into the global table at the very end (postrouting for forwarded and outgoing packets, input for local delivery). Until then it is "unconfirmed", attached only to that one packet. That is why a packet you drop in `forward` never shows up in `conntrack -L` or as a `[NEW]` event in `conntrack -E`.
+
+    The design has a famous failure mode. Two packets of the **same new UDP flow** (a glibc resolver sends its A and AAAA queries from one socket at the same instant) can be processed on two CPUs at once. Both create an unconfirmed entry; the first to reach the end wins; the second collides. With NAT in the path the loser is dropped and counted in `conntrack -S` as `insert_failed`. The client sees one of its DNS queries vanish and waits for a 5 second timeout. This was the "5 second DNS delay" in container platforms for years. Newer kernels resolve most of these clashes instead of dropping, but when you see intermittent 5 s delays on a NAT host, `conntrack -S` is the first place to look.
 
 !!! tip "Rules you add don't affect existing flows"
     A rule that drops `ct state new` traffic to a port won't kill a connection that is already established, because its packets are `established`. After tightening a firewall, `conntrack -D` on the affected flows forces them to be checked against the new rules.
@@ -636,6 +658,18 @@ qdisc fq_codel 0: parent :1 limit 10240p flows 1024 quantum 1514 target 5ms inte
 $ sysctl net.core.default_qdisc
 net.core.default_qdisc = fq_codel
 ```
+
+??? question "Under the hood: virtual interfaces have no queue at all"
+    Look at a veth, bridge or loopback interface and you won't find fq_codel:
+
+    ```console
+    $ sudo ip link add vtest type veth peer name vtest-peer
+    $ tc qdisc show dev vtest
+    qdisc noqueue 0: root refcnt 2
+    $ sudo ip link del vtest
+    ```
+
+    **noqueue** means "hand the packet straight to the driver". A veth can always accept a packet instantly (it just passes it to its peer), so a queue would only add overhead. Two consequences people trip over: `tc -s qdisc` on a veth shows no statistics until you add a qdisc, and `tc qdisc del dev veth-x root` puts you back to `noqueue`, not fq_codel. On physical NICs the real queue is the driver's ring buffer; a mechanism called **BQL** (byte queue limits, `/sys/class/net/eth0/queues/tx-0/byte_queue_limits/`) keeps that ring small, so packets wait in the qdisc where fq_codel can manage them instead of in hardware where nothing can.
 
 !!! tip "Read the drop counters"
     `tc -s qdisc show dev eth0` shows `Sent … (dropped N, overlimits N requeues N)` and a `backlog`. Climbing `dropped` with a non-zero backlog means the interface is congested and the qdisc is shedding load. Zero drops and a full application queue means the bottleneck is elsewhere. The [performance module](19-performance-and-observability.md) shows how this fits into a USE-method check.
