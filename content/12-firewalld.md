@@ -74,7 +74,7 @@ flowchart TB
 One more kernel feature makes firewalls practical: **connection tracking** (conntrack). The kernel remembers every connection it has seen. When your server makes an outgoing request, the reply is recognised as part of an **established** connection and allowed back in automatically. That is why you only write rules for *new* inbound connections.
 
 !!! note "One manager only"
-    On Rocky 10, nftables is the only backend firewalld uses. Do not run the `nftables.service` with your own ruleset, or `iptables` scripts, alongside firewalld: they would fight over the same kernel tables. Pick firewalld (the default) and use its features. You can still *read* the result with `nft list ruleset` (see below).
+    On Rocky 10, firewalld uses nftables as its backend (an iptables backend still exists but is deprecated and slated for removal). Do not run the `nftables.service` with your own ruleset, or `iptables` scripts, alongside firewalld: they would fight over the same kernel tables. Pick firewalld (the default) and use its features. You can still *read* the result with `nft list ruleset` (see below).
 
 ## Zones: trust levels for traffic
 
@@ -101,11 +101,13 @@ running
 $ sudo firewall-cmd --get-default-zone
 public
 $ sudo firewall-cmd --get-active-zones
-public
+public (default)
   interfaces: enp1s0
 $ sudo firewall-cmd --list-all
-public (active)
+public (default, active)
   target: default
+  ingress-priority: 0
+  egress-priority: 0
   icmp-block-inversion: no
   interfaces: enp1s0
   sources:
@@ -151,7 +153,7 @@ success
 $ sudo firewall-cmd --get-active-zones
 internal
   sources: 10.0.5.0/24
-public
+public (default)
   interfaces: enp1s0
 ```
 
@@ -197,16 +199,16 @@ samba
 ssh
 $ sudo firewall-cmd --info-service=samba
 samba
-  ports: 137/udp 138/udp 139/tcp 445/tcp
+  ports: 139/tcp 445/tcp
   protocols:
   source-ports:
   modules:
   destination:
-  includes:
-  helpers: netbios-ns
+  includes: samba-client
+  helpers:
 ```
 
-The built-in definitions live in `/usr/lib/firewalld/services/` as XML. Opening `samba` opens four ports and attaches the `netbios-ns` connection-tracking **helper** (kernel code that understands a protocol well enough to let its reply packets back in), which is much better than remembering the port list.
+The built-in definitions live in `/usr/lib/firewalld/services/` as XML. Services can include other services: `samba` opens 139/tcp and 445/tcp itself and pulls in `samba-client` (138/udp), which in turn includes `netbios-ns` (137/udp plus the `netbios-ns` connection-tracking **helper**, kernel code that understands a protocol well enough to let its reply packets back in). One name, four ports and a helper, which is much better than remembering the port list.
 
 ```console
 $ sudo firewall-cmd --add-service=https
@@ -302,7 +304,7 @@ The permanent configuration is just XML files, and you can read them to prove wh
 
 ```console
 $ sudo ls /etc/firewalld/ /etc/firewalld/zones/
-firewalld.conf  helpers  icmptypes  ipsets  lockdown-allowlist.xml  policies  services  zones
+firewalld.conf  helpers  icmptypes  ipsets  policies  services  zones
 public.xml
 $ sudo cat /etc/firewalld/zones/public.xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -419,7 +421,7 @@ filter_IN_public_REJECT: IN=enp1s0 OUT= SRC=203.0.113.9 DST=192.168.122.50 … P
 **Step 1.** Find out which zones are in use and which interfaces they own.
 
 ```text
-public
+public (default)
   interfaces: enp1s0
 ```
 
@@ -484,7 +486,7 @@ rule family="ipv4" source address="198.51.100.23" reject
 rule service name="ssh" log prefix="ssh-new: " level="info" limit value="3/m" accept
 ```
 
-The parts are: an optional `family`, an optional `source`/`destination`, one element (`service`, `port`, `protocol`, `icmp-block`, `masquerade`, `forward-port`), optional `log` or `audit`, and an action (`accept`, `reject`, `drop`, `mark`). To remove a rich rule, repeat it exactly with `--remove-rich-rule`.
+The parts are: an optional `family`, an optional `source`/`destination`, one element (`service`, `port`, `protocol`, `icmp-block`, `icmp-type`, `masquerade`, `forward-port`, `source-port`), optional `log` (or `nflog`) and `audit`, and an action (`accept`, `reject`, `drop`, `mark`). To remove a rich rule, repeat it exactly with `--remove-rich-rule`.
 
 !!! tip "Source zone or rich rule?"
     "Admins from 10.0.5.0/24 may reach PostgreSQL" works either way. If a subnet needs access to several services, binding the subnet to its own zone is cleaner. If it is one exception, a rich rule is fine.
@@ -572,6 +574,7 @@ $ sudo firewall-cmd --reload
 success
 $ sudo firewall-cmd --info-policy internal-to-public
 internal-to-public (active)
+  disable: no
   priority: -1
   target: ACCEPT
   ingress-zones: internal
@@ -714,7 +717,7 @@ If you want firewalld to stay the single gatekeeper, firewalld 2.x on Rocky 10 h
 StrictForwardPorts=yes
 ```
 
-With `StrictForwardPorts=yes`, published ports are blocked until you open them with firewalld forward-ports. It is off (`no`) by default because it changes how containers behave. After enabling it, restart firewalld and test a published port from another machine: early Rocky 10.0 builds of netavark did not detect the setting. Containers are covered in depth in [Containers from the Ground Up](18-containers.md).
+With `StrictForwardPorts=yes`, firewalld no longer accepts traffic that something else DNATed, so rootful Podman port publishing stops working: current netavark refuses to start a container with `-p` or `-P`. You start containers without published ports and forward the port yourself with `firewall-cmd --add-forward-port`. Rootless Podman is unaffected. It is off (`no`) by default because it changes how containers behave. After enabling it, restart firewalld and test a published port from another machine: the netavark in Rocky 10.0 did not detect the setting and published ports silently. Containers are covered in depth in [Containers from the Ground Up](18-containers.md).
 
 <div class="quiz" data-answer="1" markdown>
 

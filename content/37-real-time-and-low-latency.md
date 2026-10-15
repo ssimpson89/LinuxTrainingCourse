@@ -151,7 +151,7 @@ $ sudo cat /sys/kernel/debug/sched/preempt
 none (voluntary) full lazy
 ```
 
-`PREEMPT_DYNAMIC` means the standard kernel can switch models at boot: the parentheses show the active one. (Early Rocky 10 kernels list only `none`, `voluntary` and `full`; `lazy`, a newer model that preempts like `full` but gives normal tasks a little more slack, arrived in a later update.) Add `preempt=full` to the kernel command line (with `grubby`) and it becomes `none voluntary (full) lazy`. That's a cheap improvement for low-latency work, but it's not PREEMPT_RT. On `kernel-rt`, `uname -v` says `PREEMPT_RT`.
+`PREEMPT_DYNAMIC` means the standard kernel can switch models at boot: the parentheses show the active one. (`lazy` is a newer model that preempts like `full` but gives normal tasks a little more slack. Early Rocky 10 x86_64 kernels also list an experimental fifth model, `laziest`, which later updates dropped; on aarch64, `lazy` only appears in later updates.) Add `preempt=full` to the kernel command line (with `grubby`) and it becomes `none voluntary (full) lazy`. That's a cheap improvement for low-latency work, but it's not PREEMPT_RT. On `kernel-rt`, `uname -v` says `PREEMPT_RT`.
 
 ### What PREEMPT_RT changes
 
@@ -176,8 +176,8 @@ Rocky ships the real-time packages in two extra repositories, both **disabled by
 
 | Repo id | What it's for |
 |---|---|
-| `rt` | `kernel-rt` and its modules, `realtime-setup`, `rteval` (with `rteval-loads`) and `tuned-profiles-realtime` |
-| `nfv` | Network Functions Virtualization: the same `kernel-rt` plus `kernel-rt-kvm` (real-time KVM host support) and the `tuned-profiles-nfv`, `-nfv-host` and `-nfv-guest` profiles for real-time VMs |
+| `rt` | `kernel-rt` and its modules, `realtime-setup`, `rteval` (with `rteval-loads`), `tuned-profiles-realtime`, and the `tuned-profiles-nfv`, `-nfv-host` and `-nfv-guest` profiles for real-time VMs |
+| `nfv` | Network Functions Virtualization: on Rocky 10 it carries the same package set as `rt` (there is no separate `kernel-rt-kvm` package any more) |
 
 The measuring tools are elsewhere: `realtime-tests` (cyclictest, hwlatdetect and friends) is in **AppStream**, and `tuned-profiles-cpu-partitioning` is in **BaseOS**, so you can measure and partition the stock kernel without enabling either repo.
 
@@ -298,7 +298,7 @@ flowchart BT
 | `network-latency` | `tuned` | Low-latency networking (adds busy polling, THP off) |
 | `cpu-partitioning` | `tuned-profiles-cpu-partitioning` | Dedicated cores for polling apps (DPDK) on the stock kernel |
 | `realtime` | `tuned-profiles-realtime` (`rt` repo) | Bare-metal hosts running `kernel-rt` |
-| `realtime-virtual-host` / `-guest` | `tuned-profiles-nfv-host` / `-guest` (`nfv` repo) | A real-time KVM host and its guests |
+| `realtime-virtual-host` / `-guest` | `tuned-profiles-nfv-host` / `-guest` (`rt` or `nfv` repo) | A real-time KVM host and its guests |
 
 ```console
 $ tuned-adm active
@@ -554,7 +554,7 @@ The two sysctls are still there with the same values, but on Rocky's kernel they
 
     1. **Keep normal tasks off the CPU** (isolation, IRQ and workqueue masks, `nohz_full`). If nothing `SCHED_OTHER` is ever runnable there, the server never activates. This is the right fix, and `rtla osnoise` or a long cyclictest run proves it.
     2. **Shrink it** for a CPU: `echo 5000000 | sudo tee /sys/kernel/debug/sched/fair_server/cpu3/runtime` gives starving tasks 5 ms per second instead of 50.
-    3. **Disable it** with `echo 0` to that file. The kernel logs `Fair server disabled on CPU 3`, and you are back to "a spinning FIFO thread owns this CPU forever". Only on isolated CPUs, only with a watchdog.
+    3. **Disable it** with `echo 0` to that file. The kernel logs `Fair server disabled in CPU 3, system may crash due to starvation.`, and you are back to "a spinning FIFO thread owns this CPU forever". Only on isolated CPUs, only with a watchdog.
 
     Debugfs settings don't survive a reboot, so if you change them, do it from a small systemd unit (or a tuned `[script]`) that runs at boot, and document why.
 

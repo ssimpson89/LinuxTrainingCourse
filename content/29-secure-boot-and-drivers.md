@@ -483,16 +483,16 @@ Both flavors are *out-of-tree* modules and both need a signature Rocky's kernel 
     $ sudo reboot                           # confirm in MokManager
     ```
 
-    For Maxwell, Pascal or Volta cards, install `cuda-drivers-580` and lock it with the `versionlock` DNF plugin so an update doesn't move you to a branch without your GPU.
+    For Maxwell, Pascal or Volta cards, install `cuda-drivers` (the proprietary-module metapackage, whose newest version in the RHEL 10 repo is on the 580 branch) and lock the NVIDIA packages to 580 with the `versionlock` DNF plugin (`sudo dnf versionlock '*nvidia*580*'`) so an update doesn't move you to a branch without your GPU.
 
 === "ELRepo (prebuilt kmod)"
 
-    ELRepo builds `kmod-nvidia` packages (and `kmod-nvidia-open` for Turing and newer GPUs) against the RHEL kABI and signs them with ELRepo's key. No compiler needed on the box. For EL10, the NVIDIA kmods first appeared in the `elrepo-testing` repository, so you may need to enable it.
+    ELRepo builds `kmod-nvidia` packages (and `kmod-nvidia-open` for Turing and newer GPUs) against the RHEL kABI and signs them with ELRepo's key. No compiler needed on the box. For EL10 they're in the main `elrepo` repository (`kmod-nvidia-580xx` covers the 580 branch for older GPUs).
 
     ```console
     $ sudo dnf install elrepo-release
     $ sudo dnf install nvidia-detect && nvidia-detect    # suggests the right package
-    $ sudo dnf --enablerepo=elrepo-testing install kmod-nvidia-open
+    $ sudo dnf install kmod-nvidia-open
     $ ls /etc/pki/elrepo/                                # ELRepo's Secure Boot certificate (.der)
     $ sudo mokutil --import /etc/pki/elrepo/SECURE-BOOT-KEY-elrepo.org.der
     $ sudo reboot                                        # confirm in MokManager
@@ -719,7 +719,7 @@ If the 2023 entries are missing, the normal fix is a **firmware update from your
         $ sudo virt-install --name sblab --memory 4096 --vcpus 2 \
             --machine q35 --features smm.state=on \
             --boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=yes,firmware.feature1.name=enrolled-keys,firmware.feature1.enabled=yes \
-            --disk size=20 --cdrom Rocky-10.1-x86_64-dvd1.iso --os-variant rocky10
+            --disk size=20 --cdrom Rocky-10.2-x86_64-dvd1.iso --os-variant rocky10
         ```
 
         (Newer `virt-install` releases also accept the shorter `--boot uefi,secure-boot=on`. Secure Boot needs the `q35` machine type and SMM.)

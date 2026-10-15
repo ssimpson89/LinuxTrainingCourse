@@ -181,7 +181,7 @@ An updated library only protects you once programs using it are restarted, and a
 $ sudo dnf needs-restarting -r
 Core libraries or services have been updated since boot-up:
   * kernel
-  * openssl-libs
+  * kernel-core
 
 Reboot is required to fully utilize these updates.
 More information: https://access.redhat.com/solutions/27943
@@ -436,8 +436,8 @@ The policy levels are:
 | Policy | Use it when |
 |---|---|
 | `DEFAULT` | Almost always. Secure settings that still talk to the modern world. |
-| `LEGACY` | You must talk to very old systems. Re-allows SHA-1 signatures, TLS RSA key exchange and CBC ciphers (still TLS 1.2 minimum); use only temporarily. |
-| `FUTURE` | You want stronger, forward-looking settings and can accept that many peers will fail. It requires 3072-bit RSA keys, which rejects most public certificates. From Rocky 10.2 it also allows **only** TLS 1.3 with hybrid post-quantum key exchange, which most of the internet does not offer yet. Lab and isolated networks only. |
+| `LEGACY` | You must talk to very old systems. Re-allows TLS RSA key exchange, plain DHE and SHA-1 signatures outside TLS (OpenSSL on Rocky 10 rejects SHA-1 in TLS even here; still TLS 1.2 minimum); use only temporarily. |
+| `FUTURE` | You want stronger, forward-looking settings and can accept that many peers will fail. It requires 3072-bit RSA keys, which rejects most public certificates. From Rocky 10.2 it also allows **only** hybrid post-quantum (ML-KEM) key exchange, which in practice means TLS 1.3 with a PQ-capable peer; most of the internet does not offer that yet. Lab and isolated networks only. |
 | `FIPS` | Required by regulation, together with a FIPS-mode installation (see below). |
 
 You can also add **subpolicies** to adjust one aspect, written with a colon: `DEFAULT:AD-SUPPORT` (Kerberos encryption types Active Directory needs) or, from Rocky 10.1, `DEFAULT:NO-PQ`. The available modules are in `/usr/share/crypto-policies/policies/modules/`, and the list differs between releases: Rocky 9's `SHA1` and `NO-SHA1` modules don't exist on Rocky 10.0 or 10.1. [Module 33](33-tls-and-crypto-policies.md#subpolicies-and-custom-modules) lists and explains each one. Prefer a narrow subpolicy over switching the whole machine to `LEGACY`.
@@ -570,7 +570,7 @@ If an attacker replaces `/usr/bin/ssh` with a password-stealing copy, how would 
 ```console
 $ sudo dnf install -y aide
 $ sudo aide --init
-Start timestamp: 2026-10-15 11:40:02 +0000 (AIDE 0.18.6)
+Start timestamp: 2026-10-15 11:40:02 +0000 (AIDE 0.19.2)
 AIDE initialized database at /var/lib/aide/aide.db.new.gz
 …
 $ sudo mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
@@ -802,7 +802,7 @@ Complete!
 ```text
 Core libraries or services have been updated since boot-up:
   * kernel
-  * openssl-libs
+  * kernel-core
 
 Reboot is required to fully utilize these updates.
 ```

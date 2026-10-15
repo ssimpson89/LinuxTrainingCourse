@@ -148,7 +148,7 @@ A tiny program used to learn RPM packaging on Rocky Linux.
 
 1. `Name: rockyhello`: The package name. Also the base of the file name: `rockyhello-1.0-1.el10.x86_64.rpm`.
 2. `Version: 1.0`: The **upstream** version of the software. You don't invent this; it comes from the project.
-3. `Release: 1%{?dist}`: The **release**: how many times *you* have packaged this version. Bump it when you change the packaging but not the source. `%{?dist}` appends `.el10` (or `.el10_2`); the `?` means "empty if undefined".
+3. `Release: 1%{?dist}`: The **release**: how many times *you* have packaged this version. Bump it when you change the packaging but not the source. `%{?dist}` appends `.el10`; the `?` means "empty if undefined". (Rocky's own update builds can carry tags like `.el10_2`, set by its build system, not by this macro.)
 4. `License: MIT`: An SPDX license expression for the packaged code.
 5. `Source0: %{name}-%{version}.tar.gz`: Where the source comes from. A full URL works too; rpmbuild uses only the file name and looks for it in `SOURCES/`. `spectool -g` can download URL sources for you.
 6. `BuildRequires: gcc`: Packages needed to *build*, installed in the build environment. Runtime dependencies on shared libraries are found automatically (see below).
@@ -165,7 +165,7 @@ A tiny program used to learn RPM packaging on Rocky Linux.
 
 ```console
 $ rpm --eval '%{_bindir} %{_libdir} %{_sysconfdir} %{_unitdir} %{dist}'
-/usr/bin /usr/lib64 /etc /usr/lib/systemd/system .el10_2
+/usr/bin /usr/lib64 /etc /usr/lib/systemd/system .el10
 $ rpm --eval '%{make_install}'
 /usr/bin/make install DESTDIR=/home/alex/rpmbuild/BUILDROOT/%{NAME}-%{VERSION}-%{RELEASE}.x86_64 INSTALL="/usr/bin/install -p"
 ```
@@ -291,6 +291,7 @@ You did not write `Requires: glibc`, yet the package depends on it. rpm's **depe
 ```console
 $ rpm -qp --requires ~/rpmbuild/RPMS/x86_64/rockyhello-1.0-1.el10.x86_64.rpm
 libc.so.6()(64bit)
+libc.so.6(GLIBC_2.2.5)(64bit)
 libc.so.6(GLIBC_2.34)(64bit)
 rpmlib(CompressedFileNames) <= 3.0.4-1
 rpmlib(FileDigests) <= 4.6.0-1
@@ -531,7 +532,7 @@ INFO: Results and/or logs in: /var/lib/mock/rocky-10-x86_64/result
 | `rocky+epel-10-x86_64` | The same plus EPEL 10, for packages that need EPEL build dependencies |
 | `rocky-9-x86_64` | Rocky 9: build for older servers from a Rocky 10 workstation |
 
-The `result/` directory holds the RPMs and three logs: `build.log` (the rpmbuild output), `root.log` (what was installed into the chroot) and `state.log`. When a build fails in mock but works with rpmbuild, `root.log` almost always shows a build dependency you forgot to declare.
+The `result/` directory holds the RPMs and the logs, chiefly `build.log` (the rpmbuild output), `root.log` (what was installed into the chroot) and `state.log` (plus `hw_info.log` and `installed_pkgs.log`). When a build fails in mock but works with rpmbuild, `root.log` almost always shows a build dependency you forgot to declare.
 
 !!! tip "Useful mock commands"
     `mock -r CFG --shell` opens a shell in the chroot to poke around. `mock -r CFG --clean` resets it. `mock --scrub=all` removes all cached chroots and frees disk space. Mock caches downloaded packages, so the second build is much faster.
@@ -609,7 +610,6 @@ $ sudo createrepo_c /srv/repo/rocky10
 Directory walk started
 Directory walk done - 1 packages
 Temporary output repo path: /srv/repo/rocky10/.repodata/
-Preparing sqlite DBs
 Pool started (with 5 workers)
 Pool finished
 $ ls /srv/repo/rocky10/repodata/

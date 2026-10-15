@@ -124,7 +124,7 @@ $ systemctl status chronyd
              └─806 /usr/sbin/chronyd -F 2
 
 Oct 13 09:12:44 rocky10 systemd[1]: Starting chronyd.service - NTP client/server...
-Oct 13 09:12:44 rocky10 chronyd[806]: chronyd version 4.6.1 starting (+CMDMON +NTP …)
+Oct 13 09:12:44 rocky10 chronyd[806]: chronyd version 4.8 starting (+CMDMON +NTP …)
 Oct 13 09:12:44 rocky10 systemd[1]: Started chronyd.service - NTP client/server.
 Oct 13 09:12:50 rocky10 chronyd[806]: Selected source 162.159.200.1 (2.rocky.pool.ntp.org)
 ```
@@ -1295,8 +1295,8 @@ execution from that location (scripts in a home directory often hit this).
 
         Your number may differ. `DynamicUser=yes` already switched on
         several protections: it implies `ProtectSystem=strict`,
-        `ProtectHome=read-only`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
-        and `RemoveIPC=yes`. `systemctl show hello -p ProtectSystem` proves it.
+        `ProtectHome=read-only`, `PrivateTmp=disconnected`,
+        `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`, and `RemoveIPC=yes`. `systemctl show hello -p ProtectSystem` proves it.
 
     2. Harden it with a drop-in (`sudo systemctl edit hello`):
 

@@ -698,7 +698,7 @@ $ sudo tc qdisc del dev veth-c root
 Remember netem only affects **egress** of the interface you put it on. Put `delay 100ms` on one end of a link and the round-trip time grows by 100 ms, not 200.
 
 !!! version "Rocky 9 vs 10"
-    On Rocky 9, `sch_netem` lives in the `kernel-modules-extra` package, and `tc qdisc add … netem` fails with "Error: Specified qdisc kind is unknown." until you install it (`sudo dnf install kernel-modules-extra`, for the running kernel). On Rocky 10 the queueing modules, netem included, ship in `kernel-modules-core`, so netem works out of the box.
+    On Rocky 9.5 and earlier, `sch_netem` lives in the `kernel-modules-extra` package, and `tc qdisc add … netem` fails with "Error: Specified qdisc kind is unknown." until you install it (`sudo dnf install kernel-modules-extra`, for the running kernel). From Rocky 9.6, and on Rocky 10, netem ships in `kernel-modules-core` with the other queueing modules, so it works out of the box.
 
 ### Shaping with tbf and htb
 

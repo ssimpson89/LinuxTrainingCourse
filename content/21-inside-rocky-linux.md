@@ -153,15 +153,15 @@ The good news: you can see the outcome on any installed package.
 $ rpm -qi rocky-release
 Name        : rocky-release
 Version     : 10.2
-Release     : 1.4.el10
+Release     : 1.2.el10
 Architecture: noarch
-Install Date: Mon 01 Jun 2026 10:41:17 AM UTC
+Install Date: Mon 17 Aug 2026 10:41:17 AM UTC
 Group       : Unspecified
 Size        : 28316
 License     : BSD-3-Clause
-Signature   : RSA/SHA256, Thu 28 May 2026 06:12:45 PM UTC, Key ID 5b106c736fedfc85
-Source RPM  : rocky-release-10.2-1.4.el10.src.rpm
-Build Date  : Thu 28 May 2026 05:58:02 PM UTC
+Signature   : RSA/SHA256, Fri 14 Aug 2026 10:12:45 AM UTC, Key ID 5b106c736fedfc85
+Source RPM  : rocky-release-10.2-1.2.el10.src.rpm
+Build Date  : Fri 14 Aug 2026 10:01:15 AM UTC
 Build Host  : …
 Vendor      : Rocky Enterprise Software Foundation
 URL         : https://rockylinux.org
@@ -234,7 +234,7 @@ The `Release` field of almost every package ends in a **dist tag** set by the bu
 ```console
 $ rpm -q kernel libxml2 bash
 kernel-6.12.0-124.8.1.el10_1.x86_64
-libxml2-2.12.5-9.el10_1.x86_64
+libxml2-2.12.5-9.el10_0.x86_64
 bash-5.2.26-6.el10.x86_64
 ```
 
@@ -263,12 +263,12 @@ Three small packages define "this machine is Rocky Linux":
 
 ```console
 $ rpm -qf /etc/os-release /etc/yum.repos.d/rocky.repo /etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-10
-rocky-release-10.2-1.4.el10.noarch
-rocky-repos-10.2-1.4.el10.noarch
-rocky-gpg-keys-10.2-1.4.el10.noarch
+rocky-release-10.2-1.2.el10.noarch
+rocky-repos-10.2-1.2.el10.noarch
+rocky-gpg-keys-10.2-1.2.el10.noarch
 $ ls -l /etc/redhat-release /etc/system-release
-lrwxrwxrwx. 1 root root 14 May 28 18:01 /etc/redhat-release -> rocky-release
-lrwxrwxrwx. 1 root root 14 May 28 18:01 /etc/system-release -> rocky-release
+lrwxrwxrwx. 1 root root 13 Aug 10 00:00 /etc/redhat-release -> rocky-release
+lrwxrwxrwx. 1 root root 13 Aug 10 00:00 /etc/system-release -> rocky-release
 $ cat /etc/rocky-release
 Rocky Linux release 10.2 (Red Quartz)
 ```
@@ -376,7 +376,7 @@ highavailability           Rocky Linux 10 - High Availability              disab
 !!! tip "Trust the repo IDs on your machine"
     Repo IDs have changed between releases (for example `ha` on Rocky 8), and other tools use their own names: mock's Rocky configs call the debug repo `baseos-debug`. Always copy the ID from `dnf repolist --all` on the system in front of you before scripting `--enablerepo`.
 
-`rocky-repos` splits these across four files: `rocky.repo` (BaseOS, AppStream, CRB and their twins), `rocky-addons.repo` (HighAvailability, RT, NFV, SAP, SAPHANA), `rocky-extras.repo` (extras and plus) and `rocky-devel.repo` (devel). `ls /etc/yum.repos.d/` shows them.
+`rocky-repos` splits these across five files: `rocky.repo` (BaseOS, AppStream, CRB and their twins), `rocky-addons.repo` (HighAvailability, RT, NFV, SAP, SAPHANA), `rocky-extras.repo` (extras and plus), `rocky-devel.repo` (devel) and `rocky-security.repo` (`security`, a fast-track security repo added in 10.2, disabled by default). `ls /etc/yum.repos.d/` shows them.
 
 ### Anatomy of a repo file
 
@@ -456,7 +456,7 @@ dl.rockylinux.org/pub/rocky/
     │   │   ├── kickstart/    ← frozen GA tree, used by installers
     │   │   └── debug/tree/   ← debuginfo packages
     │   └── source/tree/      ← SRPMs
-    ├── AppStream/  CRB/  extras/  HighAvailability/  RT/  NFV/  SAP/  SAPHANA/  devel/
+    ├── AppStream/  CRB/  extras/  plus/  security/  HighAvailability/  RT/  NFV/  SAP/  SAPHANA/  devel/
     └── isos/  images/        ← install ISOs, cloud and container images
 dl.rockylinux.org/vault/rocky/
 └── 10.0/  10.1/  9.x/ …      ← old minor releases, frozen
@@ -507,8 +507,8 @@ Updates Information Summary: available
         2 Moderate Security notice(s)
     2 Bugfix notice(s)
 $ dnf updateinfo list --security
-RLSA-2026:4511 Important/Sec. libxml2-2.12.5-10.el10_2.x86_64
-RLSA-2026:4530 Moderate/Sec.  sudo-1.9.15-9.p5.el10_2.x86_64
+RLSA-2026:4511 Important/Sec. libxml2-2.12.5-10.el10_2.4.x86_64
+RLSA-2026:4530 Moderate/Sec.  sudo-1.9.17-10.p2.el10_2.7.x86_64
 …
 $ dnf updateinfo info RLSA-2026:4511
 ===============================================================================
@@ -562,43 +562,50 @@ FC22 6859 C086 0BF0 DDB9  5B08 5B10 6C73 6FED FC85
 $ gpg --show-keys /etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-10
 pub   rsa4096 2025-05-19 [SCE]
       FC226859C0860BF0DDB95B085B106C736FEDFC85
-uid                      Rocky Enterprise Software Foundation …
+uid                      Release Engineering (Rocky Linux 10) <releng@rockylinux.org>
 ```
 
 `gpg --show-keys` reads the key file without importing it anywhere, so it is safe to run on any key you are evaluating.
+
+!!! note "If gpg reports `packet(6) with unknown version 6`"
+    Newer `rocky-gpg-keys` packages append a post-quantum v6 key to the same file, and GnuPG cannot parse v6 keys, so it rejects the whole file. Show only the first (RSA) key block instead:
+
+    ```console
+    $ sed -n '1,/END PGP/p' /etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-10 | gpg --show-keys
+    ```
 
 ### Checking packages by hand
 
 ```console
 $ dnf download libxml2
-$ rpm -K libxml2-2.12.5-9.el10_1.x86_64.rpm
-libxml2-2.12.5-9.el10_1.x86_64.rpm: digests signatures OK
-$ rpm -Kv libxml2-2.12.5-9.el10_1.x86_64.rpm
-libxml2-2.12.5-9.el10_1.x86_64.rpm:
+$ rpm -K libxml2-2.12.5-9.el10_0.x86_64.rpm
+libxml2-2.12.5-9.el10_0.x86_64.rpm: digests signatures OK
+$ rpm -Kv libxml2-2.12.5-9.el10_0.x86_64.rpm
+libxml2-2.12.5-9.el10_0.x86_64.rpm:
     Header V4 RSA/SHA256 Signature, key ID 6fedfc85: OK
     Header SHA256 digest: OK
     Header SHA1 digest: OK
     Payload SHA256 digest: OK
-    V4 RSA/SHA256 Signature, key ID 6fedfc85: OK
+    Payload SHA256 ALT digest: OK
     MD5 digest: OK
 ```
 
 **Digests** prove the file is intact. **Signatures** prove who made it. If the key is not imported, you see `NOKEY`; if the file was modified, you see `BAD` or `NOT OK`.
 
-??? question "Under the hood: why there are two signatures and five digests"
+??? question "Under the hood: why there is one signature and five digests"
     An RPM file is four parts in a row: a lead (legacy), a **signature header**, the **main header** (name, dependencies, file list, per-file digests) and the compressed **payload** (the files).
 
     - `Header V4 RSA/SHA256 Signature` covers only the main header. Because the main header stores the payload's SHA256 digest and every file's digest, a good header signature plus a good `Payload SHA256 digest` vouches for every byte. This is why `dnf` can verify a package before decompressing it.
-    - `V4 RSA/SHA256 Signature` (header plus payload) and the `SHA1`/`MD5` lines are legacy, kept so older rpm versions can still check the file.
+    - `Payload SHA256 ALT digest` covers the uncompressed payload. The `SHA1` and `MD5` lines are legacy, kept so older rpm versions can still check the file. Older packages could also carry a second, legacy signature over header plus payload; Rocky 10 packages carry only the header signature.
     - After install, the per-file digests are what `rpm -V PKG` compares against your disk. That is how you detect a binary changed after installation, long after the package signature was checked.
 
-    Rocky 10.2 also ships a second, post-quantum (PQC) key alongside the RSA one, in preparation for PQC package signing in a later point release. `ls /etc/pki/rpm-gpg/` shows what `rocky-gpg-keys` installed on your system.
+    Since the August 2026 `rocky-gpg-keys-10.2-1.2` update, `RPM-GPG-KEY-Rocky-10` also holds a second, post-quantum (PQC) OpenPGP v6 key with the same user ID, appended after the RSA key in the same file. Packages are still signed with the RSA key. `grep -c BEGIN /etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-10` shows how many keys your copy holds.
 
 Which keys does RPM trust right now?
 
 ```console
 $ rpm -q gpg-pubkey --qf '%{VERSION}\t%{SUMMARY}\n'
-6fedfc85	Rocky Enterprise Software Foundation …
+6fedfc85	Release Engineering (Rocky Linux 10) …
 e37ed158	Fedora (epel10) <epel@fedoraproject.org>
 ```
 
@@ -707,13 +714,13 @@ Installing a SIG release package adds a `.repo` file and the SIG's GPG key. Trea
 
 ```console
 $ dnf download --source libxml2       # auto-enables the *-source repos
-$ rpm -qpl libxml2-2.12.5-9.el10_1.src.rpm
+$ rpm -qpl libxml2-2.12.5-9.el10_0.src.rpm
 libxml2-2.12.5.tar.xz
 libxml2-2.12.5-CVE-….patch
 …
 libxml2.spec
-$ rpm -qp --changelog libxml2-2.12.5-9.el10_1.src.rpm | head -4
-* Tue Sep 30 2026 … - 2.12.5-9
+$ rpm -qp --changelog libxml2-2.12.5-9.el10_0.src.rpm | head -4
+* … - 2.12.5-9
 - Fix CVE-…
 ```
 
@@ -733,7 +740,7 @@ A researcher reports a flaw in, say, libxml2. It gets a **CVE** ID. The upstream
 
 <div class="step" data-title="Fix lands upstream" markdown>
 
-Red Hat patches the package. The change usually appears in the CentOS Stream 10 Git repositories and is shipped in RHEL as an **RHSA** advisory with a new release number such as `2.12.5-10.el10_2`.
+Red Hat patches the package. The change usually appears in the CentOS Stream 10 Git repositories and is shipped in RHEL as an **RHSA** advisory with a new release number such as `2.12.5-10.el10_2.4`.
 
 </div>
 
@@ -824,7 +831,7 @@ PLATFORM_ID="platform:el10"
 **Step 2.** Which package owns `/etc/os-release`?
 
 ```text
-rocky-release-10.2-1.4.el10.noarch
+rocky-release-10.2-1.2.el10.noarch
 ```
 
 </div>
@@ -837,7 +844,7 @@ rocky-release-10.2-1.4.el10.noarch
 Installed Packages
 Name         : libxml2
 Version      : 2.12.5
-Release      : 9.el10_1
+Release      : 9.el10_0
 Architecture : x86_64
 From repo    : baseos
 …
@@ -850,8 +857,8 @@ From repo    : baseos
 **Step 4.** List the available security advisories.
 
 ```text
-RLSA-2026:4511 Important/Sec. libxml2-2.12.5-10.el10_2.x86_64
-RLSA-2026:4530 Moderate/Sec.  sudo-1.9.15-9.p5.el10_2.x86_64
+RLSA-2026:4511 Important/Sec. libxml2-2.12.5-10.el10_2.4.x86_64
+RLSA-2026:4530 Moderate/Sec.  sudo-1.9.17-10.p2.el10_2.7.x86_64
 ```
 
 </div>
@@ -1163,6 +1170,6 @@ Before: git.centos.org. After: CentOS Stream, RHEL SRPMs via UBI images and clou
 - [Rocky Linux and the changing Secure Boot landscape (June 2026)](https://rockylinux.org/news/2026-06-02-secure-boot-ca-kek-transition)
 - [Keeping Open Source Open: Rocky's 2023 sourcing statement](https://rockylinux.org/news/keeping-open-source-open/)
 - [Rocky Linux 10.0 release announcement (build system, IMA)](https://rockylinux.org/news/rocky-linux-10-0-ga-release)
-- [Rocky Linux wiki: Special Interest Groups](https://wiki.rockylinux.org/special_interest_groups/current/)
+- [Rocky Linux SIG/Core wiki (release engineering)](https://sig-core.rocky.page/)
 
 **Next:** [22 · Building RPM Packages](22-building-rpms.md)

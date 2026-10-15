@@ -194,8 +194,8 @@ The kernel is split into several RPMs:
 |---------|----------|
 | `kernel` | An empty "meta" package that pulls in the others |
 | `kernel-core` | The kernel image (`vmlinuz`) and boot files; requires `kernel-modules-core` |
-| `kernel-modules-core` | The core set of modules needed to boot most machines and VMs (virtio, common storage and filesystems, basic networking such as `dummy`) |
-| `kernel-modules` | The bulk of hardware drivers (network cards, RAID controllers, USB devices, …) |
+| `kernel-modules-core` | The modules most servers and VMs need: virtio, storage and RAID controllers, filesystems, common wired network cards, USB storage, and helpers such as `dummy` |
+| `kernel-modules` | Less common hardware drivers (Wi-Fi, sound, cameras and media, USB serial and network adapters, InfiniBand, …) |
 | `kernel-modules-extra` | Rarely used drivers and protocols, not installed by default |
 | `kernel-devel`, `kernel-headers` | Files for building out-of-tree modules and compiling programs |
 
@@ -288,7 +288,7 @@ alias:          rtnl-link-dummy
 description:    Dummy netdevice driver which discards all packets sent to it
 license:        GPL
 …
-signer:         Rocky kernel signing key
+signer:         Rocky Linux kernel signing key
 …
 parm:           numdummies:Number of dummy pseudo devices (int)
 ```
@@ -898,7 +898,7 @@ The kernel side is the same either way. A live patch is a special module; once l
 
         ```console
         $ sudo systemd-run --scope -p MemoryMax=100M -p MemorySwapMax=0 --unit=oomlab tail /dev/zero
-        Running as unit: oomlab.scope
+        Running as unit: oomlab.scope; invocation ID: 6a3f…
         Killed
         ```
 

@@ -519,7 +519,7 @@ Password for [SAMBA\carol]:
 	---------       ----      -------
 	print$          Disk      Printer Drivers
 	finance         Disk      Finance team files
-	IPC$            IPC       IPC Service (Samba 4.22.4)
+	IPC$            IPC       IPC Service (Samba 4.23.5)
 SMB1 disabled -- no workgroup available
 $ smbclient //localhost/finance -U carol -c 'put /etc/hosts hosts.txt; ls'
 putting file /etc/hosts as \hosts.txt (…)
@@ -532,7 +532,7 @@ putting file /etc/hosts as \hosts.txt (…)
 
 ```console
 $ sudo smbstatus
-Samba version 4.22.4
+Samba version 4.23.5
 PID     Username     Group        Machine                                    Protocol Version  Encryption   Signing
 ---------------------------------------------------------------------------------------------------------------------
 4211    carol        carol        192.168.122.20 (ipv4:192.168.122.20:50122) SMB3_11           -            partial(AES-128-GMAC)

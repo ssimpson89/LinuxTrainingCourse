@@ -214,7 +214,7 @@ If an `allow` rule matches, the `open()` succeeds. If not:
 <div class="step" data-title="The evidence" markdown>
 
 ```text
-type=AVC msg=audit(1760519001.112:892): avc:  denied  { read } for  pid=1452
+type=AVC msg=audit(1792055001.112:892): avc:  denied  { read } for  pid=1452
 comm="httpd" name="index.html" dev="vda4" ino=3412290
 scontext=system_u:system_r:httpd_t:s0
 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
@@ -391,6 +391,7 @@ httpd_can_network_connect --> off
 httpd_can_network_connect_cobbler --> off
 httpd_can_network_connect_db --> off
 httpd_can_network_memcache --> off
+httpd_can_network_redis --> off
 httpd_can_network_relay --> off
 $ sudo semanage boolean -l | grep httpd_can_network_connect_db
 httpd_can_network_connect_db   (off  ,  off)  Allow httpd to can network connect db
@@ -410,6 +411,7 @@ Ports have labels too. `httpd_t` may listen on ports labeled `http_port_t`, `ssh
 ```console
 $ sudo semanage port -l | grep -E '^(http_port_t|ssh_port_t) '
 http_port_t                    tcp      80, 81, 443, 488, 8008, 8009, 8443, 9000
+http_port_t                    udp      80, 443
 ssh_port_t                     tcp      22
 $ sudo semanage port -a -t http_port_t -p tcp 3131
 $ sudo semanage port -l -C
@@ -444,9 +446,9 @@ When SELinux blocks something, it writes an **AVC record** to the audit log, `/v
 $ sudo ausearch -m AVC -ts recent
 ----
 time->Thu Oct 15 10:03:21 2026
-type=PROCTITLE msg=audit(1760522601.448:1021): proctitle=2F7573722F7362696E2F6874747064002D44464F524547524F554E44
-type=SYSCALL msg=audit(1760522601.448:1021): arch=c000003e syscall=257 success=no exit=-13 … comm="httpd" exe="/usr/sbin/httpd" subj=system_u:system_r:httpd_t:s0 key=(null)
-type=AVC msg=audit(1760522601.448:1021): avc:  denied  { read } for  pid=1452 comm="httpd" name="page.html" dev="vda4" ino=3412290 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
+type=PROCTITLE msg=audit(1792058601.448:1021): proctitle=2F7573722F7362696E2F6874747064002D44464F524547524F554E44
+type=SYSCALL msg=audit(1792058601.448:1021): arch=c000003e syscall=257 success=no exit=-13 … comm="httpd" exe="/usr/sbin/httpd" subj=system_u:system_r:httpd_t:s0 key=(null)
+type=AVC msg=audit(1792058601.448:1021): avc:  denied  { read } for  pid=1452 comm="httpd" name="page.html" dev="vda4" ino=3412290 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
 ```
 
 `-ts recent` means the last 10 minutes; `-ts today` and `-ts boot` also work. Add `-c httpd` to filter by command, and `-i` to translate numbers into names (it decodes the hex `proctitle` into the real command line, `/usr/sbin/httpd -DFOREGROUND`). Here is how to read the AVC line:
@@ -496,7 +498,7 @@ The suggestions are ranked by confidence. Read them critically: the top suggesti
 
 ```console
 $ sudo ausearch -m AVC -ts recent | audit2why
-type=AVC msg=audit(1760522601.448:1021): avc:  denied  { read } for  pid=1452 comm="httpd" name="page.html" … tclass=file permissive=0
+type=AVC msg=audit(1792058601.448:1021): avc:  denied  { read } for  pid=1452 comm="httpd" name="page.html" … tclass=file permissive=0
 
 	Was caused by:
 	The boolean httpd_read_user_content was set incorrectly.
@@ -603,7 +605,7 @@ unconfined_u:object_r:user_home_t:s0 /var/www/html/page.html
 ```text
 ----
 time->Thu Oct 15 10:03:21 2026
-type=AVC msg=audit(1760522601.448:1021): avc:  denied  { read } for  pid=1452 comm="httpd" name="page.html" dev="vda4" ino=3412290 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
+type=AVC msg=audit(1792058601.448:1021): avc:  denied  { read } for  pid=1452 comm="httpd" name="page.html" dev="vda4" ino=3412290 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
 ```
 
 </div>
@@ -779,7 +781,7 @@ When something fails with "Permission denied" (or a service fails to start, or a
 
         ```bash
         ls -Z /usr/sbin/httpd
-        sesearch --type_trans -s init_t -t httpd_exec_t
+        sesearch --type_transition -s init_t -t httpd_exec_t
         ```
 
     **Check your work:** you can name the type of the web page (`httpd_sys_content_t`), the web server's domain (`httpd_t`), your own domain (`unconfined_t`), and the executable's type (`httpd_exec_t`). The `shadow_t` search returns no rules.

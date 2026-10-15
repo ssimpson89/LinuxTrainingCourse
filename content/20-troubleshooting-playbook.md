@@ -1400,7 +1400,7 @@ The file kept its `user_home_t` SELinux label. `restorecon -Rv /var/www/html`.
 ## Go deeper
 
 - Man pages: [[man:systemctl(1)]] [[man:journalctl(1)]] [[man:systemd.exec(5)]]
-  [[man:ausearch(8)]] [[man:restorecon(8)]] [[man:lsof(8)]] [[man:findmnt(8)]]
+  [[man:ausearch(8)]] [[man:restorecon(8)]] [[man:lsof(1)]] [[man:findmnt(8)]]
   [[man:dracut.cmdline(7)]] [[man:nsswitch.conf(5)]] [[man:namei(1)]]
 - [Red Hat: Configuring and managing logging (RHEL 10)](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/configuring_and_managing_logging/index)
 - [Red Hat: Using SELinux (RHEL 10)](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/using_selinux/index)

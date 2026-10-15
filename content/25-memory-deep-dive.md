@@ -230,10 +230,10 @@ SwapPss:               0 kB
 
 ```console
 $ pmap -x 2817 | tail -1
-total kB          230244    1792     216
+total kB          230244    1792     108
 ```
 
-That's 230 MB of virtual size, 1.8 MB resident, 216 KB dirty.
+That's 230 MB of virtual size, 1.8 MB resident, 108 KB dirty.
 
 ### VSZ, RSS, PSS and USS
 
@@ -457,6 +457,11 @@ pages. Pages start on inactive, get promoted to active if used again, and
 are evicted from the tail of inactive. That's why one big `cat` of a log
 file doesn't flush your database's hot data: those pages are seen once, stay
 inactive, and are the first to go.
+
+Rocky 10's kernel actually runs the **multi-gen LRU** (MGLRU,
+`/sys/kernel/mm/lru_gen/enabled`), which sorts pages into several age
+generations instead of two lists. The idea is the same, and meminfo still
+reports `Active` and `Inactive`.
 
 ```mermaid
 flowchart TB
@@ -842,7 +847,7 @@ service that is slow because it's at its `MemoryHigh=` shows high
 !!! tip "If /proc/pressure doesn't exist"
     PSI must be enabled in the running kernel. RHEL-family kernels have
     built it in but switched it off by default
-    (`CONFIG_PSI_DEFAULT_DISABLED=y`, confirmed on RHEL 8). Check your own
+    (`CONFIG_PSI_DEFAULT_DISABLED=y`, including the Rocky 10 kernel). Check your own
     kernel rather than trusting a guide:
 
     ```console

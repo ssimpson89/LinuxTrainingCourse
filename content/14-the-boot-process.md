@@ -130,10 +130,10 @@ kernel. Installing a kernel adds a file; removing one deletes it.
 
 ```console
 $ sudo cat /boot/loader/entries/$(cat /etc/machine-id)-$(uname -r).conf
-title Rocky Linux (6.12.0-55.12.1.el10_0.x86_64) 10.0 (Red Quartz)
-version 6.12.0-55.12.1.el10_0.x86_64
-linux /vmlinuz-6.12.0-55.12.1.el10_0.x86_64
-initrd /initramfs-6.12.0-55.12.1.el10_0.x86_64.img
+title Rocky Linux (6.12.0-55.14.1.el10_0.x86_64) 10.0 (Red Quartz)
+version 6.12.0-55.14.1.el10_0.x86_64
+linux /vmlinuz-6.12.0-55.14.1.el10_0.x86_64
+initrd /initramfs-6.12.0-55.14.1.el10_0.x86_64.img
 options root=/dev/mapper/rl-root ro resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap crashkernel=…
 grub_users $grub_users
 grub_arg --unrestricted
@@ -141,7 +141,7 @@ grub_arg --unrestricted
 
 The `options` line is the kernel command line. The real GRUB config,
 `/boot/grub2/grub.cfg`, just says "load all BLS entries". On UEFI,
-`/boot/efi/EFI/rocky/grub.cfg` is a three-line stub that points GRUB at
+`/boot/efi/EFI/rocky/grub.cfg` is a four-line stub that points GRUB at
 `/boot/grub2`.
 
 </div>
@@ -155,10 +155,10 @@ which on Rocky is systemd.
 
 ```console
 $ cat /proc/cmdline
-BOOT_IMAGE=(hd0,gpt2)/vmlinuz-6.12.0-55.12.1.el10_0.x86_64 root=/dev/mapper/rl-root ro resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap crashkernel=…
+BOOT_IMAGE=(hd0,gpt2)/vmlinuz-6.12.0-55.14.1.el10_0.x86_64 root=/dev/mapper/rl-root ro resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap crashkernel=…
 $ journalctl -k -b | head -2
-Oct 15 09:02:09 rocky10 kernel: Linux version 6.12.0-55.12.1.el10_0.x86_64 (mockbuild@…) …
-Oct 15 09:02:09 rocky10 kernel: Command line: BOOT_IMAGE=(hd0,gpt2)/vmlinuz-6.12.0-55.12.1.el10_0.x86_64 root=/dev/mapper/rl-root ro …
+Oct 15 09:02:09 rocky10 kernel: Linux version 6.12.0-55.14.1.el10_0.x86_64 (mockbuild@…) …
+Oct 15 09:02:09 rocky10 kernel: Command line: BOOT_IMAGE=(hd0,gpt2)/vmlinuz-6.12.0-55.14.1.el10_0.x86_64 root=/dev/mapper/rl-root ro …
 ```
 
 `root=` tells the initramfs which device to mount as the real root; `ro`
@@ -284,16 +284,16 @@ which understands BLS and also keeps future kernels consistent.
 ```console
 $ sudo grubby --info=ALL | grep -E '^(index|kernel|args)'
 index=0
-kernel="/boot/vmlinuz-6.12.0-55.12.1.el10_0.x86_64"
+kernel="/boot/vmlinuz-6.12.0-55.14.1.el10_0.x86_64"
 args="ro resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap crashkernel=…"
 index=1
-kernel="/boot/vmlinuz-6.12.0-55.9.1.el10_0.x86_64"
+kernel="/boot/vmlinuz-6.12.0-55.12.1.el10_0.x86_64"
 args="ro resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap crashkernel=…"
 index=2
 kernel="/boot/vmlinuz-0-rescue-2b1e…"
 …
 $ sudo grubby --default-kernel
-/boot/vmlinuz-6.12.0-55.12.1.el10_0.x86_64
+/boot/vmlinuz-6.12.0-55.14.1.el10_0.x86_64
 ```
 
 The **rescue** entry boots a generic kernel and initramfs that include
@@ -321,7 +321,7 @@ the previous one.
 
     ```console
     $ sudo grub2-editenv list
-    saved_entry=2b1e…-6.12.0-55.9.1.el10_0.x86_64
+    saved_entry=2b1e…-6.12.0-55.12.1.el10_0.x86_64
     boot_success=1
     ```
 
@@ -348,8 +348,8 @@ boot instead, edit it at the GRUB menu (next section).
 ### Change the default kernel
 
 ```console
-$ sudo grubby --set-default=/boot/vmlinuz-6.12.0-55.9.1.el10_0.x86_64
-The default is /boot/loader/entries/2b1e…-6.12.0-55.9.1.el10_0.x86_64.conf with index 1 and kernel /boot/vmlinuz-6.12.0-55.9.1.el10_0.x86_64
+$ sudo grubby --set-default=/boot/vmlinuz-6.12.0-55.12.1.el10_0.x86_64
+The default is /boot/loader/entries/2b1e…-6.12.0-55.12.1.el10_0.x86_64.conf with index 1 and kernel /boot/vmlinuz-6.12.0-55.12.1.el10_0.x86_64
 ```
 
 ### Edit at the boot menu, for one boot
@@ -417,14 +417,14 @@ flowchart TB
 
 ```console
 $ lsinitrd | head -5
-Image: /boot/initramfs-6.12.0-55.12.1.el10_0.x86_64.img: 37M
+Image: /boot/initramfs-6.12.0-55.14.1.el10_0.x86_64.img: 37M
 ========================================================================
 Early CPIO image
 ========================================================================
 drwxr-xr-x   3 root     root            0 Oct 13 08:58 .
 $ lsinitrd | grep -E 'lvm$|cryptsetup$|xfs.ko'
 -rwxr-xr-x   1 root     root      2621000 Oct 13 08:58 usr/sbin/lvm
--rw-r--r--   1 root     root       681340 Oct 13 08:58 usr/lib/modules/6.12.0-55.12.1.el10_0.x86_64/kernel/fs/xfs/xfs.ko.xz
+-rw-r--r--   1 root     root       681340 Oct 13 08:58 usr/lib/modules/6.12.0-55.14.1.el10_0.x86_64/kernel/fs/xfs/xfs.ko.xz
 ```
 
 The **early CPIO** part at the front is a separate, uncompressed archive
@@ -448,7 +448,7 @@ layout, `/etc/crypttab`, multipath config, drivers, or dracut settings.
 
 ```console
 $ sudo dracut -f                                # rebuild for the running kernel
-$ sudo dracut -f --kver 6.12.0-55.9.1.el10_0.x86_64   # for another installed kernel
+$ sudo dracut -f --kver 6.12.0-55.12.1.el10_0.x86_64   # for another installed kernel
 $ sudo dracut -f --regenerate-all               # every installed kernel
 ```
 
@@ -1077,7 +1077,7 @@ it's a data disk, fix `/etc/fstab` (add `nofail` or
 **Step 1.** Which kernel arguments did this boot use?
 
 ```text
-BOOT_IMAGE=(hd0,gpt2)/vmlinuz-6.12.0-55.12.1.el10_0.x86_64 root=/dev/mapper/rl-root ro resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap
+BOOT_IMAGE=(hd0,gpt2)/vmlinuz-6.12.0-55.14.1.el10_0.x86_64 root=/dev/mapper/rl-root ro resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap
 ```
 
 </div>
@@ -1087,7 +1087,7 @@ BOOT_IMAGE=(hd0,gpt2)/vmlinuz-6.12.0-55.12.1.el10_0.x86_64 root=/dev/mapper/rl-r
 **Step 2.** Which kernel will boot by default next time?
 
 ```text
-/boot/vmlinuz-6.12.0-55.12.1.el10_0.x86_64
+/boot/vmlinuz-6.12.0-55.14.1.el10_0.x86_64
 ```
 
 </div>

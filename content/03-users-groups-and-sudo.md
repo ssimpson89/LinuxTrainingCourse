@@ -651,8 +651,9 @@ It changes into her home directory and runs her login shell, `/bin/bash`, which 
 
 ```console
 $ loginctl
-SESSION  UID USER  SEAT TTY
-      4 1000 alice      pts/0
+SESSION  UID USER  SEAT LEADER CLASS TTY   IDLE SINCE
+      4 1000 alice -    2511   user  pts/0 no   -
+…
 ```
 
 </div>
@@ -663,8 +664,8 @@ Every step is logged to the journal and `/var/log/secure`:
 
 ```console
 $ sudo tail -3 /var/log/secure
-Oct 15 10:02:11 rocky10 sshd[2511]: Accepted password for alice from 192.168.122.1 port 51522 ssh2
-Oct 15 10:02:11 rocky10 sshd[2511]: pam_unix(sshd:session): session opened for user alice(uid=1000) by (uid=0)
+Oct 15 10:02:11 rocky10 sshd-session[2511]: Accepted password for alice from 192.168.122.1 port 51522 ssh2
+Oct 15 10:02:11 rocky10 sshd-session[2511]: pam_unix(sshd:session): session opened for user alice(uid=1000) by (uid=0)
 Oct 15 10:02:11 rocky10 systemd-logind[812]: New session 4 of user alice.
 ```
 

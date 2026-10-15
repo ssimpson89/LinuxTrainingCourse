@@ -175,7 +175,7 @@ logdir /var/log/chrony
 The commented-out lines in the file are worth reading too: `allow`, `local stratum`, `authselectmode`, `keyfile`, `leapsecmode`, and `leapseclist` are all there, ready to uncomment.
 
 !!! version "Rocky 9 vs 10"
-    Rocky 9's default file also has `keyfile /etc/chrony.keys` and `leapsectz right/UTC` active. Rocky 10 (chrony 4.6 and later) ships both commented out, and the leap-second line is now `#leapseclist /usr/share/zoneinfo/leap-seconds.list`. So out of the box, a Rocky 10 host learns about leap seconds only from its NTP servers, and doesn't know the TAI-UTC offset (see "Leap seconds" below).
+    Rocky 9's default file also has `keyfile /etc/chrony.keys` and `leapsectz right/UTC` active. Rocky 10's package ships both commented out (both releases now carry chrony 4.8, so this is a packaging choice, not a chrony version difference), and the leap-second line is now `#leapseclist /usr/share/zoneinfo/leap-seconds.list`. So out of the box, a Rocky 10 host learns about leap seconds only from its NTP servers, and doesn't know the TAI-UTC offset (see "Leap seconds" below).
 
 Cloud images and hosting providers often replace the `pool` line with their own internal time service (for example a link-local address on AWS or Azure's host time). That's fine and usually better than the public pool.
 

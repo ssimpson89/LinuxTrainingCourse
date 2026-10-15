@@ -497,7 +497,7 @@ $ sudo stratis filesystem create pool1 fs1
 $ sudo mount /dev/stratis/pool1/fs1 /mnt
 ```
 
-It's convenient for simple setups, but LVM is far more common in the wild, so this course focuses on LVM. If you put a Stratis filesystem in fstab, add `x-systemd.requires=stratisd.service` to the options.
+It's convenient for simple setups, but LVM is far more common in the wild, so this course focuses on LVM. If you put a Stratis filesystem in fstab, add `x-systemd.requires=stratis-fstab-setup@POOL_UUID.service` to the options (the pool UUID comes from `stratis pool list`).
 
 ## Encryption with LUKS2
 

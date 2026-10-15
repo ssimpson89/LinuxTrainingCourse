@@ -66,7 +66,7 @@ study it later, calmly, instead of guessing from a restart log.
 
 The other shared idea is **symbols**. A frozen moment is just numbers:
 addresses, registers, raw memory. Debug symbols turn `0x401136` back into
-`parse_config()` at `crashme.c:7`. Without them you have a photo with no
+`get_port()` at `crashme.c:8`. Without them you have a photo with no
 names on it.
 
 ## What a crash actually is
@@ -125,7 +125,7 @@ Learn to read it, because it is often all you get:
 
 ```console
 $ journalctl -k -g segfault --no-pager
-Oct 15 10:02:11 rocky-lab kernel: crashme[4321]: segfault at 20 ip 0000000000401136 sp 00007ffd4c8e2b10 error 4 in crashme[401000+1000] likely on CPU 1 (core 1, socket 0)
+Oct 15 10:02:11 rocky-lab kernel: crashme[4321]: segfault at 20 ip 0000000000401136 sp 00007ffd4c8e2b10 error 4 in crashme[401136,401000+1000] likely on CPU 1 (core 1, socket 0)
 ```
 
 - `segfault at 20`: the faulting address (hex). `0` or a small number means a NULL
@@ -136,8 +136,8 @@ Oct 15 10:02:11 rocky-lab kernel: crashme[4321]: segfault at 20 ip 0000000000401
   access was not allowed", bit 1 means "it was a write", bit 2 means "in user
   mode". So `4` is a user-mode *read* of an unmapped page, `6` a user-mode
   *write* to one, `7` a write to a page the process may not write.
-- `in crashme[401000+1000]`: the failing code was inside the `crashme`
-  binary, mapped at `0x401000`. If this names a library (`libc.so.6`), the
+- `in crashme[401136,401000+1000]`: the failing code was inside the `crashme`
+  binary, at `0x401136` in a mapping that starts at `0x401000`. If this names a library (`libc.so.6`), the
   crash happened inside that library, though the bug is usually in whoever
   called it with bad arguments.
 
@@ -249,7 +249,7 @@ work", one of these is the reason.
 | `RLIMIT_CORE` (`ulimit -c`) | per process, inherited | often `0` soft for login shells and services | If below one page, systemd-coredump logs the crash but stores no core |
 | `LimitCORE=` | unit file | inherits `DefaultLimitCORE=` | Per-service core limit; `LimitCORE=infinity` to allow |
 | `Storage=` | `coredump.conf` | `external` | `external` = file in /var/lib, `journal` = inside the journal, `none` = log only |
-| `ProcessSizeMax=`, `ExternalSizeMax=` | `coredump.conf` | 32G on 64-bit | Bigger processes are logged but not stored |
+| `ProcessSizeMax=`, `ExternalSizeMax=` | `coredump.conf` | 1G (Rocky's shipped `/usr/lib/systemd/coredump.conf`; upstream is 32G) | Bigger processes are logged but not stored |
 | `MaxUse=`, `KeepFree=` | `coredump.conf` | 10% of the filesystem used, 15% kept free | Old cores are deleted to respect these |
 | `fs.suid_dumpable` | sysctl | `2` (set by systemd's `50-coredump.conf`); hardening guides set `0` | Whether setuid programs may dump core at all |
 
@@ -285,7 +285,7 @@ MaxUse=5G
 
 No restart is needed: `systemd-coredump` runs fresh for every crash and reads
 the config each time. Old cores are cleaned up by `systemd-tmpfiles` (after
-3 days by default), so copy out anything you want to keep.
+2 weeks by default), so copy out anything you want to keep.
 
 !!! warning "Core files contain secrets"
     A core is a copy of the process's memory: passwords, TLS private keys,
@@ -473,7 +473,7 @@ $ readelf -n /usr/bin/sleep | grep 'Build ID'
 The debuginfo package installs a symlink named after that hash:
 
 ```text
-/usr/lib/debug/.build-id/4a/1f0c…9d3e.debug -> ../../usr/bin/sleep-9.5-6.el10.x86_64.debug
+/usr/lib/debug/.build-id/4a/1f0c…9d3e.debug -> ../../usr/bin/sleep-9.5-8.el10_2.1.x86_64.debug
 ```
 
 `gdb` reads the build ID from the binary (or from the core file, which
@@ -498,9 +498,9 @@ Debug repos ship **disabled**. List them:
 
 ```console
 $ dnf repolist --all | grep -i debug
-appstream-debug        Rocky Linux 10 - AppStream - Debug        disabled
-baseos-debug           Rocky Linux 10 - BaseOS - Debug           disabled
-crb-debug              Rocky Linux 10 - CRB - Debug              disabled
+appstream-debuginfo    Rocky Linux 10 - AppStream - Debug        disabled
+baseos-debuginfo       Rocky Linux 10 - BaseOS - Debug           disabled
+crb-debuginfo          Rocky Linux 10 - CRB - Debug              disabled
 …
 ```
 
@@ -512,21 +512,21 @@ exact installed versions:
 $ sudo dnf debuginfo-install --enablerepo='*debug*' coreutils
 …
 Installing:
- coreutils-debuginfo        x86_64   9.5-6.el10    baseos-debug   3.1 M
- coreutils-debugsource      x86_64   9.5-6.el10    baseos-debug   1.9 M
+ coreutils-debuginfo        x86_64   9.5-8.el10_2.1    baseos-debuginfo   3.1 M
+ coreutils-debugsource      x86_64   9.5-8.el10_2.1    baseos-debuginfo   1.9 M
 Installing dependencies:
- glibc-debuginfo            x86_64   2.39-37.el10  baseos-debug   6.2 M
+ glibc-debuginfo            x86_64   2.39-142.el10_2   baseos-debuginfo   6.2 M
  …
 ```
 
-Why the explicit `--enablerepo`? The plugin only switches on debug repos
-whose IDs follow the `<repo>-debuginfo` naming, and Rocky's are named
-`<repo>-debug`. The wildcard works whatever the IDs are. Even better, `gdb`
+The plugin switches on the `<repo>-debuginfo` repo for every enabled repo,
+which matches Rocky's IDs, so `--enablerepo` is belt and braces: the
+wildcard also covers repos with other naming. Even better, `gdb`
 tells you what to install. When it opens a core with missing symbols it
 prints a hint like:
 
 ```text
-Missing rpms, try: dnf --enablerepo='*debug*' install glibc-debuginfo-2.39-37.el10.x86_64
+Missing rpms, try: dnf --enablerepo='*debug*' install glibc-debuginfo-2.39-142.el10_2.x86_64
 ```
 
 Older gdb builds (Rocky 9) word it as `Missing separate debuginfos, use:
@@ -640,10 +640,10 @@ Program terminated with signal SIGSEGV, Segmentation fault.
 8	    return cfg->port;            /* crashes when cfg is NULL */
 (gdb) bt
 #0  0x0000000000401136 in get_port (cfg=0x0) at crashme.c:8
-#1  0x0000000000401172 in main (argc=1, argv=0x7ffd4c8e2c48) at crashme.c:18
+#1  0x0000000000401172 in main (argc=1, argv=0x7ffd4c8e2c48) at crashme.c:22
 (gdb) frame 1
-#1  0x0000000000401172 in main (argc=1, argv=0x7ffd4c8e2c48) at crashme.c:18
-18	    printf("port is %d\n", get_port(cfg));
+#1  0x0000000000401172 in main (argc=1, argv=0x7ffd4c8e2c48) at crashme.c:22
+22	    printf("port is %d\n", get_port(cfg));
 (gdb) info locals
 cfg = 0x0
 (gdb) info registers rip rsp rax
@@ -653,7 +653,7 @@ rax            0x0                 0
 ```
 
 Three lines tell the whole story: it died in `get_port` with `cfg=0x0`,
-called from `main` line 18, where `cfg` was still NULL because `argc` was 1.
+called from `main` line 22, where `cfg` was still NULL because `argc` was 1.
 That is what a good bug report contains.
 
 !!! tip "Optimised builds lie a little"
@@ -968,9 +968,9 @@ changing anything:
 
 ```console
 $ rpm -q kexec-tools kdump-utils makedumpfile
-kexec-tools-2.0.29-…el10.x86_64
-kdump-utils-1.0.…el10.x86_64
-makedumpfile-1.7.…el10.x86_64
+kexec-tools-2.0.32-…el10.x86_64
+kdump-utils-1.0.58-…el10.x86_64
+makedumpfile-1.7.8-…el10.x86_64
 $ systemctl is-enabled kdump
 enabled
 $ kdumpctl showmem
@@ -1011,8 +1011,9 @@ path /var/crash
 core_collector makedumpfile -l --message-level 7 -d 31
 ```
 
-- `auto_reset_crashkernel yes`: when a new kernel or kdump-utils is
-  installed, refresh `crashkernel=` to the current default.
+- `auto_reset_crashkernel yes`: when a kdump-utils update changes the
+  default, kernels still using the old default `crashkernel=` get the new
+  one. Values you set yourself are left alone.
 - `path`: directory on the dump target. With no target line, that's the
   root filesystem.
 - `core_collector`: `-l` compresses with LZO, `-d 31` drops free, cache,
@@ -1346,7 +1347,7 @@ reboot the VM: **snapshot it first**.
     6. Find the kernel's one-line report: `journalctl -k -g segfault -n 2`.
 
     **Check your work:** `bt` shows `get_port (cfg=0x0) at crashme.c:8`
-    called from `main` at line 18, and `coredumpctl list` shows `present`
+    called from `main` at line 22, and `coredumpctl list` shows `present`
     for the last crash (and `none` for the first one if your limit was 0).
 
     ??? success "What just happened?"

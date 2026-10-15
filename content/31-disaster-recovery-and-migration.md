@@ -11,7 +11,7 @@ description: Back up a Rocky Linux server so it can actually be rebuilt, recover
   <li>Builds on: 04 · Permissions and ACLs, 05 · Software: RPM and DNF, 09 · Disks and Filesystems, 10 · LVM, RAID and Encryption, 16 · SELinux</li>
 </ul>
 
-The RAID controller in your oldest Rocky server dies and takes both mirrors with it. You have backups, so you're fine. Then you discover that "backups" means a nightly copy of `/home` and `/var/lib/pgsql`. Nobody knows how the disks were partitioned, which packages were installed, what was changed in `/etc` over four years, or why the web server runs on port 8443 with a custom SELinux label. This module is about the difference between *having backups* and *being able to recover*, and about the related problem every Rocky admin eventually faces: moving a system to a new major version, or onto Rocky from somewhere else.
+The RAID controller in your oldest Rocky server dies and takes both mirrors with it. You have backups, so you're fine. Then you discover that "backups" means a nightly copy of `/home` and `/var/lib/pgsql`. Nobody knows how the disks were partitioned, which packages were installed, what was changed in `/etc` over four years, or why the web server runs on port 8444 with a custom SELinux label. This module is about the difference between *having backups* and *being able to recover*, and about the related problem every Rocky admin eventually faces: moving a system to a new major version, or onto Rocky from somewhere else.
 
 !!! abstract "What you'll learn"
     - The difference between backups, disaster recovery and high availability, and how to state goals with **RPO** and **RTO**
@@ -149,9 +149,9 @@ $ cat /backup/selinux-local.txt
 boolean -D
 login -D
 …
-port -a -t http_port_t -r 's0' -p tcp 8443
-fcontext -a -f a -t httpd_sys_content_t -r 's0' '/srv/www(/.*)?'
 boolean -m -1 httpd_can_network_connect_db
+port -a -t http_port_t -r 's0' -p tcp 8444
+fcontext -a -f a -t httpd_sys_content_t -r 's0' '/srv/www(/.*)?'
 ```
 
 On the new system, `sudo semanage import -f selinux-local.txt` replays them. ACLs can be dumped and restored on their own too: `getfacl -R /srv > acls.txt` and `setfacl --restore=acls.txt`.
@@ -218,7 +218,7 @@ $ sudo umount /mnt/snap && sudo lvremove -y rl/data_snap
 
 | Tool | Highlights | Where it comes from |
 |---|---|---|
-| **restic** | Single binary; backs up to local disk, SFTP, S3-compatible object storage and more; encrypted by default | EPEL (`restic`, 0.18 on EPEL 10) |
+| **restic** | Single binary; backs up to local disk, SFTP, S3-compatible object storage and more; encrypted by default | EPEL (`restic`, 0.19 on EPEL 10) |
 | **borg** (BorgBackup) | Very efficient deduplication and compression; local or SSH targets; encrypted repositories | EPEL (`borgbackup`, 1.4 on EPEL 10) |
 
 Install them with `sudo dnf install epel-release` followed by `sudo dnf install restic` or `sudo dnf install borgbackup`. Both keep extended attributes and ACLs on Linux, but test a restore of a labelled file before you rely on it, and still capture `semanage export` separately.
@@ -294,7 +294,7 @@ Copying resulting files to nfs location
 …
 Making backup (using backup method NETFS)
 Creating tar archive '/var/tmp/rear.Xq3…/outputfs/rocky-lab/backup.tar.gz'
-Archived 1874 MiB [avg 15893 KiB/sec] OK
+Archived 1874 MiB in 121 seconds [avg 15859 KiB/sec]
 …
 Exiting rear mkbackup (PID 41123) and its descendant processes ...
 ```
@@ -464,7 +464,7 @@ S.5......  c /etc/ssh/sshd_config
 S.5......  c /etc/chrony.conf
 .M.......  c /etc/sudoers
 S.5......  c /etc/dnf/dnf.conf
-missing    c /etc/sysconfig/kdump
+missing   c /etc/sysconfig/kdump
 ```
 
 Each column is one test that failed:
@@ -554,9 +554,9 @@ S.5......  c /etc/ssh/sshd_config
 ```text
 boolean -D
 …
-port -a -t http_port_t -r 's0' -p tcp 8443
-fcontext -a -f a -t httpd_sys_content_t -r 's0' '/srv/www(/.*)?'
 boolean -m -1 httpd_can_network_connect_db
+port -a -t http_port_t -r 's0' -p tcp 8444
+fcontext -a -f a -t httpd_sys_content_t -r 's0' '/srv/www(/.*)?'
 ```
 
 </div>
@@ -650,7 +650,7 @@ $ tmux                              # never run it in a session that might drop
 $ sudo ./migrate2rocky9.sh -r
 …
 $ cat /etc/rocky-release
-Rocky Linux release 9.6 (Blue Onyx)
+Rocky Linux release 9.8 (Blue Onyx)
 ```
 
 The options are `-r` (convert to Rocky) and `-V` (verify all RPMs afterwards). Practical rules from the script's own documentation:

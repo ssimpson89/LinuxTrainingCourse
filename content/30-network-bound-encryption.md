@@ -151,7 +151,7 @@ $ sudo ls /var/db/tang
 
 The keys are generated automatically the first time Tang starts. One is a **signing** key (it signs the advertisement so clients can tell it's genuine), the other an **exchange** key (used in the recovery maths).
 
-`tangd.socket` listens on TCP port 80 by default. Most sites move it to a dedicated port. On Rocky that takes three changes, because SELinux ([module 16](16-selinux.md)) only lets `tangd` use ports labelled `tangd_port_t`:
+`tangd.socket` listens on TCP port 80 by default. Most sites move it to a dedicated port. On Rocky that takes three changes, because SELinux ([module 16](16-selinux.md)) only lets `tangd` use its own `tangd_port_t` ports (plus the standard HTTP ports):
 
 ```console
 $ sudo semanage port -a -t tangd_port_t -p tcp 7500

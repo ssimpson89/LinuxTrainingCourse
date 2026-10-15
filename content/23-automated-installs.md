@@ -218,9 +218,15 @@ EOF
 ```console
 $ sudo dnf install pykickstart
 $ ksvalidator -v RHEL10 web01.ks
+
+Checking kickstart file web01.ks
+
 $ echo $?
 0
 $ ksvalidator -v RHEL10 old-rocky8.ks
+
+Checking kickstart file old-rocky8.ks
+
 The following problem occurred on line 7 of the kickstart file:
 
 … auth … has been removed …
@@ -228,7 +234,7 @@ $ echo $?
 1
 ```
 
-`-v RHEL10` picks the syntax version for Rocky 10 (Rocky uses the RHEL versions). `ksvalidator -l` lists the versions your pykickstart knows.
+`-v RHEL10` picks the syntax version for Rocky 10 (Rocky uses the RHEL versions). `ksvalidator -l` lists the versions your pykickstart knows. It always prints a `Checking kickstart file` header; the exit code is the number of problems found.
 
 <div class="quiz" data-answer="3" markdown>
 
@@ -454,7 +460,7 @@ flowchart LR
 ```
 
 !!! note "Front ends are changing"
-    Upstream osbuild also offers a newer, service-free `image-builder` command-line tool that builds directly from a blueprint, and Red Hat documents it for RHEL 10.2. Check whether your Rocky release packages it with `dnf info image-builder`; the `composer-cli` workflow above is the established one. In the web console, `cockpit-image-builder` replaces the deprecated `cockpit-composer`.
+    Upstream osbuild also offers a newer, service-free `image-builder` command-line tool that builds directly from a blueprint, and Red Hat documents it for RHEL 10.2. Rocky 10 ships it in AppStream as the `image-builder` package; the `composer-cli` workflow above is the established one. In the web console, `cockpit-image-builder` replaces the deprecated `cockpit-composer`.
 
 ??? question "Under the hood: why images don't all end up with the same identity"
     A cloned disk carries everything in it, including `/etc/machine-id` and the SSH host keys. Image Builder and Rocky's cloud images avoid duplicates by shipping an **empty** `/etc/machine-id`: systemd sees it at first boot, generates a fresh ID and treats the boot as a first boot (`ConditionFirstBoot=`); images also ship without SSH host keys, and `sshd-keygen@.service` creates them when sshd first starts. If you build a template by hand from an installed VM instead, run `virt-sysprep` on it (or empty `/etc/machine-id` and delete `/etc/ssh/ssh_host_*`) before cloning, or every clone gets the same DHCP lease identity and the same host keys.
@@ -495,6 +501,7 @@ $ cloud-init status --long
 status: done
 extended_status: done
 boot_status_code: enabled-by-generator
+last_update: Thu, 15 Oct 2026 10:52:07 +0000
 detail: DataSourceNoCloud [seed=/dev/sr0]
 errors: []
 recoverable_errors: {}
@@ -636,7 +643,8 @@ graphical
 **Step 2.** Validate `web01.ks` for Rocky 10 syntax.
 
 ```text
-(no output: the file is valid)
+Checking kickstart file web01.ks
+(nothing else: the file is valid)
 ```
 
 </div>
@@ -678,7 +686,7 @@ status: done
 
 ## Labs
 
-All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualization-kvm.md)). Install the tools first: `sudo dnf install virt-install libvirt qemu-kvm && sudo systemctl enable --now libvirtd`. Download a Rocky 10 ISO from rockylinux.org; the commands assume `/var/lib/libvirt/images/Rocky-10.2-x86_64-dvd.iso` (adjust the name to the file you have).
+All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualization-kvm.md)). Install the tools first: `sudo dnf install virt-install libvirt qemu-kvm && sudo systemctl enable --now libvirtd`. Download a Rocky 10 ISO from rockylinux.org; the commands assume `/var/lib/libvirt/images/Rocky-10.2-x86_64-dvd1.iso` (adjust the name to the file you have).
 
 !!! lab "Lab 1: From anaconda-ks.cfg to a validated kickstart"
 
@@ -702,10 +710,10 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
 
     3. Introduce two mistakes on purpose (add `auth --useshadow` and misspell `selinux` as `selinx`), validate again, read the errors, and fix them.
 
-    **Check your work:** `ksvalidator -v RHEL10 ~/ks/base.ks` exits 0 with no output.
+    **Check your work:** `ksvalidator -v RHEL10 ~/ks/base.ks` exits 0 and prints nothing after the `Checking kickstart file` line.
 
     ??? tip "Hint: \"Unknown command\""
-        ksvalidator stops at the first fatal error. Fix it, run again, and repeat until it's clean.
+        ksvalidator reports every problem it finds, each with its line number (add `-e` to stop at the first). Fix them, run again, and repeat until it's clean.
 
     **Clean up:** keep `~/ks/base.ks` for the next labs.
 
@@ -720,7 +728,7 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
         ```bash
         sudo virt-install --name ks-test --memory 4096 --vcpus 2 \
           --disk size=20 --osinfo linux2022 --boot uefi \
-          --location /var/lib/libvirt/images/Rocky-10.2-x86_64-dvd.iso \
+          --location /var/lib/libvirt/images/Rocky-10.2-x86_64-dvd1.iso \
           --initrd-inject ~/ks/base.ks \
           --extra-args "inst.ks=file:/base.ks console=ttyS0" \
           --graphics none
@@ -741,7 +749,7 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
         ```bash
         sudo dnf install -y lorax
         sudo mkksiso --ks ~/ks/base.ks -c "console=ttyS0" \
-          /var/lib/libvirt/images/Rocky-10.2-x86_64-dvd.iso /var/lib/libvirt/images/auto.iso
+          /var/lib/libvirt/images/Rocky-10.2-x86_64-dvd1.iso /var/lib/libvirt/images/auto.iso
         sudo virt-install --name ks-iso --memory 4096 --vcpus 2 --disk size=20 \
           --osinfo linux2022 --boot uefi --cdrom /var/lib/libvirt/images/auto.iso --graphics none
         ```
@@ -786,7 +794,7 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
 
         ```bash
         sudo mkdir -p /var/www/html/rocky10 /var/www/html/ks /var/lib/tftpboot/rocky /var/lib/tftpboot/rocky10
-        sudo mount -o loop,ro,context=system_u:object_r:httpd_sys_content_t:s0 ~/Rocky-10.2-x86_64-dvd.iso /var/www/html/rocky10
+        sudo mount -o loop,ro,context=system_u:object_r:httpd_sys_content_t:s0 ~/Rocky-10.2-x86_64-dvd1.iso /var/www/html/rocky10
         sudo cp -r /var/www/html/rocky10/EFI /var/lib/tftpboot/rocky/
         sudo cp /var/www/html/rocky10/images/pxeboot/{vmlinuz,initrd.img} /var/lib/tftpboot/rocky10/
         sudo chmod -R a+rX /var/lib/tftpboot

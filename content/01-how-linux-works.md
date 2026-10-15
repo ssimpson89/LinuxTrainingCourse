@@ -121,7 +121,7 @@ sequenceDiagram
     K->>K: Check permissions and SELinux
     K-->>L: file descriptor 3
     P->>L: read the file
-    L->>K: read(3, buffer, 131072)
+    L->>K: read(3, buffer, 262144)
     K->>D: fetch the data (usually already cached)
     D-->>K: "rocky-lab\n"
     K-->>L: 10 bytes
@@ -166,10 +166,10 @@ openat(AT_FDCWD, "/lib64/libc.so.6", O_RDONLY|O_CLOEXEC) = 3
 read(3, "\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0"..., 832) = 832
 …
 openat(AT_FDCWD, "/etc/hostname", O_RDONLY) = 3
-read(3, "rocky-lab\n", 131072)            = 10
+read(3, "rocky-lab\n", 262144)            = 10
 write(1, "rocky-lab\n", 10rocky-lab
 )             = 10
-read(3, "", 131072)                     = 0
+read(3, "", 262144)                     = 0
 +++ exited with 0 +++
 ```
 

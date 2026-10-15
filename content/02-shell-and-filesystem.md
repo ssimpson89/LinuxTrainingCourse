@@ -523,7 +523,7 @@ These are **symbolic links**, not directories. Since RHEL 7 (and so on every Roc
 ```console
 $ ls -ld /bin /sbin /lib /lib64
 lrwxrwxrwx. 1 root root 7 Jun 11  2025 /bin -> usr/bin
-lrwxrwxrwx. 1 root root 9 Jun 11  2025 /lib -> usr/lib
+lrwxrwxrwx. 1 root root 7 Jun 11  2025 /lib -> usr/lib
 lrwxrwxrwx. 1 root root 9 Jun 11  2025 /lib64 -> usr/lib64
 lrwxrwxrwx. 1 root root 8 Jun 11  2025 /sbin -> usr/sbin
 ```
@@ -793,8 +793,8 @@ Linux tools are small and each does one job. You chain them with pipes. Most of 
 
 ```console
 $ sudo tail -f /var/log/secure
-Oct 15 10:02:11 rocky10 sshd[2511]: Accepted publickey for alice from 192.168.122.1 port 51522 ssh2: ED25519 SHA256:…
-Oct 15 10:02:11 rocky10 sshd[2511]: pam_unix(sshd:session): session opened for user alice(uid=1000) by (uid=0)
+Oct 15 10:02:11 rocky10 sshd-session[2511]: Accepted publickey for alice from 192.168.122.1 port 51522 ssh2: ED25519 SHA256:…
+Oct 15 10:02:11 rocky10 sshd-session[2511]: pam_unix(sshd:session): session opened for user alice(uid=1000) by (uid=0)
 ^C
 ```
 
@@ -984,10 +984,10 @@ Run `source ~/.bashrc` (or `. ~/.bashrc`) to load changes into the current shell
 
     ```console
     $ grep -A1 'login_shell' /etc/bashrc
-        if ! shopt -q login_shell ; then # We're not a login shell
+      if ! shopt -q login_shell ; then # We're not a login shell
     …
     $ grep 'profile.d/\*.sh' /etc/bashrc
-            for i in /etc/profile.d/*.sh; do
+        for i in /etc/profile.d/*.sh; do
     ```
 
     So a file you drop into `/etc/profile.d/` reaches login shells *and* new terminal tabs, which is why it is the right place for site-wide settings. What it does **not** reach: cron jobs and systemd services, which never start an interactive shell. They get their environment from the crontab or the unit file (`Environment=`). "It works when I log in but not from cron" is almost always this.

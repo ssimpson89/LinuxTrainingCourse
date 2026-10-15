@@ -219,7 +219,7 @@ $ rpm -q --changelog openssh-server | head -4
     ```console
     $ rpm -q iputils
     iputils-20240905-5.el10.x86_64
-    $ rpm -q --changelog iputils | grep -m1 CVE
+    $ rpm -q --changelog iputils | grep CVE-2025-47268
     - Fix CVE-2025-47268 iputils: Signed Integer Overflow in Timestamp Multiplication in iputils ping (RHEL-94582)
     ```
 
@@ -309,7 +309,7 @@ Each repo is described by a section in a `.repo` file in `/etc/yum.repos.d/`. Ro
 
 ```console
 $ ls /etc/yum.repos.d/
-rocky-addons.repo  rocky-devel.repo  rocky-extras.repo  rocky.repo
+rocky-addons.repo  rocky-devel.repo  rocky-extras.repo  rocky-security.repo  rocky.repo
 ```
 
 ```ini title="/etc/yum.repos.d/rocky.repo (excerpt)"
@@ -391,7 +391,7 @@ extras                      Rocky Linux 10 - Extras
 ```
 
 !!! version "Rocky 9 vs 10"
-    EPEL 9 is one repo for every Rocky 9 point release. EPEL 10 is built **per minor release** (10.0, 10.1, …), tracking the RHEL 10 minor versions, and the `epel-release` repo file picks the right one from your system's version. If EPEL breaks right after a new Rocky point release, it is usually because the matching EPEL branch and the Rocky release are a few days apart; a `sudo dnf clean metadata` after both are out normally fixes it.
+    EPEL 9 is one repo for every Rocky 9 point release. EPEL 10 is built **per minor release** (10.0, 10.1, …), tracking the RHEL 10 minor versions. On Rocky, the `epel-release` repo file asks the mirror system for the branch that matches the current released RHEL 10 minor version. If EPEL breaks right after a new Rocky point release, it is usually because the matching EPEL branch and the Rocky release are a few days apart; a `sudo dnf clean metadata` after both are out normally fixes it.
 
 <div class="quiz" data-answer="3" markdown>
 
@@ -790,7 +790,6 @@ $ sudo createrepo_c /srv/localrepo
 Directory walk started
 Directory walk done - 1 packages
 Temporary output repo path: /srv/localrepo/.repodata/
-Preparing sqlite DBs
 Pool started (with 5 workers)
 Pool finished
 $ ls /srv/localrepo/repodata/

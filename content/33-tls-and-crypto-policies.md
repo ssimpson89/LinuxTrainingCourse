@@ -316,7 +316,7 @@ flowchart TB
 | Policy | Intended for | Main effects |
 |---|---|---|
 | `DEFAULT` | Almost everyone | TLS 1.2 and 1.3, RSA/DH at least 2048 bits, no SHA-1 signatures, no TLS RSA key exchange; on Rocky 10.1 and later, hybrid post-quantum key exchange preferred |
-| `LEGACY` | Talking to old systems | Still TLS 1.2+ (TLS 1.0 and 1.1 are gone in every policy), but allows SHA-1 signatures, TLS RSA key exchange, and CBC ciphers. A stopgap, not a home |
+| `LEGACY` | Talking to old systems | Still TLS 1.2+ (TLS 1.0 and 1.1 are gone in every policy), but allows SHA-1 signatures, TLS RSA key exchange, CBC ciphers in SSH, and the 1536-bit FFDHE group. A stopgap, not a home |
 | `FUTURE` | Conservative, long-lived systems | RSA/DH at least 3072 bits, fewer ciphers. Many public sites still use 2048-bit RSA and will fail. From Rocky 10.2, also TLS 1.3 only with hybrid ML-KEM as the only key exchange |
 | `FIPS` | FIPS 140 compliance | Only FIPS-approved algorithms. On Rocky 10, a system must be **installed** in FIPS mode; setting the policy alone doesn't make it FIPS |
 
@@ -360,9 +360,9 @@ AD-SUPPORT.pmod         NO-ENFORCE-EMS.pmod  OSPP.pmod
 | `NO-ENFORCE-EMS` | Don't require Extended Master Secret in TLS 1.2 (relevant in FIPS mode) |
 | `NO-PQ` | Turn post-quantum algorithms off (10.1+) |
 | `OSPP` | Restrict further to the Common Criteria OSPP profile |
-| `TEST-PQ` | The 10.0 post-quantum preview |
+| `TEST-PQ` | Experimental extra post-quantum algorithms, not for production (on 10.0 it comes from the separate `crypto-policies-pq-preview` package) |
 
-The list changes between minor releases, so always check the directory. Rocky 10.0 has neither `NO-PQ` nor `AD-SUPPORT-LEGACY`. Rocky 9 has `SHA1` (re-enable SHA-1 signatures as a temporary crutch) and `NO-SHA1`. Rocky 10 has no `SHA1` module at all, so a script that sets `DEFAULT:SHA1` on Rocky 9 fails with an error on 10.
+The list changes between minor releases, so always check the directory. Rocky 10.0 has no `NO-PQ`, and `TEST-PQ` is only there if you install `crypto-policies-pq-preview`. Rocky 9 has `SHA1` (re-enable SHA-1 signatures as a temporary crutch) and `NO-SHA1`. Rocky 10 has no `SHA1` module at all, so a script that sets `DEFAULT:SHA1` on Rocky 9 fails with an error on 10.
 
 You can write your own. A custom module is a file in `/etc/crypto-policies/policies/modules/` whose name is **upper case** and ends in `.pmod`. Its directives can be **scoped** to a protocol or library with `@`:
 
@@ -431,7 +431,7 @@ TLS deploys ML-KEM as a **hybrid**: the key share combines classic X25519 *and* 
 | ML-KEM hybrid key exchange | Technology preview: install `crypto-policies-pq-preview` and set the `TEST-PQ` subpolicy | **On by default** in every policy, at the highest priority (used when the peer supports it); from 10.2, FUTURE allows *only* the hybrids |
 | ML-DSA signatures | Preview only | Enabled in the policies; OpenSSL 3.5 can create ML-DSA keys and certificates |
 | Turning PQC off | Don't enable the preview | `update-crypto-policies --set DEFAULT:NO-PQ` |
-| SSH | `mlkem768x25519-sha256` key exchange available | Same, preferred by default |
+| SSH | `mlkem768x25519-sha256` supported by OpenSSH but not in the policy's `KexAlgorithms` | Enabled and preferred by default |
 
 !!! tip "Seeing what SSH will actually offer"
     `ssh -Q kex` lists every key exchange the `ssh` binary *supports*, not what the policy *enables*. To see the effective list for a connection, ask for the resolved client config: `ssh -G host | grep kexalgorithms`. On Rocky 10.1+ it starts with `mlkem768x25519-sha256`.

@@ -152,7 +152,7 @@ $ ps -o pid,cmd -C sssd,sssd_be,sssd_nss,sssd_pam
 Add `user` to the `-o` list to see which account they run as. The answer changed recently, as the next box explains.
 
 ??? question "Under the hood: which user does sssd run as, and why it matters"
-    Older SSSD ran every process as root. Since SSSD 2.10 (the version family in Rocky 10), the project's default is to start the service as an unprivileged **`sssd`** user through `User=`/`Group=` in the systemd unit, and to give elevated rights only to three small helpers (`krb5_child`, `ldap_child`, `selinux_child`) through **file capabilities** rather than setuid. Distributions can override that choice, so prove it on the box rather than trusting a blog:
+    Older SSSD ran every process as root. Since SSSD 2.10 (Rocky 10.0 shipped 2.10, Rocky 10.2 ships 2.12), the project's default is to start the service as an unprivileged **`sssd`** user through `User=`/`Group=` in the systemd unit, and to give elevated rights only to a few binaries (the `krb5_child`, `ldap_child` and `selinux_child` helpers, plus `sssd_pam`) through **file capabilities** rather than setuid. Distributions can override that choice, so prove it on the box rather than trusting a blog:
 
     ```console
     $ systemctl show sssd -p User -p Group

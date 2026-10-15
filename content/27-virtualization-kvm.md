@@ -794,9 +794,9 @@ HugePages_Total:    2048
 
 | Mode | Host page cache | Safe on host crash? | Typical use |
 |---|---|---|---|
-| `none` | Bypassed (O_DIRECT) | Yes, guest flushes are honoured | Production default for most setups; required for live migration with shared storage |
+| `none` | Bypassed (O_DIRECT) | Yes, guest flushes are honoured | Production default for most setups; libvirt refuses live migration with other modes as unsafe (unless the images sit on a coherent cluster filesystem, or you pass `--unsafe`) |
 | `writeback` | Used for reads and writes | Yes, flushes honoured | Good for lab hosts with spare RAM |
-| `writethrough` | Used for reads only | Yes | Rarely needed |
+| `writethrough` | Used, but every write is synced to disk before it completes | Yes | Rarely needed |
 | `unsafe` | Used, flushes ignored | No | Throwaway installs only |
 
 Pair `cache='none'` with `io='native'` for the lowest overhead on local disks.

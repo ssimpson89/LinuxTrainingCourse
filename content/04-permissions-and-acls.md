@@ -223,32 +223,30 @@ When a program creates a file, it asks for a mode, usually `666` for files and `
 
 ```console
 $ umask
-0002
+0022
 $ umask -S
-u=rwx,g=rwx,o=rx
+u=rwx,g=rx,o=rx
 $ touch newfile; mkdir newdir
 $ ls -ld newfile newdir
--rw-rw-r--. 1 alice alice 0 Oct 15 11:30 newfile
-drwxrwxr-x. 2 alice alice 6 Oct 15 11:30 newdir
-$ sudo bash -c umask
-0022
+-rw-r--r--. 1 alice alice 0 Oct 15 11:30 newfile
+drwxr-xr-x. 2 alice alice 6 Oct 15 11:30 newdir
 ```
 
-Requested `666` with umask `002` removed gives `664`. Requested `777` minus `002` gives `775`. It is a removal, not subtraction: a umask of `077` makes new files `600` and new directories `700`.
+Requested `666` with umask `022` removed gives `644`. Requested `777` minus `022` gives `755`. It is a removal, not subtraction: a umask of `077` makes new files `600` and new directories `700`.
 
-Notice that alice and root get different masks. On Rocky, a regular user with a **user private group** (module 03) gets `0002`, so her group can write her new files. That is safe, because her group contains only her. Root and system accounts get `0022`.
+On Rocky, regular users and root alike get `0022` by default. Some distributions give a user with a **user private group** (module 03) `0002` instead, so her group can write her new files (safe, because that group contains only her). Rocky does not; if you want group-writable files, set the umask yourself.
 
 | umask | New file | New directory | Typical use |
 |---|---|---|---|
-| `022` | `644` | `755` | everyone may read |
-| `002` | `664` | `775` | group may edit: Rocky's default for regular users |
+| `022` | `644` | `755` | everyone may read: Rocky's default |
+| `002` | `664` | `775` | group may edit |
 | `027` | `640` | `750` | group may read, other nothing |
 | `077` | `600` | `700` | private |
 
 Set it for your session with `umask 027`, permanently in `~/.bashrc`. Services do not log in, so they get their own with `UMask=` in a systemd unit (default `0022`, see [07 · systemd and Services](07-systemd-and-services.md)).
 
 ??? question "Under the hood: where your umask comes from"
-    `/etc/login.defs` says `UMASK 022`, so why does alice get `002`? Two settings combine:
+    Nothing reads `/etc/login.defs` on its own. At every login (console, SSH, `su -`), the `pam_umask` module, called from `/etc/pam.d/postlogin`, reads `UMASK` from it and sets the session's umask:
 
     ```console
     $ grep -E '^(UMASK|USERGROUPS_ENAB)' /etc/login.defs
@@ -258,9 +256,9 @@ Set it for your session with `umask 027`, permanently in `~/.bashrc`. Services d
     session     optional                   pam_umask.so silent
     ```
 
-    At every login (console, SSH, `su -`), the `pam_umask` module reads `UMASK` from `login.defs`. Because `USERGROUPS_ENAB` is `yes`, it then checks whether the user's name matches their primary group name (a user private group) and, if so, copies the owner bits into the group bits: `022` becomes `002`, `077` becomes `007`. Root is never adjusted.
+    `pam_umask` has a `usergroups` option that copies the owner bits into the group bits for a user with a user private group (`022` becomes `002`), but Rocky does not turn it on: the line above passes only `silent`. `USERGROUPS_ENAB yes` is read by `useradd` and `userdel` (create and remove the private group), not by `pam_umask`.
 
-    This is the trap behind "the umask in login.defs does nothing": a security baseline sets `UMASK 027`, users still see `007`. Either set `USERGROUPS_ENAB no`, or set the umask explicitly in a file under `/etc/profile.d/`. Then log in again and run `umask` to prove it; `grep Umask /proc/$$/status` shows the live value for any process.
+    So a security baseline that sets `UMASK 027` in `login.defs` takes effect at the next login. Log in again and run `umask` to prove it; `grep Umask /proc/$$/status` shows the live value for any process. Services are not affected: they take `UMask=` from their unit.
 
 !!! note "umask never adds bits"
     `umask` only removes. That is why new files are never executable by default: programs ask for `666`, and no umask can add `x`. You make a script executable with `chmod +x` on purpose.
@@ -352,7 +350,7 @@ $ ls -ld /srv/devs
 drwxrws---. 2 root devs 6 Oct 15 11:40 /srv/devs
 $ touch /srv/devs/alice-notes.txt
 $ ls -l /srv/devs
--rw-rw-r--. 1 alice devs 0 Oct 15 11:41 alice-notes.txt
+-rw-r--r--. 1 alice devs 0 Oct 15 11:41 alice-notes.txt
 ```
 
 The file belongs to group `devs`, not `alice`. Combined with a group-friendly umask (`002`) or a default ACL (later), the whole team can edit each other's files.
@@ -464,7 +462,7 @@ Right. bob is not the owner, but he *is* in the owning group, so the group bits 
 
     ```console
     $ grep Umask /proc/$$/status
-    Umask:	0002
+    Umask:	0022
     ```
 
 <div class="terminal-sim" data-title="Permissions drill" data-prompt="[alex@rocky-lab project]$ " markdown>
@@ -833,7 +831,7 @@ A normal shell has an empty effective set (`CapEff` all zeros). Root's is full. 
     **Check your work:** `ana.txt` belongs to group `team` and has a `+`. ben can append to it, even though ana's umask was `077`, but `rm` fails with "Operation not permitted".
 
     ??? success "What just happened?"
-        setgid made the file's group `team`. The default ACL gave it a `group:team:rw-` entry and replaced the umask. The sticky bit stopped ben deleting a file he does not own, even though he may edit it.
+        setgid made the file's group `team`. The default ACL gave it a `group:team:rwx` entry (effective `rw-`, because the mask is capped by the `666` that the shell asked for) and replaced the umask. The sticky bit stopped ben deleting a file he does not own, even though he may edit it.
 
     **Clean up:** `sudo rm -rf /srv/team; sudo userdel -r ana; sudo userdel -r ben; sudo groupdel team`
 

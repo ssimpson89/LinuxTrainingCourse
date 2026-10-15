@@ -94,7 +94,7 @@ vdb
 
 ```console
 $ sudo blkid /dev/vda2
-/dev/vda2: UUID="6c3e1a5d-6c1b-4f0e-9d0a-5b2f0e8c1a77" TYPE="xfs" PARTUUID="a1d4…"
+/dev/vda2: UUID="6c3e1a5d-6c1b-4f0e-9d0a-5b2f0e8c1a77" BLOCK_SIZE="512" TYPE="xfs" PARTUUID="a1d4…"
 ```
 
 The stable aliases live under `/dev/disk/` (`by-uuid/`, `by-id/`, `by-label/`, `by-path/`, `by-partuuid/`). Each is a symlink to the current kernel name, created by **udev**, the service that reacts to hardware events and builds `/dev`.
@@ -152,7 +152,7 @@ flowchart TB
 |------|-------|-------|
 | `fdisk` | Interactive menu | Handles both MBR and GPT. Changes are only written when you press `w`. |
 | `parted` | Command line or interactive | Scriptable. **Changes apply immediately**, there is no "write" step. |
-| `gdisk` / `sgdisk` | Interactive / scriptable | GPT specialists. May need `sudo dnf install gdisk`. |
+| `gdisk` / `sgdisk` | Interactive / scriptable | GPT specialists. Not in the Rocky 10 repos: install `gdisk` from EPEL (Rocky 9 has it in AppStream). |
 
 A scripted GPT partition with `parted` looks like this:
 
@@ -371,7 +371,7 @@ Both are **journaling** filesystems. Before changing their metadata, they write 
     data     =                       bsize=4096   blocks=2620928, imaxpct=25
     …
     $ sudo xfs_info /data             # inspect a mounted XFS
-    $ sudo xfs_growfs /data           # grow to fill the device (takes the MOUNTPOINT)
+    $ sudo xfs_growfs /data           # grow to fill the device (must be MOUNTED)
     $ sudo xfs_admin -L data /dev/vdb1  # set a label (unmounted)
     $ sudo xfs_repair -n /dev/vdb1    # check only, no changes (unmounted)
     ```
@@ -1110,7 +1110,7 @@ All labs use **loop devices**: a regular file attached as a fake disk with `lose
     4. Find and release it:
 
         ```console
-        $ sudo lsof +L1 /mnt/tiny
+        $ sudo lsof +aL1 /mnt/tiny
         $ sudo pkill -f 'sleep 600'
         $ df -h /mnt/tiny
         ```
@@ -1135,7 +1135,7 @@ All labs use **loop devices**: a regular file attached as a fake disk with `lose
 | Mount works by hand but the disk mounts in the wrong place after reboot | fstab uses `/dev/sdb1`, and names shifted | Use `UUID=` from `blkid`. |
 | `df` shows full, `du` shows little | Deleted-but-open files, or data hidden under a mount | `lsof +L1`; bind-mount the parent to look underneath. |
 | "No space left" with free space | Inode exhaustion (ext4) | `df -i`; delete small files; reformat with more inodes. |
-| `xfs_growfs /dev/…` fails | `xfs_growfs` wants the mount point | `xfs_growfs /data`. |
+| `xfs_growfs` fails on an unmounted filesystem | XFS only grows while mounted | Mount it, then `xfs_growfs /data` (mount point, or the mounted device). |
 | New partition not visible | Kernel didn't re-read the table | `partprobe /dev/X`. |
 | Edited fstab but `mount -a` uses old options | systemd still has old generated units | `systemctl daemon-reload`. |
 | `free` shows almost no free memory | That's the page cache doing its job | Look at the `available` column. |

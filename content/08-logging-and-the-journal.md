@@ -252,8 +252,10 @@ crond.service
 $ journalctl -u chronyd -n 1 -o json-pretty --output-fields=MESSAGE,_PID,PRIORITY
 {
         "__CURSOR" : "s=3c1f…",
-        "__REALTIME_TIMESTAMP" : "1760524370118204",
+        "__REALTIME_TIMESTAMP" : "1792060267118204",
         "__MONOTONIC_TIMESTAMP" : "5120334812",
+        "__SEQNUM" : "6702",
+        "__SEQNUM_ID" : "3c1f…",
         "_BOOT_ID" : "8e4c2f0d6a7b4e1c9d3f5a6b7c8d9e0f",
         "PRIORITY" : "6",
         "MESSAGE" : "Selected source 162.159.200.1 (2.rocky.pool.ntp.org)",
@@ -261,7 +263,7 @@ $ journalctl -u chronyd -n 1 -o json-pretty --output-fields=MESSAGE,_PID,PRIORIT
 }
 ```
 
-Pipe `-o json` into `jq` (in the Rocky AppStream repo) for quick reports:
+Pipe `-o json` into `jq` (in the Rocky BaseOS repo) for quick reports:
 
 ```console
 $ journalctl -b -p err -o json | jq -r '._SYSTEMD_UNIT // .SYSLOG_IDENTIFIER' | sort | uniq -c | sort -rn | head -3
@@ -452,8 +454,8 @@ $ sudo journalctl --vacuum-time=2weeks    # or delete by age
 !!! version "Rocky 9 vs 10"
     On Rocky 9 the default settings live in `/etc/systemd/journald.conf`
     (all commented out). Newer systemd packaging ships the commented
-    defaults as `/usr/lib/systemd/journald.conf` instead, so on Rocky 10 the
-    `/etc` copy may not exist. Find out with
+    defaults as `/usr/lib/systemd/journald.conf` instead, so on a fresh
+    Rocky 10 install the `/etc` copy doesn't exist. Find out with
     `ls /etc/systemd/journald.conf /usr/lib/systemd/journald.conf`. A drop-in
     in `/etc/systemd/journald.conf.d/` works on both and survives updates,
     so always use that, and check the merged result with
@@ -493,13 +495,16 @@ Each rule is **selector** then **action**. A selector is
 (`kern`, `authpriv`, `cron`, `mail`, `daemon`, `user`, `local0` to `local7`):
 
 ```text title="/etc/rsyslog.conf (rules section, trimmed)"
-*.info;mail.none;authpriv.none;cron.none                /var/log/messages
-authpriv.*                                              /var/log/secure
-mail.*                                                  -/var/log/maillog
-cron.*                                                  /var/log/cron
-*.emerg                                                 :omusrmsg:*
-local7.*                                                /var/log/boot.log
+*.info;mail.none;authpriv.none;cron.none action(type="omfile" file="/var/log/messages")
+authpriv.* action(type="omfile" file="/var/log/secure")
+mail.* action(type="omfile" file="/var/log/maillog" sync="on")
+cron.* action(type="omfile" file="/var/log/cron")
+*.emerg action(type="omusrmsg" users="*")
+local7.* action(type="omfile" file="/var/log/boot.log")
 ```
+
+Older guides write the same rules in the legacy short form,
+`authpriv.*  /var/log/secure`. rsyslog still accepts it.
 
 So on a stock Rocky system:
 
@@ -639,13 +644,13 @@ If an attacker gets root, or the disk dies, local logs are gone or
 untrustworthy. Sending a copy to a central log host fixes both. The simplest
 route on Rocky is rsyslog over TCP.
 
-Which port? Classic syslog is 514/**udp**. For TCP, use **601**, the
-registered syslog-over-TCP port. On Rocky this matters because of SELinux:
-601/tcp is already labelled `syslogd_port_t`, so rsyslog may listen on it,
-while 514/tcp is labelled for the old `rsh` service, which rsyslog isn't allowed to bind
-(check with `sudo semanage port -l | grep -E 'syslog|rsh'`). Many guides
-say "TCP 514"; on an enforcing Rocky box that fails with an AVC denial
-unless you relabel the port.
+Which port? Classic syslog is 514/**udp**. Over TCP many guides use 514/tcp;
+this module uses **601/tcp**, the port IANA registers for reliable syslog.
+Both work with SELinux enforcing: 601/tcp is labelled `syslogd_port_t`, and
+although 514/tcp is labelled `rsh_port_t` (for the old `rsh` service), the
+policy explicitly lets rsyslog bind it too (check the labels with
+`sudo semanage port -l | grep -E 'syslog|rsh'`). Any *other* port needs
+relabelling first.
 
 ```mermaid
 sequenceDiagram
