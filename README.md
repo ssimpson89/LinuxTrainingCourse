@@ -1,9 +1,13 @@
 # Rocky Linux Deep Dive
 
-An easy-to-follow, hands-on deep dive into how Rocky Linux really works: 21
-modules that go from "how does a command run?" to boot, storage, networking,
-SELinux, containers, and performance, with interactive diagrams, checkpoint
-quizzes, and self-cleaning labs for a throwaway Rocky Linux 10 VM.
+An easy-to-follow, hands-on deep dive into how Rocky Linux really works: a
+21-module core track that goes from "how does a command run?" to boot,
+storage, networking, SELinux, containers, and performance, plus 17 "Deep
+Cuts" electives (how Rocky is built and signed, RPM packaging, Kickstart,
+crash dumps, memory, FreeIPA, KVM, Pacemaker, Secure Boot, Clevis/Tang,
+ReaR, Ansible, TLS/PQC, nftables, SAN, time, real-time). Interactive
+diagrams, practice terminals, 130+ quizzes and 170+ self-cleaning labs for a
+throwaway Rocky Linux 10 VM.
 
 - `content/`: the course, in Markdown (the only source of truth)
 - `STYLE.md`: the authoring guide. Read it before writing or editing a module.

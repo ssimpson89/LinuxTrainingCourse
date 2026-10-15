@@ -73,7 +73,7 @@ Correct. Minor releases (10.0 → 10.1 → 10.2) are delivered as ordinary packa
 
 ## How this course works
 
-The course has 21 modules in five parts. Each part builds on the one before it.
+The course has 38 modules: a **core track** of 21 modules in five parts, where each part builds on the one before it, plus 17 **Deep Cuts** electives that go further than almost any other Linux course.
 
 ```mermaid
 flowchart TB
@@ -81,6 +81,7 @@ flowchart TB
     B --> C["Storage and networking<br/>09–13"]
     C --> D["Under the hood<br/>14–19"]
     D --> E["Putting it together<br/>20 + reference"]
+    E --> F["Deep Cuts electives<br/>21–37, any order"]
 ```
 
 Every module has the same shape, so you always know where you are:
@@ -110,6 +111,12 @@ Here is a sample of each so you recognise them later.
 Interactive diagrams look like this. Click a layer:
 
 <div class="layers" data-hint="Click a part of the course to see what it covers." markdown>
+
+<div class="layer" data-label="Deep Cuts (electives)" data-tag="21–37" markdown>
+
+The topics most guides skip: how Rocky itself is built and signed, RPM packaging, Kickstart and PXE, crash dumps, memory internals, FreeIPA, KVM, Pacemaker, Secure Boot and drivers, Clevis/Tang, disaster recovery, Ansible, TLS and post-quantum crypto, nftables, SAN storage, time sync, and real-time tuning.
+
+</div>
 
 <div class="layer" data-label="Putting it together" data-tag="20" markdown>
 
@@ -299,6 +306,49 @@ Throughout the course you'll see man page badges like [[man:systemctl(1)]]. Clic
 !!! tip "Navigating a man page"
     Man pages open in `less`. Press ++slash++ to search, ++n++ for the next match, ++space++ to page down, ++g++ / ++shift+g++ for top and bottom, and ++q++ to quit. Most man pages have an **EXAMPLES** section near the end; jump straight to it with `/EXAMPLES`.
 
+### Practice: your first commands
+
+Before you even build the VM, get a feel for the practice terminals used throughout the course. Type each command and press Enter.
+
+<div class="terminal-sim" data-title="Hello, Rocky" markdown>
+
+<div class="task" data-expect="cat /etc/rocky-release||cat /etc/redhat-release||cat /etc/os-release" data-hint="The release file lives in /etc and is named after the distribution." markdown>
+
+**Step 1.** Which version of Rocky is this? Print `/etc/rocky-release`.
+
+```text
+Rocky Linux release 10.1 (Red Quartz)
+```
+
+</div>
+
+<div class="task" data-expect="uname -r" data-hint="uname prints kernel information. The -r option shows the release." markdown>
+
+**Step 2.** Show the running kernel version with `uname`.
+
+```text
+6.12.0-124.8.1.el10_1.x86_64
+```
+
+</div>
+
+<div class="task" data-expect="man -k partition||apropos partition" data-hint="man -k searches the names and descriptions of every man page." markdown>
+
+**Step 3.** Search the man pages for anything about "partition".
+
+```text
+cfdisk (8)           - display or manipulate a disk partition table
+fdisk (8)            - manipulate disk partition table
+parted (8)           - a partition manipulation program
+partprobe (8)        - inform the OS of partition table changes
+sfdisk (8)           - display or manipulate a disk partition table
+…
+```
+
+</div>
+
+</div>
+
 ## Labs
 
 !!! lab "Lab 1: Build and snapshot your lab VM"
@@ -356,6 +406,60 @@ Throughout the course you'll see man page badges like [[man:systemctl(1)]]. Clic
         1. `-t` (add `-r` to reverse, so the newest is at the bottom: `ls -ltr`).
         2. It's `fs_passno`: the order in which `fsck` checks filesystems at boot. `0` means don't check, which is normal for XFS.
         3. `man -k "file mode bits"` finds `chmod(1)`.
+
+## Flashcards
+
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+How does Rocky Linux relate to RHEL?
+
+It's a free, community rebuild of RHEL's source, built to be bug-for-bug compatible.
+
+</div>
+
+<div class="card" markdown>
+
+How do you get from Rocky 10.0 to 10.1?
+
+A normal `sudo dnf upgrade`. Only major versions (9 → 10) need a reinstall.
+
+</div>
+
+<div class="card" markdown>
+
+Why must a Rocky 10 VM use a "host" CPU model on x86?
+
+Rocky 10 is built for x86-64-v3, so the virtual CPU must expose AVX2 and friends.
+
+</div>
+
+<div class="card" markdown>
+
+Which man section holds config file formats?
+
+Section 5, for example `man 5 fstab`.
+
+</div>
+
+<div class="card" markdown>
+
+What's your undo button for labs?
+
+A VM snapshot. Take one after installing and before any lab that breaks things.
+
+</div>
+
+<div class="card" markdown>
+
+What does `man -k` do?
+
+Searches man page names and descriptions, like `apropos`.
+
+</div>
+
+</div>
 
 ## Recap
 

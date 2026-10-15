@@ -38,7 +38,7 @@ Step through the boot process, click through the storage stack, and play with pe
 </div>
 
 <div class="feature" markdown>
-:material-flask-outline: **80+ hands-on labs**
+:material-flask-outline: **170+ hands-on labs**
 
 Safe, self-cleaning exercises for a throwaway VM. Every lab tells you how to check your work.
 </div>
@@ -46,7 +46,7 @@ Safe, self-cleaning exercises for a throwaway VM. Every lab tells you how to che
 <div class="feature" markdown>
 :material-head-question-outline: **Checkpoints**
 
-Quick quizzes in every module so you know you've got it before moving on.
+130+ quizzes, practice terminals, and flashcards so you know you've got it before moving on.
 </div>
 
 <div class="feature" markdown>
