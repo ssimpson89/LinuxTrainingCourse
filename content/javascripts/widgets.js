@@ -395,6 +395,8 @@
     input.value = root.dataset.cidr || "192.168.10.37/24";
     input.setAttribute("aria-label", "IPv4 address with prefix, for example 10.0.0.5/24");
     input.spellcheck = false;
+    input.setAttribute("autocapitalize", "off");
+    input.setAttribute("autocorrect", "off");
     var table = el("dl", "subnet__table");
     var bitsRow = el("div", "subnet__bits");
     root.append(el("label", "subnet__label", "Address / prefix"), input, bitsRow, table);
@@ -481,7 +483,9 @@
     var input = el("input", "term__input");
     input.setAttribute("autocomplete", "off");
     input.setAttribute("autocapitalize", "off");
+    input.setAttribute("autocorrect", "off");
     input.setAttribute("spellcheck", "false");
+    input.setAttribute("enterkeyhint", "send");
     input.setAttribute("aria-label", "Type a command and press Enter");
     line.append(ps1, input);
     var screenWrap = el("div", "term__body");

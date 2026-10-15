@@ -939,9 +939,9 @@
 
 .md-typeset .terminal-sim {
   margin: 1.6rem 0;
-  border: var(--course-border-width) solid #23302d;
+  border: var(--course-border-width) solid #262a33;
   border-radius: var(--course-radius);
-  background: #0f1715;
+  background: #0f1014;
   box-shadow: var(--course-shadow);
   overflow: hidden;
 }
@@ -989,7 +989,7 @@
 
 .md-typeset .term__brief {
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid #23302d;
+  border-bottom: 1px solid #262a33;
   background: #131d1a;
   color: #e4eeeb;
   font-size: 0.76rem;
@@ -1014,7 +1014,7 @@
 
 .md-typeset .term__brief code {
   border-color: #2b3a36;
-  background: #1b2724;
+  background: #1c1f26;
   color: #9ee9cf;
   box-shadow: none;
 }
@@ -1077,7 +1077,7 @@
   gap: 0.4rem;
   justify-content: flex-end;
   padding: 0.5rem 0.8rem;
-  border-top: 1px solid #23302d;
+  border-top: 1px solid #262a33;
   background: #131d1a;
 }
 
@@ -1200,3 +1200,15 @@
 .md-typeset .success > summary::before,
 .md-typeset .question > summary::after,
 .md-typeset .success > summary::after { background-color: var(--course-accent); }
+
+/* Touch devices (iPad, phones): iOS Safari zooms into inputs under 16px,
+   and hover states stick after a tap */
+@media (pointer: coarse) {
+  .term__input,
+  .subnet__input,
+  .md-typeset input[type="text"],
+  .md-typeset input[inputmode] { font-size: 16px; }
+  .quiz__choice,
+  .md-typeset .decision__choice,
+  .stepper__btn { min-height: 44px; }
+}
