@@ -94,14 +94,14 @@ Bash expands words in a fixed order. Knowing the order explains nearly every "wh
 |---|---|---|---|
 | 1 | **Brace expansion** | `file{1,2}.txt` | `file1.txt file2.txt` |
 | 2 | **Tilde expansion** | `~/notes` | `/home/alice/notes` |
-| 3 | **Parameter and variable expansion** | `$HOME`, `${USER}` | `/home/alice`, `alice` |
-| 3 | **Arithmetic expansion** | `$((6*7))` | `42` |
-| 3 | **Command substitution** | `$(hostname)` | `rocky10` |
-| 4 | **Word splitting** | results of unquoted `$VAR` | split on spaces |
-| 5 | **Pathname expansion (globbing)** | `*.conf` | matching filenames |
-| 6 | **Quote removal** | `"a b"` | `a b` (one word) |
+| 2 | **Parameter and variable expansion** | `$HOME`, `${USER}` | `/home/alice`, `alice` |
+| 2 | **Arithmetic expansion** | `$((6*7))` | `42` |
+| 2 | **Command substitution** | `$(hostname)` | `rocky10` |
+| 3 | **Word splitting** | results of unquoted `$VAR` | split on spaces |
+| 4 | **Pathname expansion (globbing)** | `*.conf` | matching filenames |
+| 5 | **Quote removal** | `"a b"` | `a b` (one word) |
 
-Steps marked 3 happen together, left to right. A **glob** is a wildcard pattern: `*` matches any run of characters, `?` matches one character, and `[abc]` matches one of a set. If a glob matches nothing, Bash leaves it unchanged by default, which is why `ls *.nope` complains about a file literally called `*.nope`.
+Steps marked 2 happen in a single pass, left to right. A **glob** is a wildcard pattern: `*` matches any run of characters, `?` matches one character, and `[abc]` matches one of a set. If a glob matches nothing, Bash leaves it unchanged by default, which is why `ls *.nope` complains about a file literally called `*.nope`.
 
 ```console
 $ echo ~ $((2+2)) {a,b,c}-x
@@ -195,14 +195,19 @@ $ echo $PATH
 /home/alice/.local/bin:/home/alice/bin:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
 ```
 
-Bash searches these directories left to right. It also remembers where it found each program in a small **hash table**, so it does not search again next time. `hash` shows the table and `hash -r` clears it, which you need if you move a program and Bash keeps looking in the old place.
+Bash searches these directories left to right and runs the first match. Where do the two `~/…/bin` entries come from? Rocky's default `~/.bashrc` (copied from `/etc/skel`) prepends them, which is why a script you drop into `~/.local/bin` just works.
 
-```console
-$ hash
-hits    command
-   3    /usr/bin/grep
-   1    /usr/bin/ls
-```
+??? question "Under the hood: Bash caches what it finds"
+    Bash remembers where it found each program in a small **hash table**, so it does not search `PATH` again next time. `hash` shows the table and `hash -r` clears it.
+
+    ```console
+    $ hash
+    hits	command
+       3	/usr/bin/grep
+       1	/usr/bin/ls
+    ```
+
+    The failure mode: you install a newer `tool` into `/usr/local/bin` (which comes earlier in `PATH`) but your open shell keeps running the old `/usr/bin/tool`, because the cached path still exists. `type tool` says "tool is hashed (/usr/bin/tool)". Run `hash -r`, or open a new shell.
 
 !!! warning "Never put `.` in PATH"
     Adding the current directory to `PATH` means a file called `ls` dropped into `/tmp` by someone else runs when you type `ls` there. To run a program in the current directory, type `./program` explicitly.
@@ -410,8 +415,7 @@ A **pipe** (`|`) connects the stdout of one command to the stdin of the next. Th
 
 ```mermaid
 flowchart LR
-    K["keyboard"] -- "0" --> A["grep sshd"]
-    F["/var/log/secure"] -. "file arg" .-> A
+    F["/var/log/secure"] -. "file argument" .-> A["grep sshd"]
     A -- "1 → pipe" --> B["sort"]
     B -- "1 → pipe" --> C["uniq -c"]
     C -- "1" --> T["terminal"]
@@ -426,6 +430,23 @@ Two pipe helpers are worth knowing early:
 
 - `tee file` copies its input to a file *and* to stdout, so you can save and watch at the same time.
 - `xargs` turns lines of input into arguments for another command: `find . -name '*.tmp' -print0 | xargs -0 rm`.
+
+??? question "Under the hood: pipe buffers, SIGPIPE, and whose exit status you get"
+    A pipe is a kernel buffer, 64 KiB by default on Linux. If the reader is slow, the writer fills the buffer and the kernel simply pauses it until there is room. If the reader *exits*, the next write gets the signal **SIGPIPE** and the writer dies quietly. That is how `yes | head -1` finishes instead of running forever.
+
+    The exit status of a pipeline (`$?`) is the status of the **last** command only. A failure earlier in the pipe is invisible unless you ask:
+
+    ```console
+    $ false | true; echo $?
+    0
+    $ false | true; echo "${PIPESTATUS[@]}"
+    1 0
+    $ yes | head -1; echo "${PIPESTATUS[@]}"
+    y
+    141 0
+    ```
+
+    `PIPESTATUS` holds every stage's status. `141` is 128 + 13, "killed by signal 13" (SIGPIPE). In scripts, `set -o pipefail` makes the pipeline fail if any stage fails, which is what you want for `mysqldump … | gzip > backup.gz` (otherwise a failed dump still "succeeds"). The catch: with `pipefail`, a harmless `| head` can turn into a 141 failure, so test both.
 
 !!! example "Try it"
     ```console
@@ -662,7 +683,19 @@ $ file /usr/bin/ls /etc/hosts
 /etc/hosts:  ASCII text
 ```
 
-The `Context:` line is the file's SELinux label, which you will meet in [16 · SELinux](16-selinux.md).
+The `Context:` line is the file's SELinux label, which you will meet in [16 · SELinux](16-selinux.md). The `Inode:` line matters more than it looks: a filename is only a **directory entry** pointing at an inode, and the inode is the file.
+
+??? question "Under the hood: you deleted the log, but the disk is still full"
+    A classic 3am incident: `/var` is at 100%, you `rm` a 20 GB debug log, and `df` does not move. `rm` only removes the *name*. The kernel frees the inode and its blocks when the last name is gone **and** the last process holding it open has closed it. The service that writes the log still has it open, so the space stays allocated, and `du` (which walks names) and `df` (which asks the filesystem) now disagree.
+
+    `/proc` shows you the culprit, because every open file descriptor is a symlink that says `(deleted)`:
+
+    ```console
+    $ sudo find /proc/[0-9]*/fd -lname '*(deleted)' -printf '%p -> %l\n' 2>/dev/null
+    /proc/1873/fd/4 -> /var/log/myapp/debug.log (deleted)
+    ```
+
+    Two fixes: restart the service (it closes the file and the space comes back), or truncate it through the descriptor without restarting: `sudo truncate -s 0 /proc/1873/fd/4`. Next time, empty a live log with `sudo truncate -s 0 file` (or `: > file`) instead of `rm`, so the writer keeps a valid file.
 
 <div class="quiz" data-answer="4" markdown>
 
@@ -688,7 +721,7 @@ $ find /etc -name '*.conf' -newer /etc/hostname 2>/dev/null
 /etc/resolv.conf
 /etc/chrony.conf
 $ sudo find /var/log -type f -size +10M
-/var/log/journal/3f2a9c…/system@0006… .journal
+/var/log/journal/3f2a9c…/system.journal
 $ find ~ -type f -mtime -1
 /home/alice/my report.txt
 $ sudo find / -xdev -user 1002
@@ -712,27 +745,26 @@ removed '/home/alice/project/b.bak'
 !!! tip "Test before you delete"
     Run the `find` without `-exec rm` (or with `-print`) first and read the list. Then add the action.
 
-### locate: fast, but not installed by default
+??? note "locate: fast, but not installed by default"
+    `locate` searches a prebuilt database of filenames, so it answers in milliseconds. It is not part of a minimal Rocky install. Install `plocate` and build the database first.
 
-`locate` searches a prebuilt database of filenames, so it answers in milliseconds. It is not part of a minimal Rocky install. Install `plocate` and build the database first.
+    ```console
+    $ sudo dnf install -y plocate
+    $ sudo updatedb
+    $ locate sshd_config
+    /etc/ssh/sshd_config
+    /etc/ssh/sshd_config.d
+    /usr/share/man/man5/sshd_config.5.gz
+    ```
 
-```console
-$ sudo dnf install -y plocate
-$ sudo updatedb
-$ locate sshd_config
-/etc/ssh/sshd_config
-/etc/ssh/sshd_config.d
-/usr/share/man/man5/sshd_config.5.gz
-```
-
-The database is only as fresh as the last `updatedb` run, so a file you created a minute ago may not show up. `find` always looks at the live disk.
+    The database is only as fresh as the last `updatedb` run (a systemd timer refreshes it daily), so a file you created a minute ago may not show up. `find` always looks at the live disk.
 
 ### grep: search inside files
 
-`grep` prints lines that match a pattern.
+`grep` prints lines that match a pattern. `sshd_config` is mode `600` (it can hold secrets), so reading it needs `sudo`.
 
 ```console
-$ grep PermitRootLogin /etc/ssh/sshd_config
+$ sudo grep PermitRootLogin /etc/ssh/sshd_config
 #PermitRootLogin prohibit-password
 $ sudo grep -r 'Listen' /etc/httpd/conf/ 2>/dev/null
 $ grep -c '' /etc/passwd
@@ -762,7 +794,7 @@ Linux tools are small and each does one job. You chain them with pipes. Most of 
 ```console
 $ sudo tail -f /var/log/secure
 Oct 15 10:02:11 rocky10 sshd[2511]: Accepted publickey for alice from 192.168.122.1 port 51522 ssh2: ED25519 SHA256:…
-Oct 15 10:02:11 rocky10 sshd[2511]: pam_unix(sshd:session): session opened for user alice(uid=1000) by alice(uid=0)
+Oct 15 10:02:11 rocky10 sshd[2511]: pam_unix(sshd:session): session opened for user alice(uid=1000) by (uid=0)
 ^C
 ```
 
@@ -791,6 +823,18 @@ $ cut -d: -f7 /etc/passwd | sort | uniq -c | sort -rn
 ```
 
 Read it left to right: take field 7 of each line, sort so identical shells are adjacent, count each group, then sort by count, largest first.
+
+!!! tip "Sort order depends on your locale"
+    In the default `en_US.UTF-8` locale, `sort` (and `ls`, and glob ranges like `[a-z]`) use dictionary rules: case and punctuation are mostly ignored. `LC_ALL=C` switches to plain byte order, which is predictable in scripts and much faster on big files.
+
+    ```console
+    $ printf 'b\nA\na\nB\n' | sort | tr '\n' ' '; echo
+    a A b B
+    $ printf 'b\nA\na\nB\n' | LC_ALL=C sort | tr '\n' ' '; echo
+    A B a b
+    ```
+
+    A script that compares two sorted lists (`comm`, `join`) must sort both with the same locale, or it silently gives wrong answers.
 
 ### A taste of sed and awk
 
@@ -935,6 +979,19 @@ Run `source ~/.bashrc` (or `. ~/.bashrc`) to load changes into the current shell
 ??? question "How can I tell whether my shell is a login shell?"
     Run `shopt -q login_shell && echo login || echo non-login`. Over SSH you will see `login`. Type `bash` and run it again: `non-login`.
 
+??? question "Under the hood: /etc/profile.d runs for non-login shells too"
+    The diagram above is the textbook story. Rocky adds a twist: `/etc/bashrc` (read by every interactive shell through `~/.bashrc`) checks whether the shell is a login shell, and if it is *not*, it runs the `/etc/profile.d/*.sh` scripts itself.
+
+    ```console
+    $ grep -A1 'login_shell' /etc/bashrc
+        if ! shopt -q login_shell ; then # We're not a login shell
+    …
+    $ grep 'profile.d/\*.sh' /etc/bashrc
+            for i in /etc/profile.d/*.sh; do
+    ```
+
+    So a file you drop into `/etc/profile.d/` reaches login shells *and* new terminal tabs, which is why it is the right place for site-wide settings. What it does **not** reach: cron jobs and systemd services, which never start an interactive shell. They get their environment from the crontab or the unit file (`Environment=`). "It works when I log in but not from cron" is almost always this.
+
 ## Working faster: completion and history
 
 **Tab completion** saves typing and prevents typos. Press ++tab++ once to complete a unique match; press it twice to list the options. On Rocky, the `bash-completion` package (installed by default on most install types) teaches ++tab++ about subcommands and options, so `systemctl res`++tab++ completes to `restart`, and `dnf in`++tab++ to `install`.
@@ -958,9 +1015,11 @@ $ sudo dnf install -y bash-completion
 | ++ctrl+l++ | clear the screen |
 
 ```console
-$ vim /etc/hosts
+$ tail -3 /var/log/secure
+tail: cannot open '/var/log/secure' for reading: Permission denied
 $ sudo !!
-sudo vim /etc/hosts
+sudo tail -3 /var/log/secure
+…
 $ mkdir -p /tmp/demo/a/b && cd !$
 cd /tmp/demo/a/b
 ```
@@ -1220,7 +1279,7 @@ cd /tmp/demo/a/b
 
 Name the expansions Bash performs, in order.
 
-Brace, tilde, then parameter/arithmetic/command substitution (left to right), then word splitting, pathname expansion (globbing), and finally quote removal.
+Brace; then tilde, parameter, arithmetic, and command substitution in one left-to-right pass; then word splitting, pathname expansion (globbing), and finally quote removal.
 
 </div>
 

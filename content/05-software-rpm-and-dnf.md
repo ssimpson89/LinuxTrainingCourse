@@ -75,7 +75,7 @@ A GPG signature over the header and payload. RPM checks it against keys you have
 
 ```console
 $ rpm -qi bash | grep Signature
-Signature   : RSA/SHA256, Tue 11 Feb 2026 09:14:02 AM UTC, Key ID …
+Signature   : RSA/SHA256, Tue 11 Feb 2026 09:14:02 AM UTC, Key ID 5b106c736fedfc85
 ```
 
 </div>
@@ -106,8 +106,7 @@ Summary     : The GNU Bourne Again shell
 Packages do not depend on other *packages* by name so much as on **capabilities**: a library, a file path, a virtual name. Any package that provides the capability satisfies the need.
 
 ```console
-$ rpm -q --requires bash | head -5
-/usr/bin/sh
+$ rpm -q --requires bash | head -4
 config(bash) = 5.2.26-6.el10
 filesystem >= 3
 libc.so.6()(64bit)
@@ -129,13 +128,13 @@ Shell snippets run at install and removal time, as root.
 ```console
 $ rpm -q --scripts openssh-server
 preinstall scriptlet (using /bin/sh):
-getent group sshd >/dev/null || groupadd -g 74 -r sshd || :
+getent group 'sshd' >/dev/null || groupadd -f -g '74' -r 'sshd' || :
 …
 postinstall scriptlet (using /bin/sh):
 …
 ```
 
-Here the package creates the `sshd` system group before its files arrive. Packages can also use **triggers** and **file triggers**, which run when *other* packages install files into certain paths (for example, rebuilding a cache whenever any package adds a library).
+Here the package creates the `sshd` system group (fixed GID 74) before its files arrive. The script is generated at build time from a `sysusers.d` file the package also ships, `/usr/lib/sysusers.d/openssh-server.conf`, so the same account definition works for RPM installs and for image builders. Packages can also use **triggers** and **file triggers**, which run when *other* packages install files into certain paths (for example, rebuilding a cache whenever any package adds a library).
 
 </div>
 
@@ -214,6 +213,18 @@ $ rpm -q --changelog openssh-server | head -4
 
 `rpm -qf` is one of the most useful commands on the system. Found an unfamiliar file in `/etc`? Ask who put it there. If the answer is "not owned by any package", someone created it by hand.
 
+??? question "Under the hood: the scanner says you are vulnerable (you probably are not)"
+    A security scanner sees `iputils-20240905` and reports a CVE that upstream fixed in a later release. Because Red Hat and Rocky **backport** fixes into the shipped version, the version number cannot tell you. The changelog can:
+
+    ```console
+    $ rpm -q iputils
+    iputils-20240905-5.el10.x86_64
+    $ rpm -q --changelog iputils | grep -m1 CVE
+    - Fix CVE-2025-47268 iputils: Signed Integer Overflow in Timestamp Multiplication in iputils ping (RHEL-94582)
+    ```
+
+    `dnf updateinfo info --cve CVE-2025-47268` asks the repository's advisory data the same question. This is the standard answer to auditors: cite the advisory (RLSA-…) and the package release that contains it, not the upstream version.
+
 `--qf` (query format) lets you choose the output fields, which is great for scripts:
 
 ```console
@@ -230,13 +241,13 @@ The RPM database records the size, checksum, permissions, owner, and timestamp o
 ```console
 $ sudo rpm -V openssh-server
 S.5....T.  c /etc/ssh/sshd_config
-$ sudo rpm -Va 2>/dev/null | grep -v '^.......T.' | head
+$ sudo rpm -Va 2>/dev/null | grep -v '^\.\{7\}T\.' | head
 S.5....T.  c /etc/chrony.conf
-.M.......  c /etc/sudoers
+S.5....T.  c /etc/sudoers
 …
 ```
 
-Each position in the 9-character code is one test. A `.` means it passed.
+The `grep -v` drops lines where *only* the timestamp differs, which are rarely interesting. Each position in the 9-character code is one test. A `.` means it passed.
 
 | Char | Meaning |
 |---|---|
@@ -280,7 +291,7 @@ A **repository** (repo) is a directory of RPM files plus **metadata**: compresse
 | `appstream` | applications, languages, databases, and tools: httpd, nginx, PostgreSQL, Python, compilers | yes |
 | `extras` | Rocky-specific extras, including `epel-release` and other `*-release` packages | yes |
 | `crb` | **CodeReady Builder**: development headers and build tools that other packages need to build. Required by many EPEL packages. | no |
-| `devel`, `highavailability`, `resilientstorage`, `rt`, `nfv`, … | special-purpose add-ons | no |
+| `highavailability`, `rt`, `nfv`, `plus`, `devel`, … | special-purpose add-ons (Rocky 10 has no `resilientstorage`) | no |
 
 ```console
 $ dnf repolist
@@ -330,7 +341,7 @@ best=True
 skip_if_unavailable=False
 ```
 
-`installonly_limit=3` keeps the three newest kernels installed, so you can always boot an older one if a new kernel misbehaves ([14 · The Boot Process](14-the-boot-process.md)). `clean_requirements_on_remove` lets `dnf remove` also remove dependencies nothing else needs.
+`installonly_limit=3` keeps the three newest kernels installed, so you can always boot an older one if a new kernel misbehaves ([14 · The Boot Process](14-the-boot-process.md)). Kernels are **install-only** packages: `dnf upgrade` installs the new one *beside* the old ones instead of replacing it, and removes the oldest once there are more than three. (This is also why you never `rpm -Uvh` a kernel: that replaces the running kernel's files and leaves you no fallback.) `clean_requirements_on_remove` lets `dnf remove` also remove dependencies nothing else needs.
 
 Turn repos on and off with `dnf config-manager` (part of `dnf-plugins-core`, installed by default), or for one command only with `--enablerepo` / `--disablerepo`:
 
@@ -347,7 +358,7 @@ Rocky signs every package with its private key. Your system has the matching pub
 $ ls /etc/pki/rpm-gpg/
 RPM-GPG-KEY-Rocky-10  RPM-GPG-KEY-Rocky-10-Testing
 $ rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE}\t%{SUMMARY}\n'
-gpg-pubkey-…	Rocky Enterprise Software Foundation - Release key …
+gpg-pubkey-6fedfc85-…	Release Engineering (Rocky Linux 10) <…> public key
 $ rpm -K tree-2.1.0-8.el10.x86_64.rpm
 tree-2.1.0-8.el10.x86_64.rpm: digests signatures OK
 ```
@@ -400,7 +411,7 @@ Right. On Rocky, `epel-release` comes from the `extras` repo. Check `dnf repolis
 ### Finding software
 
 ```console
-$ dnf search htop
+$ dnf search htop          # htop lives in EPEL, covered above
 =========================== Name Exactly Matched: htop ===========================
 htop.x86_64 : Interactive process viewer
 $ dnf info nginx
@@ -454,7 +465,6 @@ Transaction test succeeded.
 Running transaction
   Preparing        :                                                        1/1
   Installing       : tree-2.1.0-8.el10.x86_64                               1/1
-  Running scriptlet: tree-2.1.0-8.el10.x86_64                               1/1
   Verifying        : tree-2.1.0-8.el10.x86_64                               1/1
 
 Installed:
@@ -565,7 +575,20 @@ $ tail -2 /var/log/dnf.rpm.log
 </div>
 
 !!! tip ".rpmnew and .rpmsave"
-    When an update ships a new default config but you have edited yours, RPM keeps your file and writes the new one as `name.rpmnew`. When you remove a package whose config you edited, RPM saves it as `name.rpmsave`. After big updates, run `sudo find /etc -name '*.rpmnew'` and merge the changes you want.
+    When an update ships a new default config but you have edited yours, RPM keeps your file and writes the new one as `name.rpmnew`. When you remove a package whose config you edited, RPM saves it as `name.rpmsave`. After big updates, run `sudo find /etc \( -name '*.rpmnew' -o -name '*.rpmsave' \)` and merge the changes you want.
+
+??? question "Under the hood: noreplace decides whether your edit survives"
+    Whether you get `.rpmnew` or `.rpmsave` on an *upgrade* is decided by the packager, per file. A file marked `%config(noreplace)` keeps your edited version in place and puts the new default beside it as `.rpmnew`. A file marked plain `%config` does the opposite: the **new default goes live**, and your edited file is moved aside to `.rpmsave`. Your change silently stops applying until you merge it back. You can see the flags with a query format:
+
+    ```console
+    $ rpm -q --qf '[%{FILEFLAGS:fflags}\t%{FILENAMES}\n]' chrony | grep '^c'
+    cn	/etc/chrony.conf
+    cg	/etc/chrony.keys
+    cn	/etc/logrotate.d/chrony
+    cn	/etc/sysconfig/chronyd
+    ```
+
+    `c` is config, `n` is noreplace, `g` is "ghost" (owned by the package but not shipped in it; `chrony.keys` is created on the machine). Before you edit a vendor file, check for `n`. Better still, use the package's drop-in directory (`sshd_config.d/`, `sudoers.d/`, `/etc/systemd/system/*.d/`) so the conflict never arises.
 
 ### Transaction history and undo
 
@@ -642,7 +665,7 @@ $ dnf search postgresql | grep -i server
 …
 ```
 
-On Rocky 10, `dnf module list` shows nothing. Use `dnf search` and `dnf info` to see which versions are offered, and check the Application Streams lifecycle page for how long each is supported.
+On Rocky 10, `dnf module list` shows no streams. Use `dnf search` and `dnf info` to see which versions are offered, and check the Application Streams lifecycle page for how long each is supported.
 
 !!! version "Rocky 9 vs 10"
     On Rocky 9 you will still meet modules:
@@ -656,7 +679,7 @@ On Rocky 10, `dnf module list` shows nothing. Use `dnf search` and `dnf info` to
     $ sudo dnf install nodejs
     ```
 
-    The `dnf module` command still exists in Rocky 10's DNF 4, but there is no content for it to act on. Playbooks and scripts that enable module streams must be rewritten for Rocky 10 to install the versioned package names instead.
+    The `dnf module` command still exists in Rocky 10's DNF 4, but there is no content for it to act on: `dnf module enable nodejs:20` stops with an error ("missing groups or modules: nodejs:20"). Playbooks and scripts that enable module streams must be rewritten for Rocky 10 to install the versioned package names instead.
 
 ## Keeping systems updated
 
@@ -749,9 +772,9 @@ You maintain an Ansible playbook that runs `dnf module enable nodejs:20` before 
 - It works exactly as on Rocky 9
 - DNF automatically maps the module stream to a package
 - The `dnf module` command has been removed, so the playbook crashes with "No such command"
-- There are no module streams on Rocky 10, so the enable step finds nothing; install the right package name directly instead
+- There are no module streams on Rocky 10, so the enable step fails to find `nodejs:20`; install the right package name directly instead
 
-Right. Rocky 10's DNF 4 still has the `module` subcommand, but RHEL 10 and Rocky 10 ship no modular content. Rewrite the task to install the package (or versioned package) by name.
+Right. Rocky 10's DNF 4 still has the `module` subcommand, but RHEL 10 and Rocky 10 ship no modular content, so the task errors out. Rewrite it to install the package (or versioned package) by name.
 
 </div>
 
@@ -785,15 +808,14 @@ gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-10
 
 Because these are Rocky's own signed packages, `gpgcheck=1` with Rocky's key works. For your own packages, sign them with your own key and point `gpgkey=` at it. Re-run `createrepo_c --update /srv/localrepo` whenever you add RPMs. Serve the directory over HTTP with any web server and other machines can use `baseurl=http://yourserver/localrepo/`.
 
-## Flatpak, briefly
+??? note "Flatpak, briefly (desktops only)"
+    **Flatpak** is a different way to ship desktop applications: each app comes as a sandboxed bundle with its own runtime, independent of the OS packages, usually from the Flathub store. It is useful on Rocky workstations for getting current desktop apps without touching system libraries. It is not used for server software, and Flatpak apps are not managed or updated by DNF.
 
-**Flatpak** is a different way to ship desktop applications: each app comes as a sandboxed bundle with its own runtime, independent of the OS packages, usually from the Flathub store. It is useful on Rocky workstations for getting current desktop apps without touching system libraries. It is not used for server software, and Flatpak apps are not managed or updated by DNF.
-
-```console
-$ sudo dnf install -y flatpak
-$ flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-$ flatpak install flathub org.gnome.TextEditor
-```
+    ```console
+    $ sudo dnf install -y flatpak
+    $ flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    $ flatpak install flathub org.gnome.TextEditor
+    ```
 
 <div class="terminal-sim" data-title="Package detective" markdown>
 
@@ -1062,7 +1084,7 @@ ID     | Command line              | Date and time    | Action(s)      | Altered
 |---|---|---|
 | `No match for argument: epel-release` | `extras` repo disabled | `dnf config-manager --set-enabled extras` |
 | EPEL install fails with "nothing provides lib…-devel" | CRB not enabled | `dnf config-manager --set-enabled crb` |
-| `dnf module enable` finds nothing on Rocky 10 | No modular content in Rocky 10 | Install the (versioned) package directly |
+| `dnf module enable` fails with "missing groups or modules" on Rocky 10 | No modular content in Rocky 10 | Install the (versioned) package directly |
 | Disk full in `/var` after many updates | Old packages in the cache | `sudo dnf clean all` |
 | Service still runs old code after an update | Process started before the update | `dnf needs-restarting -s`; restart those services |
 | Updated config ignored | New default saved as `.rpmnew` | `find /etc -name '*.rpmnew'` and merge |
@@ -1189,7 +1211,7 @@ Packages run scriptlets as root. Without signature checks, anyone who can tamper
 
 ## Go deeper
 
-- Man pages: [[man:rpm(8)]] [[man:dnf(8)]] [[man:dnf.conf(5)]] [[man:dnf-automatic(8)]] [[man:createrepo_c(8)]] [[man:rpmkeys(8)]] [[man:yum-versionlock(8)]]
+- Man pages: [[man:rpm(8)]] [[man:dnf(8)]] [[man:dnf.conf(5)]] [[man:dnf-automatic(8)]] [[man:createrepo_c(8)]] [[man:rpmkeys(8)]] [[man:dnf-versionlock(8)]]
 - [RHEL 10: Managing software with the DNF tool](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html-single/managing_software_with_the_dnf_tool/index): the reference for DNF on the platform Rocky 10 follows.
 - [Rocky Linux documentation](https://docs.rockylinux.org/): Rocky's guides, including repositories and the release notes for each version.
 - [EPEL documentation](https://docs.fedoraproject.org/en-US/epel/): what EPEL is, its policies, and how to enable it.

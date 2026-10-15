@@ -148,10 +148,10 @@ drwxr-x--- root apps app
 A directory with `r` but no `x` is a strange half-state: you can list the names but cannot look at any of the files.
 
 ```console
-$ ls -ld locked
-drw-r--r--. 2 alice alice 19 Oct 15 11:20 locked
-$ sudo -u bob ls -l locked
-ls: cannot access 'locked/a.txt': Permission denied
+$ ls -ld /tmp/locked
+drw-r--r--. 2 alice alice 19 Oct 15 11:20 /tmp/locked
+$ sudo -u bob ls -l /tmp/locked
+ls: cannot access '/tmp/locked/a.txt': Permission denied
 total 0
 -????????? ? ? ? ?            ? a.txt
 ```
@@ -223,25 +223,44 @@ When a program creates a file, it asks for a mode, usually `666` for files and `
 
 ```console
 $ umask
-0022
+0002
 $ umask -S
-u=rwx,g=rx,o=rx
+u=rwx,g=rwx,o=rx
 $ touch newfile; mkdir newdir
 $ ls -ld newfile newdir
--rw-r--r--. 1 alice alice 0 Oct 15 11:30 newfile
-drwxr-xr-x. 2 alice alice 6 Oct 15 11:30 newdir
+-rw-rw-r--. 1 alice alice 0 Oct 15 11:30 newfile
+drwxrwxr-x. 2 alice alice 6 Oct 15 11:30 newdir
+$ sudo bash -c umask
+0022
 ```
 
-Requested `666` with umask `022` removed gives `644`. Requested `777` minus `022` gives `755`. It is a removal, not subtraction: a umask of `077` makes new files `600` and new directories `700`.
+Requested `666` with umask `002` removed gives `664`. Requested `777` minus `002` gives `775`. It is a removal, not subtraction: a umask of `077` makes new files `600` and new directories `700`.
+
+Notice that alice and root get different masks. On Rocky, a regular user with a **user private group** (module 03) gets `0002`, so her group can write her new files. That is safe, because her group contains only her. Root and system accounts get `0022`.
 
 | umask | New file | New directory | Typical use |
 |---|---|---|---|
 | `022` | `644` | `755` | everyone may read |
-| `002` | `664` | `775` | group may edit (works well with user private groups) |
+| `002` | `664` | `775` | group may edit: Rocky's default for regular users |
 | `027` | `640` | `750` | group may read, other nothing |
 | `077` | `600` | `700` | private |
 
-Set it for your session with `umask 027`, permanently in `~/.bashrc`. A system-wide default lives in `/etc/login.defs` (`UMASK`), and services get their own with `UMask=` in a systemd unit ([07 · systemd and Services](07-systemd-and-services.md)). Check what *your* system gives a new user rather than assuming; the shell startup files and PAM both have a say.
+Set it for your session with `umask 027`, permanently in `~/.bashrc`. Services do not log in, so they get their own with `UMask=` in a systemd unit (default `0022`, see [07 · systemd and Services](07-systemd-and-services.md)).
+
+??? question "Under the hood: where your umask comes from"
+    `/etc/login.defs` says `UMASK 022`, so why does alice get `002`? Two settings combine:
+
+    ```console
+    $ grep -E '^(UMASK|USERGROUPS_ENAB)' /etc/login.defs
+    UMASK		022
+    USERGROUPS_ENAB yes
+    $ grep umask /etc/pam.d/postlogin
+    session     optional                   pam_umask.so silent
+    ```
+
+    At every login (console, SSH, `su -`), the `pam_umask` module reads `UMASK` from `login.defs`. Because `USERGROUPS_ENAB` is `yes`, it then checks whether the user's name matches their primary group name (a user private group) and, if so, copies the owner bits into the group bits: `022` becomes `002`, `077` becomes `007`. Root is never adjusted.
+
+    This is the trap behind "the umask in login.defs does nothing": a security baseline sets `UMASK 027`, users still see `007`. Either set `USERGROUPS_ENAB no`, or set the umask explicitly in a file under `/etc/profile.d/`. Then log in again and run `umask` to prove it; `grep Umask /proc/$$/status` shows the live value for any process.
 
 !!! note "umask never adds bits"
     `umask` only removes. That is why new files are never executable by default: programs ask for `666`, and no umask can add `x`. You make a script executable with `chmod +x` on purpose.
@@ -304,6 +323,21 @@ $ find /usr -xdev -perm -4000 -type f 2>/dev/null
 
 A new setuid file that you did not install is a red flag worth investigating. Filesystems mounted with the `nosuid` option ignore the bit entirely, which is why removable media and `/tmp` are often mounted that way.
 
+??? question "Under the hood: chown silently strips setuid (and capabilities)"
+    The kernel clears the setuid bit, the setgid bit (on executables), and any file capability whenever a file's owner or group changes. Writing to the file as a non-root user clears setuid too. Otherwise you could write your own code into a setuid binary, or hand a setuid file to someone else. The `chown` rule applies to root as well:
+
+    ```console
+    $ sudo install -m 4755 /usr/bin/true /usr/local/bin/demo
+    $ ls -l /usr/local/bin/demo
+    -rwsr-xr-x. 1 root root 32808 Oct 15 11:38 /usr/local/bin/demo
+    $ sudo chown root:wheel /usr/local/bin/demo
+    $ ls -l /usr/local/bin/demo
+    -rwxr-xr-x. 1 root wheel 32808 Oct 15 11:38 /usr/local/bin/demo
+    $ sudo rm /usr/local/bin/demo
+    ```
+
+    In production this shows up as "the config-management run broke `arping`, `newuidmap`, or our vendor tool": a recursive `chown -R` over `/usr` or `/opt` removed the bits. `rpm -V` reports it (`M` for mode, `P` for capabilities), and `sudo dnf reinstall <package>` restores them.
+
 ### setgid on a directory: shared team folders
 
 When a user creates a file, it normally gets the user's primary group. In a shared project directory that is wrong: alice's files would belong to group `alice`, and bob could not edit them.
@@ -330,11 +364,26 @@ The file belongs to group `devs`, not `alice`. Combined with a group-friendly um
 ```console
 $ ls -ld /tmp
 drwxrwxrwt. 14 root root 4096 Oct 15 11:45 /tmp
-$ sudo -u bob rm /tmp/alice-temp.txt
+$ sudo -u bob rm -f /tmp/alice-temp.txt
 rm: cannot remove '/tmp/alice-temp.txt': Operation not permitted
 ```
 
 The `t` at the end is the sticky bit. Use it on any directory where several users drop files: `chmod 1777 /srv/dropbox` or, combined with setgid, `chmod 3770`.
+
+??? question "Under the hood: when even root gets Permission denied in /tmp"
+    Shared sticky directories are where attackers plant traps: create `/tmp/report.csv` (or a symlink with that name pointing at `/etc/shadow`) and wait for a root script to write to it. The kernel has extra rules for world-writable sticky directories, switched on by systemd's `/usr/lib/sysctl.d/50-default.conf`:
+
+    ```console
+    $ sysctl fs.protected_regular fs.protected_symlinks
+    fs.protected_regular = 1
+    fs.protected_symlinks = 1
+    $ ls -l /tmp/report.csv
+    -rw-rw-rw-. 1 alice alice 0 Oct 15 12:30 /tmp/report.csv
+    $ sudo sh -c 'echo data > /tmp/report.csv'
+    sh: line 1: /tmp/report.csv: Permission denied
+    ```
+
+    `protected_regular` refuses to open-with-create an existing file in a sticky world-writable directory when the file belongs to someone else, **even for root**, and despite mode `666`. `protected_symlinks` refuses to follow a symlink there unless it belongs to you or to the directory's owner. If a cron job "suddenly" fails writing to `/tmp`, this is why. The fix is to use `mktemp` (a fresh, unpredictable name) or a private directory, not to turn the protection off.
 
 <div class="quiz" data-answer="2" markdown>
 
@@ -415,7 +464,7 @@ Right. bob is not the owner, but he *is* in the owning group, so the group bits 
 
     ```console
     $ grep Umask /proc/$$/status
-    Umask:	0022
+    Umask:	0002
     ```
 
 <div class="terminal-sim" data-title="Permissions drill" data-prompt="[alex@rocky-lab project]$ " markdown>
@@ -577,6 +626,27 @@ other::r--
 
 Two things to notice. The new file got the `devs:rwx` entry automatically. And its mask is `rw-`, because `touch` asked for mode `666` (no `x`), and that request caps the mask. When a directory has a default ACL, the umask is not applied; the default ACL takes its place.
 
+??? question "Under the hood: where ACLs live, and how backups lose them"
+    The mode bits live in the inode. ACLs, SELinux labels, and file capabilities do not: they are **extended attributes** (xattrs), small name/value pairs stored alongside the inode. `getfattr` (package `attr`) shows them raw:
+
+    ```console
+    $ getfattr -d -m - /srv/proj/new.txt
+    # file: srv/proj/new.txt
+    security.selinux="unconfined_u:object_r:var_t:s0"
+    system.posix_acl_access=0sAgAAAAEABgD/////…
+    ```
+
+    Any tool that copies only data and mode drops them. That is how a restore "works" but the team suddenly cannot write to the share:
+
+    | Tool | Keeps ACLs and xattrs only with |
+    |---|---|
+    | `cp` | `cp -a` (or `--preserve=all`) |
+    | `rsync` | `rsync -aAX` |
+    | `tar` | `tar --acls --xattrs` when creating *and* extracting |
+    | `mv` within one filesystem | always (it is a rename) |
+
+    Keep a text copy as a safety net: `getfacl -R /srv/proj > proj.acl` restores with `setfacl --restore=proj.acl`.
+
 <div class="quiz" data-answer="4" markdown>
 
 `getfacl plan.txt` shows `user:carol:rwx` and `mask::r-x`. What can carol do with `plan.txt`?
@@ -636,17 +706,24 @@ $ getcap /usr/bin/newuidmap
 
 ### The ping story
 
-`ping` sends ICMP packets, which historically needed a raw socket, which needed root. For decades `ping` was setuid root. Then distributions replaced that with `cap_net_raw`. Today the kernel offers unprivileged "ICMP echo" sockets to groups listed in a sysctl, so on current Rocky releases `ping` usually needs neither:
+`ping` sends ICMP packets, which historically needed a raw socket, which needed root. For decades `ping` was setuid root. Then distributions replaced that with `cap_net_raw`. Today the kernel offers unprivileged "ICMP echo" sockets to any group listed in a sysctl, and on Rocky 10 `ping` needs neither:
 
 ```console
 $ ls -l /usr/bin/ping
 -rwxr-xr-x. 1 root root 89472 Feb 11  2026 /usr/bin/ping
-$ getcap /usr/bin/ping
+$ getcap /usr/bin/ping /usr/bin/arping /usr/bin/clockdiff
+/usr/bin/arping cap_net_raw=p
+/usr/bin/clockdiff cap_net_raw=p
 $ sysctl net.ipv4.ping_group_range
 net.ipv4.ping_group_range = 0	2147483647
 ```
 
-No setuid bit, no capability: the sysctl lets every group (GID 0 through the maximum) open ICMP sockets. That is the arc of Linux privilege: from "run as root", to "run with one capability", to "no privilege needed at all".
+`ping` has no setuid bit and no capability. The sysctl (set by systemd's `/usr/lib/sysctl.d/50-default.conf`) lets every group, GID 0 through the maximum, open ICMP echo sockets. That is the arc of Linux privilege: from "run as root", to "run with one capability", to "no privilege needed at all".
+
+Its siblings from the same `iputils` package still need raw packets (`arping` speaks ARP, not ICMP), so they keep `cap_net_raw`. Notice it is `=p` with no `e`: the capability is *permitted* but not switched on. These programs are capability-aware: they raise it only for the moment they open the socket, then drop it. A program that is not written that way needs `=ep`.
+
+??? question "Under the hood: the day ping broke for one user"
+    Because the sysctl is a *range of GIDs*, someone hardening a server can set `net.ipv4.ping_group_range = 1 0` (an empty range, the kernel default). Now unprivileged ping fails with "socket: Operation not permitted" while root's ping still works, even though `/usr/bin/ping` never changed. The setting is also per network namespace, so a fresh namespace starts with the kernel's empty default. Check `sysctl net.ipv4.ping_group_range` before you start chmodding binaries.
 
 ### Seeing a process's capabilities
 
@@ -1003,8 +1080,8 @@ One named slice of root's power, such as `CAP_NET_BIND_SERVICE`, that a process 
 
 ## Go deeper
 
-- Man pages: [[man:chmod(1)]] [[man:chown(1)]] [[man:umask(1p)]] [[man:acl(5)]] [[man:getfacl(1)]] [[man:setfacl(1)]] [[man:chattr(1)]] [[man:capabilities(7)]] [[man:setcap(8)]] [[man:namei(1)]] [[man:path_resolution(7)]]
-- [RHEL 10: Managing file system permissions](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/managing_file_systems/index): Red Hat's guide to permissions, umask, and ACLs on the family Rocky follows.
+- Man pages: [[man:chmod(1)]] [[man:chown(1)]] [[man:umask(2)]] [[man:acl(5)]] [[man:getfacl(1)]] [[man:setfacl(1)]] [[man:chattr(1)]] [[man:capabilities(7)]] [[man:setcap(8)]] [[man:namei(1)]] [[man:path_resolution(7)]]
+- [Red Hat Enterprise Linux 10 documentation](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10): the RHEL 10 guide library; the system administration and security guides cover permissions, umask, and ACLs on the platform Rocky follows.
 - [Rocky Linux admin guide: file system and permissions](https://docs.rockylinux.org/books/admin_guide/07-file-systems/): Rocky's own treatment, with more examples.
 - [capabilities(7) on man7.org](https://man7.org/linux/man-pages/man7/capabilities.7.html): the full list of capabilities and how they are inherited.
 - [Andreas Grünbacher: POSIX Access Control Lists on Linux](https://www.usenix.org/legacy/publications/library/proceedings/usenix03/tech/freenix03/gruenbacher.html): the classic paper explaining ACLs and the mask, by their Linux implementer.
