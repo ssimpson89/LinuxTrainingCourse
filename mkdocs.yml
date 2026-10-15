@@ -93,6 +93,15 @@ nav:
       - '20 · Troubleshooting Playbook': 20-troubleshooting-playbook.md
       - Command Cheat Sheet: cheat-sheet.md
       - Glossary: glossary.md
+  - 'Deep Cuts (Advanced)':
+      - '21 · Inside Rocky Linux': 21-inside-rocky-linux.md
+      - '22 · Building RPM Packages': 22-building-rpms.md
+      - '23 · Automated Installs': 23-automated-installs.md
+      - '24 · Debugging Crashes': 24-debugging-crashes.md
+      - '25 · Memory Deep Dive': 25-memory-deep-dive.md
+      - '26 · Centralized Identity': 26-centralized-identity.md
+      - '27 · Virtualization with KVM': 27-virtualization-kvm.md
+      - '28 · High Availability': 28-high-availability.md
 
 markdown_extensions:
   - tables

@@ -199,6 +199,53 @@ Interactive decision trees and a capstone break-fix playbook for when things go 
   </a>
 </div>
 
+## Deep cuts (advanced electives) { #deep-cuts }
+
+The topics most Linux guides skip. Take them after the core track, in any order.
+
+<div class="syllabus-grid">
+  <a class="syllabus-card syllabus-card--elective" href="21-inside-rocky-linux/">
+    <span class="syllabus-card__index">21</span>
+    <span class="syllabus-card__title">Inside Rocky Linux</span>
+    <span class="syllabus-card__description">How Rocky is built from source, signed, mirrored and delivered, and how to verify every step.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="22-building-rpms/">
+    <span class="syllabus-card__index">22</span>
+    <span class="syllabus-card__title">Building RPM Packages</span>
+    <span class="syllabus-card__description">Spec files, rpmbuild, mock, patching an SRPM, and running your own signed repo.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="23-automated-installs/">
+    <span class="syllabus-card__index">23</span>
+    <span class="syllabus-card__title">Automated Installs</span>
+    <span class="syllabus-card__description">Kickstart, PXE boot, Image Builder, cloud-init, and image mode with bootc.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="24-debugging-crashes/">
+    <span class="syllabus-card__index">24</span>
+    <span class="syllabus-card__title">Debugging Crashes</span>
+    <span class="syllabus-card__description">Core dumps, coredumpctl, debuginfo, gdb, and kernel crash analysis with kdump.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="25-memory-deep-dive/">
+    <span class="syllabus-card__index">25</span>
+    <span class="syllabus-card__title">Memory Deep Dive</span>
+    <span class="syllabus-card__description">Virtual memory, reclaim, swap and zram, NUMA, huge pages, and pressure stall info.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="26-centralized-identity/">
+    <span class="syllabus-card__index">26</span>
+    <span class="syllabus-card__title">Centralized Identity</span>
+    <span class="syllabus-card__description">SSSD, Kerberos, FreeIPA, and joining Active Directory.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="27-virtualization-kvm/">
+    <span class="syllabus-card__index">27</span>
+    <span class="syllabus-card__title">Virtualization with KVM</span>
+    <span class="syllabus-card__description">KVM, QEMU and libvirt: build, network, snapshot and tune virtual machines.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="28-high-availability/">
+    <span class="syllabus-card__index">28</span>
+    <span class="syllabus-card__title">High Availability</span>
+    <span class="syllabus-card__description">Pacemaker and Corosync clusters, fencing, and resources that fail over.</span>
+  </a>
+</div>
+
 ## Suggested paths
 
 Working straight through (00 → 20) is the best way to learn. If you have a specific goal, these shortcuts work too:
@@ -208,4 +255,5 @@ Working straight through (00 → 20) is the best way to learn. If you have a spe
 | Become a capable Rocky admin fast | 00 → 02 → 03 → 04 → 05 → 07 → 08 → 09 → 11 → 12 |
 | Run containers in production | 01 → 06 → 07 → 16 → 18 → 19 |
 | Pass a security review | 03 → 04 → 12 → 16 → 17 |
-| Get good at fixing broken servers | 07 → 08 → 14 → 19 → 20 |
+| Get good at fixing broken servers | 07 → 08 → 14 → 19 → 20 → 24 |
+| Go deep on how Rocky itself works | 05 → 14 → 21 → 22 → 23 |
