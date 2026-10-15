@@ -39,11 +39,22 @@ flowchart TB
     F -. "can power off" .-> N2
 ```
 
-Three ideas carry the whole module:
+### HA in one sentence
 
-1. **Membership and quorum**: the nodes constantly agree on who is alive, and only a majority may run services.
-2. **Fencing**: before taking over, the survivors make *certain* a failed node is off.
-3. **Resource management**: Pacemaker decides where each resource runs, in what order, and restarts or moves it when something fails.
+Here is the whole idea:
+
+> **The servers in a cluster keep voting on who is still alive. Only the side with the majority may run services, and before it takes over a silent server's work, it switches that server off for certain.**
+
+Everything else in this module hangs off that sentence:
+
+1. **"Keep voting on who is alive"** is **membership and quorum**. Corosync passes a heartbeat between the nodes, and only a group holding a strict majority of votes is **quorate**, which means allowed to act.
+2. **"Switches that server off for certain"** is **fencing**. Before taking over, the survivors use a power switch, BMC or hypervisor to make *certain* the failed node is off.
+3. **"Takes over its work"** is **resource management**. Pacemaker decides where each resource runs, in what order, and restarts or moves it when something fails.
+
+!!! analogy "Think of it like a night shift with two guards"
+    Two guards share one gate. They radio each other every few seconds. If one goes quiet, the other can't just assume he fell asleep and take the gate key: maybe his radio broke and he's still standing at the gate. So before taking over, the remaining guard phones the building's power desk and has the quiet guard's booth locked. Only then does she take the key. With three guards, nobody acts alone: two of three must agree before anyone moves.
+
+    Where the analogy breaks: a cluster doesn't ask nicely. Fencing is usually a hard power-off, with no chance for the node to save anything.
 
 ### What HA is not
 
@@ -57,6 +68,138 @@ HA is easy to oversell. Be clear about its limits:
 | A way to do rolling maintenance | Protection against bad config or bad code, which fail on every node equally |
 
 Clustering also adds complexity. A badly configured cluster causes more outages than it prevents. Use it when minutes of downtime really matter and the application can't do its own redundancy (many modern apps can, with several active instances behind a load balancer).
+
+### The good news: a few states cover most problems
+
+When a cluster misbehaves, `pcs status` almost always shows one of a handful of states. Learn what each one means and you know where to look next.
+
+| `pcs status` shows | What it means, in the one-sentence model | What you do |
+|---|---|---|
+| **`partition WITHOUT quorum`** | This side lost the vote, so it stopped its services | Bring the missing nodes or network back. Don't force it to run alone |
+| **A node is `UNCLEAN`** | A node went silent and hasn't been switched off yet | Check the fence device. Recovery waits until fencing succeeds |
+| **Resources `Stopped`, nothing failed** | Nothing is allowed to run yet: no fence device, or a constraint forbids it | Create a fence device, or read the constraints |
+| **`Failed Resource Actions`** | A resource's health check failed | Read the log, fix the cause, then `pcs resource cleanup` |
+| **Running on the "wrong" node** | The scores favour that node | `crm_simulate -sL` prints the scores |
+
+And one short process for picking the row:
+
+```mermaid
+flowchart TB
+    S["Something is down<br/>or in the wrong place"] --> A["1. sudo pcs status"]
+    A --> Q{"partition with quorum?"}
+    Q -- "no" --> F1["Lost the vote:<br/>fix nodes or network<br/>(corosync-quorumtool)"]
+    Q -- "yes" --> U{"Any node UNCLEAN?"}
+    U -- "yes" --> F2["Fencing pending or failing:<br/>check the fence device"]
+    U -- "no" --> R{"Failed Resource Actions?"}
+    R -- "yes" --> F3["Read pacemaker.log,<br/>fix, pcs resource cleanup"]
+    R -- "no" --> F4["Placement question:<br/>crm_simulate -sL"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **node** | One server in the cluster |
+| **resource** | Anything the cluster starts, stops and watches: an IP address, a web server, a filesystem |
+| **floating IP** | An IP address that belongs to a service and moves with it, not to a server |
+| **quorum** / **quorate** | A strict majority of votes / "this side holds the majority and may act" |
+| **split brain** | Two sides each think the other is dead and both run the same service |
+| **fencing** / **STONITH** | Forcing a silent node into a known state, usually off. STONITH is Pacemaker's name for power fencing |
+| **DC** | Designated Controller: the one node that makes the decisions |
+| **CIB** | Cluster Information Base: the cluster's configuration and state, an XML document copied to every node |
+| **resource agent** | A script that knows how to start, stop and check one kind of service |
+| **constraint** / **score** | A placement rule / the number Pacemaker adds up per node to choose where a resource runs |
+| **stickiness** | A score bonus for staying where you already are |
+
+## Reading pcs status
+
+This is the core skill of the module. `pcs status` is the first command you run, every time, and you'll see it long before you've built anything yourself. Here is a healthy two-node cluster running a fence device and a `web` group (a floating IP plus Apache), which is what you'll have built by the end of the labs:
+
+```console
+$ sudo pcs status
+Cluster name: webcluster
+Cluster Summary:
+  * Stack: corosync (Pacemaker is running)
+  * Current DC: node1 (version 3.0.1-3.el10-…) - partition with quorum
+  * Last updated: Thu Oct 15 10:31:44 2026 on node1
+  * Last change:  Thu Oct 15 10:30:12 2026 by root via cibadmin on node1
+  * 2 nodes configured
+  * 3 resource instances configured
+
+Node List:
+  * Online: [ node1 node2 ]
+
+Full List of Resources:
+  * fence-xvm	(stonith:fence_xvm):	 Started node1
+  * Resource Group: web:
+    * vip	(ocf:heartbeat:IPaddr2):	 Started node2
+    * website	(ocf:heartbeat:apache):	 Started node2
+
+Daemon Status:
+  corosync: active/enabled
+  pacemaker: active/enabled
+  pcsd: active/enabled
+```
+
+How to read it, top to bottom:
+
+- **Current DC** and **partition with quorum**: who is deciding, and whether it's allowed to. "partition WITHOUT quorum" means this node stopped its resources.
+- **Node List**: `Online`, `OFFLINE`, `standby`, or `UNCLEAN` (the cluster lost a node and hasn't fenced it yet).
+- **Resources**: where each one runs. `Stopped` with no reason usually means a constraint, a missing fence device, or a failure.
+- At the bottom, if anything failed, a **Failed Resource Actions** section lists what, where and when, for example `website_monitor_10000 on node2 'not running'`.
+
+Read it with the one-sentence model in mind: first "did this side win the vote?" (the quorum line), then "is any silent node still waiting to be switched off?" (the node list), then "where is the work running, and did anything fail?" (the resources).
+
+### Practise: read three status snippets
+
+Each snippet below is a trimmed `pcs status`. Decide what state the cluster is in and what you'd do before opening the answer.
+
+**Snippet A:**
+
+```text
+  * Current DC: node1 - partition WITHOUT quorum
+Node List:
+  * Online: [ node1 ]
+  * OFFLINE: [ node2 node3 ]
+```
+
+??? success "Answer A"
+    node1 lost the vote. It sees 1 of 3 votes, so it isn't quorate and has stopped its resources (the default `no-quorum-policy=stop`). That's the cluster protecting you from split brain. Check the network between the nodes and whether node2 and node3 are up (`corosync-quorumtool` shows the vote count). Don't try to force node1 to run alone.
+
+**Snippet B:**
+
+```text
+  * Current DC: node1 - partition with quorum
+Node List:
+  * Online: [ node1 ]
+  * Node node2: UNCLEAN (offline)
+```
+
+??? success "Answer B"
+    node1 won the vote, but node2 went silent and hasn't been switched off yet. Until fencing succeeds, node2's resources stay where the cluster last saw them, because they might still be running. If this lasts more than a few seconds, fencing is failing: check the fence device and the fencing lines in `/var/log/pacemaker/pacemaker.log`.
+
+**Snippet C:**
+
+```text
+  * Current DC: node1 - partition with quorum
+Node List:
+  * Online: [ node1 node2 ]
+Full List of Resources:
+  * Resource Group: web:
+    * vip	(ocf:heartbeat:IPaddr2):	 Started node2
+    * website	(ocf:heartbeat:apache):	 Started node2
+Failed Resource Actions:
+  * website_monitor_10000 on node2 'not running'
+```
+
+??? success "Answer C"
+    Quorum and membership are fine. The `website` health check (its 10 second `monitor`) once found Apache not running on node2, and Pacemaker recovered it in place: it's `Started` again. Find out why Apache died (the Apache error log and `pacemaker.log` around that time), then clear the old failure with `sudo pcs resource cleanup website`.
+
+Notice the order: vote, then fencing, then resources. A resource problem on a side without quorum isn't a resource problem at all.
+
+`crm_mon` shows the same information and refreshes live; `sudo crm_mon -1rf` prints it once, with inactive resources (`-r`) and fail counts (`-f`).
+
+Rocky 10 ships Pacemaker 3.x and pcs 0.12. Commands in this module work the same on Rocky 9 except where noted.
 
 ## The Rocky HA stack
 
@@ -113,6 +256,8 @@ The cluster needs reliable networking between nodes (ideally two separate links,
 </div>
 
 ## Quorum: who gets to decide
+
+This is the "keep voting on who is alive" part of the one-sentence model.
 
 Imagine a three-node cluster where a switch fails and splits it in two: node1 alone on one side, node2 and node3 on the other. Each side sees the other as dead. If both sides started the database, both would write to it independently. That's **split brain**, and it destroys data.
 
@@ -173,9 +318,8 @@ With two nodes, a majority is 2 out of 2, so losing either node would stop every
 - **WaitForAll**: after a cold start, a node won't become quorate alone until it has seen the other node at least once. That stops a node that booted in isolation from grabbing resources.
 - **A fencing delay** (`pcmk_delay_base` or `pcmk_delay_max` on the fence device, or the `priority-fencing-delay` cluster property) gives one node a head start, so the two don't shoot each other at the same instant.
 
-### Quorum devices
-
-A cleaner fix for even-sized clusters is a **quorum device** (**qdevice**): a lightweight arbitrator on a third machine (`corosync-qnetd`) that gives one extra vote to the partition it can still see. It doesn't run resources and can serve many clusters. On the cluster nodes you install `corosync-qdevice` and add it with `pcs quorum device add model net host=<arbitrator> algorithm=ffsplit`.
+??? question "Going further: quorum devices for even-sized clusters"
+    A cleaner fix for even-sized clusters is a **quorum device** (**qdevice**): a lightweight arbitrator on a third machine (`corosync-qnetd`) that gives one extra vote to the partition it can still see. It doesn't run resources and can serve many clusters. On the cluster nodes you install `corosync-qdevice` and add it with `pcs quorum device add model net host=<arbitrator> algorithm=ffsplit`.
 
 <div class="quiz" data-answer="3" markdown>
 
@@ -191,6 +335,8 @@ Right. Each half has 2 of 4 votes, and quorum needs 3. Both stop resources (the 
 </div>
 
 ## Fencing: the part you can't skip
+
+This is the "switches that server off for certain" part of the model, and the part people are most tempted to skip.
 
 When node2 stops answering, the cluster knows only one thing: it can't hear node2. It does *not* know whether node2 is dead, hung for 40 seconds by a storage stall, or perfectly healthy behind a broken network cable. If node2 is still alive and the cluster starts its services on node1, two nodes run the same service against the same data.
 
@@ -308,48 +454,9 @@ Never edit it on one node only. Use `pcs` commands (or edit, then `pcs cluster s
 !!! tip "Enable or not at boot?"
     `--enable` makes the cluster start at boot. Some admins prefer to leave it off, so a node that was fenced and reboots doesn't rejoin until a human has looked at why it was fenced. Either is valid; decide on purpose.
 
-## Reading pcs status
-
-`pcs status` is the first command you run, every time:
-
-```console
-$ sudo pcs status
-Cluster name: webcluster
-Cluster Summary:
-  * Stack: corosync (Pacemaker is running)
-  * Current DC: node1 (version 3.0.1-3.el10-…) - partition with quorum
-  * Last updated: Thu Oct 15 10:31:44 2026 on node1
-  * Last change:  Thu Oct 15 10:30:12 2026 by root via cibadmin on node1
-  * 2 nodes configured
-  * 3 resource instances configured
-
-Node List:
-  * Online: [ node1 node2 ]
-
-Full List of Resources:
-  * fence-xvm	(stonith:fence_xvm):	 Started node1
-  * Resource Group: web:
-    * vip	(ocf:heartbeat:IPaddr2):	 Started node2
-    * website	(ocf:heartbeat:apache):	 Started node2
-
-Daemon Status:
-  corosync: active/enabled
-  pacemaker: active/enabled
-  pcsd: active/enabled
-```
-
-How to read it, top to bottom:
-
-- **Current DC** and **partition with quorum**: who is deciding, and whether it's allowed to. "partition WITHOUT quorum" means this node stopped its resources.
-- **Node List**: `Online`, `OFFLINE`, `standby`, or `UNCLEAN` (the cluster lost a node and hasn't fenced it yet).
-- **Resources**: where each one runs. `Stopped` with no reason usually means a constraint, a missing fence device, or a failure.
-- At the bottom, if anything failed, a **Failed Resource Actions** section lists what, where and when, for example `website_monitor_10000 on node2 'not running'`.
-
-`crm_mon` shows the same information and refreshes live; `sudo crm_mon -1rf` prints it once, with inactive resources (`-r`) and fail counts (`-f`).
-
-Rocky 10 ships Pacemaker 3.x and pcs 0.12. Commands in this module work the same on Rocky 9 except where noted.
-
 ## Resources: a floating IP and a web server
+
+This is the "takes over its work" part of the model.
 
 A **resource** is anything the cluster manages. You give it a name, an agent and parameters, and the cluster calls the agent's `start`, `stop` and `monitor` actions.
 
@@ -984,6 +1091,22 @@ All labs use one KVM host (bare metal or nested, see [module 27](27-virtualizati
 
 <div class="card" markdown>
 
+Explain an HA cluster in one sentence.
+
+The servers keep voting on who is still alive. Only the side with the majority may run services, and before it takes over a silent server's work, it switches that server off for certain.
+
+</div>
+
+<div class="card" markdown>
+
+In `pcs status`, what three things do you check, in order?
+
+1. The quorum line (`partition with quorum` or `WITHOUT quorum`). 2. The node list (any node `UNCLEAN`?). 3. The resources (where they run, and any `Failed Resource Actions`).
+
+</div>
+
+<div class="card" markdown>
+
 What are the jobs of Corosync and Pacemaker?
 
 Corosync: membership (who is alive) and quorum. Pacemaker: decides where resources run and starts, stops, monitors and fences.
@@ -1059,6 +1182,8 @@ What makes clients follow a floating IP to a new node?
 ## Recap
 
 !!! recap "Key takeaways"
+    - HA in one sentence: the servers keep voting on who is still alive; only the majority may run services, and it switches a silent server off for certain before taking over its work.
+    - Read `pcs status` in the same order: vote (quorum line), then fencing (`UNCLEAN` nodes), then resources (placement and failures).
     - HA moves a single copy of a service to a healthy node within seconds. It's not load balancing, and it's never a backup.
     - Corosync handles membership and quorum; Pacemaker decides and acts through resource agents and fence agents; `pcs` drives it all. The packages live in the `highavailability` repository.
     - Quorum (a strict majority) prevents split brain. Two-node clusters use `two_node` plus fencing; three nodes or a qdevice are more robust.

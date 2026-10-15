@@ -19,6 +19,8 @@ database anyway. Both make sense once you know where Linux really puts RAM,
 and this module shows you how to see it for yourself.
 
 !!! abstract "What you'll learn"
+    - Explain Linux memory in one sentence, and answer "is this box short
+      of memory?" in three reads.
     - Explain virtual memory, pages, page tables and the MMU, and read a
       process's memory map in `/proc/<pid>/maps` and `smaps_rollup`.
     - Tell VSZ, RSS, PSS and USS apart and know which one to trust.
@@ -31,15 +33,38 @@ and this module shows you how to see it for yourself.
       v2 limits (`MemoryHigh=`, `MemoryMax=`) and PSI.
     - Know when NUMA, HugeTLB, Transparent Huge Pages and KSM matter.
 
-## The big picture: where your RAM went
+## The big picture
+
+### Memory in one sentence
+
+Here is the whole idea:
+
+> **Linux lends every idle byte of RAM to the file cache and takes it back the moment a program needs it, so "free" memory is meant to be low; you only have a problem when programs plus the memory that can't be taken back outgrow RAM, and the kernel starts to struggle.**
+
+Everything in this module hangs off that sentence. "How much memory is
+free" is the wrong question. The right ones are:
+
+1. **How much could the kernel hand out without hurting anyone?** That's
+   `MemAvailable`.
+2. **Is anyone suffering while it does so?** That's memory pressure (PSI)
+   and swap-in activity.
+3. **If something died, who did it and why?** That's the OOM killer's
+   report, and whether it was the whole machine or one cgroup's limit.
+
+!!! analogy "Think of it like a library's reading room"
+    Empty desks are wasted desks, so the librarian piles them with books
+    people might want again (the page cache). When a new reader arrives,
+    the librarian clears a desk in seconds, because the books are only
+    copies. Trouble starts when every desk holds a reader's own notes
+    (process memory) that can't be cleared, only carried to the basement
+    (swap) or thrown out with the reader (the OOM killer).
+
+### Where your RAM went
 
 Every byte of RAM is doing one of a few jobs at any moment. Some of those
 jobs can be cancelled instantly when a program needs memory (clean cache),
 some take work to undo (dirty cache, swappable process memory), and some
-can't be undone at all (kernel memory in use). "How much memory is free" is
-the wrong question. The right one is "how much could the kernel hand out
-without hurting anyone", and that's what this stack is about. Click each
-layer:
+can't be undone at all (kernel memory in use). Click each layer:
 
 <div class="layers" data-open="0" data-hint="Click a layer to see what it holds and how to measure it." markdown>
 
@@ -111,175 +136,64 @@ of some of this.
 `MemAvailable` is the kernel's own estimate of free + clean cache +
 reclaimable slab, minus the reserves. It is the number to alert on.
 
-## Virtual memory made visual
+### The few numbers that answer most questions
 
-Every process on Linux believes it has a huge, private, contiguous memory
-all to itself, starting near address zero. None of that is true. What it
-has is **virtual memory**: a private map of addresses that the kernel and
-the CPU translate, page by page, into real RAM.
+You don't need every counter in this module to handle most memory
+problems. These five answer the vast majority of them:
 
-!!! analogy "Think of it like a hotel"
-    Every guest's key card says "room 12". The front desk (the **page
-    table**) knows that guest A's room 12 is physical room 4031 and guest
-    B's room 12 is physical room 77. The lift (the **MMU**) reads the card
-    and takes you to the right floor without you ever knowing the real
-    number. Rooms are only assigned when a guest first walks in, not at
-    check-in. That's where the analogy stops: hotels don't let two guests
-    share a room read-only, and Linux does that constantly.
-
-### The pieces
-
-- A **page** is the unit of memory management: 4 KiB on x86_64 (huge pages
-  are 2 MiB or 1 GiB). RAM is carved into **page frames**.
-- A **page table** is a per-process lookup structure that maps virtual pages
-  to physical frames, with permission bits (read, write, execute, user).
-- The **MMU** (memory management unit) is the part of the CPU that does the
-  translation on every single memory access, caching recent answers in the
-  **TLB** (translation lookaside buffer).
-- A **page fault** happens when the MMU finds no valid translation. The
-  kernel decides: allocate a page now (a **minor fault**, cheap), read it from
-  disk or swap (a **major fault**, slow), or send `SIGSEGV` (no such mapping).
-
-```mermaid
-flowchart TB
-    P["Process reads virtual address 0x7f3a…1040"] --> M["MMU"]
-    M --> T{"In the TLB?"}
-    T -- yes --> R["Physical frame: access RAM"]
-    T -- no --> W["Walk the process's page tables"]
-    W --> V{"Valid entry?"}
-    V -- yes --> R
-    V -- no --> F["Page fault: kernel takes over"]
-    F --> F1["Minor: give it a zeroed page / map cached file page"]
-    F --> F2["Major: read from disk or swap"]
-    F --> F3["No mapping: SIGSEGV"]
-```
-
-This is **demand paging**: a program can ask for 1 GB and use 10 MB, and only
-10 MB of RAM is ever touched. Remember this, because it explains overcommit
-and why "virtual size" is almost meaningless.
-
-### A process's address space
-
-```mermaid
-flowchart TB
-    K["Kernel space (top half, invisible to the process)"]
-    S["Stack: grows down, 8 MiB limit by default"]
-    MM["mmap area: shared libraries (libc.so.6), mapped files, big malloc()s, thread stacks"]
-    H["Heap: grows up, small malloc()s"]
-    D["Data and BSS: global variables"]
-    TX["Text: the program's machine code (read + execute)"]
-    Z["Address 0: never mapped, so NULL pointers fault"]
-    K --- S --- MM --- H --- D --- TX --- Z
-```
-
-On x86_64 with 4-level page tables, user space gets 128 TiB of virtual
-addresses. Real programs touch a tiny fraction of that.
-
-### Reading /proc/&lt;pid&gt;/maps
-
-Every mapping a process has is listed in `/proc/<pid>/maps`. Here is
-`sleep`, trimmed:
-
-```console
-$ sleep 300 &
-[1] 2817
-$ cat /proc/2817/maps
-55d0c4a00000-55d0c4a02000 r--p 00000000 fd:00 1573019                    /usr/bin/sleep
-55d0c4a02000-55d0c4a06000 r-xp 00002000 fd:00 1573019                    /usr/bin/sleep
-55d0c4a09000-55d0c4a0a000 rw-p 00008000 fd:00 1573019                    /usr/bin/sleep
-55d0c5f3e000-55d0c5f5f000 rw-p 00000000 00:00 0                          [heap]
-7f6a2e000000-7f6a34529000 r--p 00000000 fd:00 1574410                    /usr/lib/locale/locale-archive
-7f6a34600000-7f6a34628000 r--p 00000000 fd:00 1575110                    /usr/lib64/libc.so.6
-7f6a34628000-7f6a3479d000 r-xp 00028000 fd:00 1575110                    /usr/lib64/libc.so.6
-…
-7ffc1b2e5000-7ffc1b306000 rw-p 00000000 00:00 0                          [stack]
-7ffc1b3c8000-7ffc1b3ca000 r-xp 00000000 00:00 0                          [vdso]
-```
-
-Each line: address range, permissions (`r`ead, `w`rite, e`x`ecute,
-`p`rivate or `s`hared), offset in the file, device, inode, and the file.
-Notice the code is `r-x` (you can't write to it) and data is `rw-` (you
-can't execute it). Writing to the code is exactly the `error 7` segfault
-from module 24. The 101 MB `locale-archive` mapping is mostly never touched.
-
-### smaps_rollup and pmap: what is actually in RAM
-
-`maps` shows the *plan*. `/proc/<pid>/smaps_rollup` shows what's resident:
-
-```console
-$ cat /proc/2817/smaps_rollup
-55d0c4a00000-7ffc1b3ca000 ---p 00000000 00:00 0                          [rollup]
-Rss:                1792 kB
-Pss:                 316 kB
-Pss_Dirty:           108 kB
-Pss_Anon:            100 kB
-Pss_File:            216 kB
-Pss_Shmem:             0 kB
-Shared_Clean:       1600 kB
-Shared_Dirty:          0 kB
-Private_Clean:        84 kB
-Private_Dirty:       108 kB
-Anonymous:           108 kB
-AnonHugePages:         0 kB
-Swap:                  0 kB
-SwapPss:               0 kB
-…
-```
-
-`pmap -x` gives the same per mapping, with a total:
-
-```console
-$ pmap -x 2817 | tail -1
-total kB          230244    1792     108
-```
-
-That's 230 MB of virtual size, 1.8 MB resident, 108 KB dirty.
-
-### VSZ, RSS, PSS and USS
-
-| Measure | Plain meaning | Where to read it | Trust it for |
+| Question | Where to look | Healthy | Trouble |
 |---|---|---|---|
-| **VSZ** (virtual size) | Everything mapped, touched or not | `ps -o vsz`, `VmSize` | Almost nothing; it's a promise, not usage |
-| **RSS** (resident set size) | Pages in RAM, *counting shared pages in full* | `ps -o rss`, `Rss:` | Quick look; overcounts shared libraries |
-| **PSS** (proportional set size) | Private pages + each shared page divided by the number of sharers | `Pss:` in smaps_rollup | Summing processes: PSS adds up to real usage |
-| **USS** (unique set size) | Only pages private to this process | `Private_Clean + Private_Dirty` | "How much would I get back if I killed it?" |
+| **1. How much can be handed out?** | `available` in `free -h`, `MemAvailable` in `/proc/meminfo` | A comfortable share of `total` | Low *and* falling |
+| **2. Is anyone waiting on memory?** | `/proc/pressure/memory` (PSI) | `some` and `full` near 0 | `full` sustained above a few percent: thrashing |
+| **3. Is the box swapping right now?** | `si`/`so` columns of `vmstat 1` | Zero, or brief blips | Non-zero all the time |
+| **4. Did the OOM killer strike?** | `journalctl -k -g 'Killed process'` | No lines | A `Killed process` line: read the report |
+| **5. Is one service the problem?** | `systemd-cgtop -m`, its cgroup's `memory.current`, `memory.peak`, `memory.events` | Plateaus below its limit | Climbing steadily (a leak) or hitting `high`/`max` |
 
-Every process on the system maps the same 2 MB of `libc.so.6`. RSS charges
-the full 2 MB to each of them, so summing RSS across 200 processes counts
-libc 200 times. PSS charges each process 2 MB / 200. That's why `sleep`
-above has 1792 kB RSS but only 316 kB PSS.
+And one flow to pick where to go next:
 
-`smem` (from EPEL) computes all of these for every process:
-
-```console
-$ sudo dnf install -y epel-release && sudo dnf install -y smem
-$ sudo smem -k -s pss -r | head -5
-  PID User     Command                         Swap      USS      PSS      RSS
- 1288 mysql    /usr/libexec/mysqld                0   412.3M   413.9M   421.0M
-  977 root     /usr/bin/python3 -s /usr/sb        0    28.1M    29.6M    41.2M
-  715 root     /usr/lib/systemd/systemd-jo        0     5.9M     7.4M    15.8M
-    1 root     /usr/lib/systemd/systemd --        0     5.1M     6.3M    14.0M
+```mermaid
+flowchart TB
+    S["Alert or complaint:<br/>'out of memory', slow, or a process died"] --> A{"1. Did something die?<br/>journalctl -k -g 'Killed process'"}
+    A -- "yes" --> O["Read the OOM report:<br/>'Memory cgroup out of memory' = a limit<br/>'Out of memory' = the whole machine"]
+    A -- "no" --> B{"2. Is MemAvailable low<br/>AND is PSI or swap-in high?"}
+    B -- "no" --> N["Nothing is wrong.<br/>Low MemFree is just cache.<br/>Fix the alert, not the box."]
+    B -- "yes" --> C{"3. Who is growing?<br/>smem / systemd-cgtop -m / meminfo"}
+    C -- "a process or service" --> L["Leak or undersized:<br/>trend it, cap it with MemoryHigh/MemoryMax"]
+    C -- "Shmem, slab, huge pages" --> K["Memory outside processes:<br/>tmpfs, kernel, reserved pools"]
 ```
 
-No EPEL? The kernel already does the maths:
-`sudo grep -H '^Pss:' /proc/[0-9]*/smaps_rollup | sort -k2 -n | tail`.
+The rest of the module teaches each piece: first how to read `free` and
+`/proc/meminfo` (the core skill), then where the numbers come from.
 
-<div class="quiz" data-answer="3" markdown>
+### Words you'll see
 
-Twenty `httpd` worker processes each show an RSS of 30 MB. You want to know
-how much RAM the whole web server really uses. What should you sum?
+| Word | Plain meaning |
+|---|---|
+| **page** | The unit the kernel hands out: 4 KiB on x86_64 |
+| **page cache** | Copies of file data kept in RAM. **Clean** = same as disk, droppable instantly. **Dirty** = written but not yet on disk |
+| **anonymous memory** | Process memory with no file behind it (heap, stack). Can only be swapped or freed by the process |
+| **reclaim** | The kernel taking pages back: dropping cache, writing dirty data, swapping |
+| **swap** / **zram** | A place to park anonymous pages: on disk, or compressed in RAM |
+| **RSS** / **PSS** | How much of a process is in RAM, counting shared pages fully / fairly divided |
+| **overcommit** | Saying yes to more memory requests than RAM can back, betting not everyone collects |
+| **OOM killer** | The kernel's last resort: kill one process to free memory |
+| **cgroup limit** | A memory budget for one service (`MemoryHigh=`, `MemoryMax=`) |
+| **PSI** | Pressure stall information: the share of time tasks waited on memory |
 
-- VSZ, because it includes everything
-- RSS, because it is resident memory
-- PSS, because shared pages are divided among the processes that share them
-- Nothing, the kernel can't tell you
+## The core skill: is this box short of memory?
 
-Right. The workers share most of their code and libraries. Summing RSS counts
-those shared pages twenty times; summing PSS counts them once in total.
+This is the question you'll be asked most often, usually at a bad hour.
+Answer it in three reads, in this order:
 
-</div>
+```text
+1. free -h                    → look at "available", ignore "free"
+2. cat /proc/pressure/memory  → is "full" above zero for long?
+3. vmstat 1 5                 → are si/so (swap in/out) non-zero every line?
+```
 
-## /proc/meminfo, the important lines
+Then say it as a sentence: **"The kernel could hand out AVAILABLE, and
+tasks are / are not waiting on memory."** If nobody is waiting, the box is
+fine, however small `free` looks.
 
 `free` is a summary of `/proc/meminfo`. Learn to read the source:
 
@@ -360,6 +274,247 @@ Hugepagesize:       2048 kB
     because the kernel fills idle RAM with cache. Alert on `MemAvailable` as a
     percentage of `MemTotal`, on swap-in activity (`vmstat` `si`), and on
     memory PSI. Never on `MemFree`.
+
+### Story: the "free memory low" page at 3am
+
+**Symptom.** Monitoring pages you: "free memory below 15%" on a 4 GB VM.
+Nobody has complained.
+
+**Evidence.**
+
+```console
+$ free -h
+               total        used        free      shared  buff/cache   available
+Mem:           3.6Gi       853Mi       402Mi        19Mi       2.5Gi       2.7Gi
+Swap:          3.9Gi       0.8Mi       3.9Gi
+$ cat /proc/pressure/memory
+some avg10=0.00 avg60=0.00 avg300=0.00 total=1834211
+full avg10=0.00 avg60=0.00 avg300=0.00 total=1012993
+```
+
+**Reasoning.** `free` is 402 MiB, but `buff/cache` is 2.5 GiB of mostly
+clean cache, and `available` is 2.7 GiB: three quarters of the box could
+be handed out today. PSI is zero, so no task waited on memory. Swap use is
+under 1 MiB. This is the "lend idle RAM to the cache" half of the
+mental model working as designed.
+
+**Fix.** Nothing on the box. Change the alert to fire on `MemAvailable` as
+a percentage of `MemTotal`, plus memory PSI.
+
+**Check.** The alert stays quiet while the cache keeps doing its job.
+
+### Practise: read three snapshots
+
+Use the three-read template on each. Answers are hidden.
+
+**A.** On the box above, someone suggests `echo 3 > /proc/sys/vm/drop_caches`
+"to free up memory". Should you?
+
+??? success "Answer A"
+    No. The cache is the reason reads are fast, and the kernel drops clean
+    cache on its own the moment a program needs RAM. `available` is already
+    2.7 GiB and PSI is zero. Dropping caches only makes the next reads go
+    to disk. (See the pitfall "drop_caches as a fix" further down.)
+
+**B.** A host has plenty of `available` memory, but this is in the journal:
+
+```text
+Memory cgroup out of memory: Killed process 5120 (python3) total-vm:275772kB, anon-rss:257816kB, file-rss:2784kB, shmem-rss:0kB, UID:0 pgtables:556kB oom_score_adj:0
+```
+
+Was the machine out of memory?
+
+??? success "Answer B"
+    No. The prefix `Memory cgroup out of memory` means one cgroup hit its
+    own `memory.max` (its `MemoryMax=`). Only processes in that cgroup
+    were candidates, and the rest of the box never noticed. A whole-machine
+    OOM says `Out of memory: Killed process`. The fix is about that
+    service: is its limit too small, or is it leaking? Its `memory.peak`
+    and `memory.stat` (`anon` versus `file`) tell you which.
+
+**C.** `MemAvailable` is low and falling, `full avg10` in
+`/proc/pressure/memory` is around 20, and every line of `vmstat 1` shows
+non-zero `si` and `so`. Is this cache again?
+
+??? success "Answer C"
+    No, this is real trouble: thrashing. The kernel has run out of cheap
+    pages to reclaim and is swapping process memory in and out, and
+    `full` means all non-idle tasks were stalled at once for a fifth of
+    the time. Next, find who is growing (`smem -s pss`, `systemd-cgtop -m`)
+    and decide between more RAM, a cgroup limit on the culprit, or fixing
+    a leak.
+
+## Virtual memory made visual
+
+Every process on Linux believes it has a huge, private, contiguous memory
+all to itself, starting near address zero. None of that is true. What it
+has is **virtual memory**: a private map of addresses that the kernel and
+the CPU translate, page by page, into real RAM.
+
+!!! analogy "Think of it like a hotel"
+    Every guest's key card says "room 12". The front desk (the **page
+    table**) knows that guest A's room 12 is physical room 4031 and guest
+    B's room 12 is physical room 77. The lift (the **MMU**) reads the card
+    and takes you to the right floor without you ever knowing the real
+    number. Rooms are only assigned when a guest first walks in, not at
+    check-in. That's where the analogy stops: hotels don't let two guests
+    share a room read-only, and Linux does that constantly.
+
+### The pieces
+
+- A **page** is the unit of memory management: 4 KiB on x86_64 (huge pages
+  are 2 MiB or 1 GiB). RAM is carved into **page frames**.
+- A **page table** is a per-process lookup structure that maps virtual pages
+  to physical frames, with permission bits (read, write, execute, user).
+- The **MMU** (memory management unit) is the part of the CPU that does the
+  translation on every single memory access, caching recent answers in the
+  **TLB** (translation lookaside buffer).
+- A **page fault** happens when the MMU finds no valid translation. The
+  kernel decides: allocate a page now (a **minor fault**, cheap), read it from
+  disk or swap (a **major fault**, slow), or send `SIGSEGV` (no such mapping).
+
+```mermaid
+flowchart TB
+    P["Process reads virtual address 0x7f3a…1040"] --> M["MMU"]
+    M --> T{"In the TLB?"}
+    T -- yes --> R["Physical frame: access RAM"]
+    T -- no --> W["Walk the process's page tables"]
+    W --> V{"Valid entry?"}
+    V -- yes --> R
+    V -- no --> F["Page fault: kernel takes over"]
+    F --> F1["Minor: give it a zeroed page / map cached file page"]
+    F --> F2["Major: read from disk or swap"]
+    F --> F3["No mapping: SIGSEGV"]
+```
+
+This is **demand paging**: a program can ask for 1 GB and use 10 MB, and only
+10 MB of RAM is ever touched. Remember this, because it explains overcommit
+and why "virtual size" is almost meaningless.
+
+In mental-model terms: a program's *promises* (virtual memory) are cheap
+and almost unlimited. Only the pages it really touches take up RAM, and
+only those count when you ask "is this box short of memory?".
+
+??? question "Under the hood: the layout of a process's address space"
+    ```mermaid
+    flowchart TB
+        K["Kernel space (top half, invisible to the process)"]
+        S["Stack: grows down, 8 MiB limit by default"]
+        MM["mmap area: shared libraries (libc.so.6), mapped files, big malloc()s, thread stacks"]
+        H["Heap: grows up, small malloc()s"]
+        D["Data and BSS: global variables"]
+        TX["Text: the program's machine code (read + execute)"]
+        Z["Address 0: never mapped, so NULL pointers fault"]
+        K --- S --- MM --- H --- D --- TX --- Z
+    ```
+
+    On x86_64 with 4-level page tables, user space gets 128 TiB of virtual
+    addresses. Real programs touch a tiny fraction of that.
+
+??? question "Under the hood: reading /proc/<pid>/maps line by line"
+    Every mapping a process has is listed in `/proc/<pid>/maps`. Here is
+    `sleep`, trimmed:
+
+    ```console
+    $ sleep 300 &
+    [1] 2817
+    $ cat /proc/2817/maps
+    55d0c4a00000-55d0c4a02000 r--p 00000000 fd:00 1573019                    /usr/bin/sleep
+    55d0c4a02000-55d0c4a06000 r-xp 00002000 fd:00 1573019                    /usr/bin/sleep
+    55d0c4a09000-55d0c4a0a000 rw-p 00008000 fd:00 1573019                    /usr/bin/sleep
+    55d0c5f3e000-55d0c5f5f000 rw-p 00000000 00:00 0                          [heap]
+    7f6a2e000000-7f6a34529000 r--p 00000000 fd:00 1574410                    /usr/lib/locale/locale-archive
+    7f6a34600000-7f6a34628000 r--p 00000000 fd:00 1575110                    /usr/lib64/libc.so.6
+    7f6a34628000-7f6a3479d000 r-xp 00028000 fd:00 1575110                    /usr/lib64/libc.so.6
+    …
+    7ffc1b2e5000-7ffc1b306000 rw-p 00000000 00:00 0                          [stack]
+    7ffc1b3c8000-7ffc1b3ca000 r-xp 00000000 00:00 0                          [vdso]
+    ```
+
+    Each line: address range, permissions (`r`ead, `w`rite, e`x`ecute,
+    `p`rivate or `s`hared), offset in the file, device, inode, and the file.
+    Notice the code is `r-x` (you can't write to it) and data is `rw-` (you
+    can't execute it). Writing to the code is exactly the `error 7` segfault
+    from module 24. The 101 MB `locale-archive` mapping is mostly never touched.
+
+### smaps_rollup and pmap: what is actually in RAM
+
+`/proc/<pid>/maps` lists every mapping, which is the *plan*.
+`/proc/<pid>/smaps_rollup` shows what's actually resident. Here it is for a
+`sleep 300 &` running as PID 2817:
+
+```console
+$ cat /proc/2817/smaps_rollup
+55d0c4a00000-7ffc1b3ca000 ---p 00000000 00:00 0                          [rollup]
+Rss:                1792 kB
+Pss:                 316 kB
+Pss_Dirty:           108 kB
+Pss_Anon:            100 kB
+Pss_File:            216 kB
+Pss_Shmem:             0 kB
+Shared_Clean:       1600 kB
+Shared_Dirty:          0 kB
+Private_Clean:        84 kB
+Private_Dirty:       108 kB
+Anonymous:           108 kB
+AnonHugePages:         0 kB
+Swap:                  0 kB
+SwapPss:               0 kB
+…
+```
+
+`pmap -x` gives the same per mapping, with a total:
+
+```console
+$ pmap -x 2817 | tail -1
+total kB          230244    1792     108
+```
+
+That's 230 MB of virtual size, 1.8 MB resident, 108 KB dirty.
+
+### VSZ, RSS, PSS and USS
+
+| Measure | Plain meaning | Where to read it | Trust it for |
+|---|---|---|---|
+| **VSZ** (virtual size) | Everything mapped, touched or not | `ps -o vsz`, `VmSize` | Almost nothing; it's a promise, not usage |
+| **RSS** (resident set size) | Pages in RAM, *counting shared pages in full* | `ps -o rss`, `Rss:` | Quick look; overcounts shared libraries |
+| **PSS** (proportional set size) | Private pages + each shared page divided by the number of sharers | `Pss:` in smaps_rollup | Summing processes: PSS adds up to real usage |
+| **USS** (unique set size) | Only pages private to this process | `Private_Clean + Private_Dirty` | "How much would I get back if I killed it?" |
+
+Every process on the system maps the same 2 MB of `libc.so.6`. RSS charges
+the full 2 MB to each of them, so summing RSS across 200 processes counts
+libc 200 times. PSS charges each process 2 MB / 200. That's why `sleep`
+above has 1792 kB RSS but only 316 kB PSS.
+
+`smem` (from EPEL) computes all of these for every process:
+
+```console
+$ sudo dnf install -y epel-release && sudo dnf install -y smem
+$ sudo smem -k -s pss -r | head -5
+  PID User     Command                         Swap      USS      PSS      RSS
+ 1288 mysql    /usr/libexec/mysqld                0   412.3M   413.9M   421.0M
+  977 root     /usr/bin/python3 -s /usr/sb        0    28.1M    29.6M    41.2M
+  715 root     /usr/lib/systemd/systemd-jo        0     5.9M     7.4M    15.8M
+    1 root     /usr/lib/systemd/systemd --        0     5.1M     6.3M    14.0M
+```
+
+No EPEL? The kernel already does the maths:
+`sudo grep -H '^Pss:' /proc/[0-9]*/smaps_rollup | sort -k2 -n | tail`.
+
+<div class="quiz" data-answer="3" markdown>
+
+Twenty `httpd` worker processes each show an RSS of 30 MB. You want to know
+how much RAM the whole web server really uses. What should you sum?
+
+- VSZ, because it includes everything
+- RSS, because it is resident memory
+- PSS, because shared pages are divided among the processes that share them
+- Nothing, the kernel can't tell you
+
+Right. The workers share most of their code and libraries. Summing RSS counts
+those shared pages twenty times; summing PSS counts them once in total.
+
+</div>
 
 ## The page cache and dirty writeback
 
@@ -449,6 +604,7 @@ values in a custom tuned profile instead so they don't fight.
 
 ## Reclaim: how the kernel gets memory back
 
+Reclaim is the "takes it back" half of the mental model.
 When free memory runs low, the kernel **reclaims** pages: it drops clean
 cache, writes dirty cache, and swaps out anonymous memory. To choose what to
 evict, it keeps pages on **LRU lists** (least recently used): an **active**
@@ -458,10 +614,11 @@ are evicted from the tail of inactive. That's why one big `cat` of a log
 file doesn't flush your database's hot data: those pages are seen once, stay
 inactive, and are the first to go.
 
-Rocky 10's kernel actually runs the **multi-gen LRU** (MGLRU,
-`/sys/kernel/mm/lru_gen/enabled`), which sorts pages into several age
-generations instead of two lists. The idea is the same, and meminfo still
-reports `Active` and `Inactive`.
+??? question "Under the hood: Rocky 10 uses the multi-gen LRU"
+    Rocky 10's kernel actually runs the **multi-gen LRU** (MGLRU,
+    `/sys/kernel/mm/lru_gen/enabled`), which sorts pages into several age
+    generations instead of two lists. The idea is the same, and meminfo still
+    reports `Active` and `Inactive`.
 
 ```mermaid
 flowchart TB
@@ -483,8 +640,9 @@ flowchart TB
   synchronously. That's a latency spike in your application. You see it as
   `allocstall` counters in `/proc/vmstat` and as memory PSI.
 
-The watermarks come from `vm.min_free_kbytes` and
-`vm.watermark_scale_factor`. Per-zone values are in `/proc/zoneinfo`.
+??? question "Under the hood: where the watermarks come from"
+    The watermarks come from `vm.min_free_kbytes` and
+    `vm.watermark_scale_factor`. Per-zone values are in `/proc/zoneinfo`.
 
 ```console
 $ grep -E 'allocstall|pgscan_kswapd|pgscan_direct|pswpin|pswpout' /proc/vmstat
@@ -1333,6 +1491,30 @@ EOF
 
 <div class="card" markdown>
 
+Say the memory mental model in one sentence.
+
+Linux lends idle RAM to the file cache and takes it back when programs need it, so low "free" is normal; trouble starts only when programs plus memory that can't be taken back outgrow RAM and tasks start waiting.
+
+</div>
+
+<div class="card" markdown>
+
+What three reads answer "is this box short of memory?"
+
+`free -h` (look at `available`), `/proc/pressure/memory` (is `full` above zero for long?), and `vmstat 1` (are `si`/`so` non-zero every line?).
+
+</div>
+
+<div class="card" markdown>
+
+`Memory cgroup out of memory: Killed process …` versus `Out of memory: Killed process …`: what's the difference?
+
+The first means one cgroup hit its `memory.max` and only its processes were candidates. The second means the whole machine ran out.
+
+</div>
+
+<div class="card" markdown>
+
 `MemFree` or `MemAvailable`: which one should you alert on, and why?
 
 `MemAvailable`. It counts clean page cache and reclaimable slab that the kernel can hand out instantly. `MemFree` is low on any healthy, long-running box.
@@ -1416,6 +1598,9 @@ HugeTLB: a static pool reserved by the admin that apps must request explicitly. 
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: idle RAM is lent to the cache and taken back on
+      demand. Ask "how much could be handed out" (`MemAvailable`) and "is
+      anyone waiting" (PSI, swap-in), never "how much is free".
     - Every process sees private virtual memory; the MMU translates it page by
       page through page tables, and pages only become real when touched.
     - VSZ is a promise, RSS overcounts shared pages, PSS is what adds up,

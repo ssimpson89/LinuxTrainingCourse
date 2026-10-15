@@ -24,11 +24,101 @@ A partner's monitoring system says your API "fails TLS". `curl` from your laptop
 
 ## The big picture
 
+### TLS in one sentence
+
+Here is the whole idea:
+
+> **The server shows an ID card (its certificate) and proves the card is its own (with its private key). The client accepts only if the card was signed by someone in its trust store, the name and dates on it are right, and both sides agree on algorithms the crypto policy allows.**
+
+Everything else in this module is detail around that sentence. The **ID card** is an X.509 certificate. The **signer** is a certificate authority (CA). The **trust store** is the list of CAs your system believes. The **crypto policy** is Rocky's one system-wide rulebook for which algorithms, key sizes and protocol versions are acceptable.
+
 **TLS** (Transport Layer Security) wraps a TCP connection in encryption and proves to the client that it's talking to the right server. HTTPS, secure SMTP, LDAPS, database connections, and NTS time sync all use it. Its job has three parts:
 
 1. **Agree on secret keys** with someone you've never met, over a network anyone can watch (**key exchange**).
 2. **Prove identity**: the server shows a **certificate**, a signed statement saying "this public key belongs to `www.example.com`".
 3. **Protect the data**: encrypt and integrity-check every byte with a fast symmetric cipher such as AES-GCM.
+
+### The good news: five checks explain almost every failure
+
+The sentence above contains five checks. When TLS fails, one of them failed, and each has its own typical error and its own fix. This is the table to come back to.
+
+| Check | In ID-card terms | Typical error | The fix |
+|---|---|---|---|
+| **1. Chain** | The card's signer must lead back to a CA in the client's trust store | `unable to get local issuer certificate`, `self-signed certificate in certificate chain` | Server: send the intermediates. Client: add the private root to `/etc/pki/ca-trust/source/anchors/` and run `update-ca-trust` |
+| **2. Name** | The name on the card must match the host you asked for | `no alternative certificate subject name matches target host name` | Reissue with the name in the SAN, or send SNI (`-servername`) so you get the right card |
+| **3. Dates** | The card must be valid today | `certificate has expired`, `certificate is not yet valid` | Renew, or fix the clock that is wrong |
+| **4. Policy** | The card's key and signature, and the connection's protocol and ciphers, must be ones the crypto policy accepts | `EE certificate key too weak`, `CA signature digest algorithm too weak`, `handshake failure`, `no protocols available` | Fix the weak side (bigger key, SHA-256 signature, newer peer). As a last resort, opt one application out |
+| **5. Key** | The server must own the private key that matches the card | Server refuses to start, or `CertificateVerify` fails | Deploy the key that matches the certificate |
+
+And one process to find out which check failed:
+
+```mermaid
+flowchart TB
+    S["A TLS connection fails"] --> A["1. Connect by hand<br/>openssl s_client -connect host:443 -servername host"]
+    A --> Q1{"CONNECTED?"}
+    Q1 -- "No" --> N["Not TLS yet:<br/>network, firewall, service"]
+    Q1 -- "Yes" --> Q2{"Handshake alert?"}
+    Q2 -- "Yes" --> P["Check 4: policy<br/>(protocols, groups, ciphers)"]
+    Q2 -- "No" --> Q3{"Verify return code?"}
+    Q3 -- "issuer / self-signed" --> C["Check 1: chain"]
+    Q3 -- "expired / not yet valid" --> D["Check 3: dates"]
+    Q3 -- "0 (ok)" --> H["Check 2: name<br/>(add -verify_hostname),<br/>then check 4 for key size"]
+```
+
+The full version of this flow, with every branch, is the decision tree in "Debugging TLS" below.
+
+### Core skill: turn an error message into a check
+
+Most TLS errors name the failed check if you know how to read them. Try these. For each, say which of the five checks failed.
+
+**Error A:**
+
+```text
+curl: (60) SSL certificate problem: unable to get local issuer certificate
+```
+
+??? success "Answer A"
+    **Check 1, the chain.** The client couldn't link the server's certificate back to a CA in its trust store. Either the server sent only its leaf certificate (most common), or the root is a private CA the client hasn't been told to trust. `openssl s_client -showcerts` tells you which: count the certificates the server sent.
+
+**Error B:**
+
+```text
+no alternative certificate subject name matches target host name 'api.lab.example'
+```
+
+??? success "Answer B"
+    **Check 2, the name.** The certificate is fine and trusted, but `api.lab.example` isn't in its Subject Alternative Name list. Read the names with `openssl x509 -noout -ext subjectAltName`. If the right name *is* in a different certificate on the same server, the client probably didn't send SNI.
+
+**Error C:** in the server's log, after switching the policy to `FUTURE`:
+
+```text
+ee key too small
+```
+
+??? success "Answer C"
+    **Check 4, the policy.** The server's own certificate has a key smaller than the new policy accepts (2048-bit RSA under FUTURE, which wants 3072). The certificate didn't change; the rulebook did. Issue a bigger key, or go back to `DEFAULT`.
+
+Notice the pattern. Words like **issuer**, **self-signed** and **chain** mean check 1. **Name** or **host** means check 2. **Expired** or **not yet valid** means check 3. **Too weak**, **too small**, **handshake failure** or **no protocols** means check 4.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **certificate** (X.509) | The server's ID card: a name, a public key, and a CA's signature |
+| **private key** | The secret that proves the server owns the certificate. Never leaves the server |
+| **CA** | Certificate authority: someone who signs certificates |
+| **root** / **intermediate** / **leaf** | The top CA (self-signed, in the trust store) / a CA signed by the root / the server's own certificate |
+| **chain** | Leaf, then intermediates, leading back to a root |
+| **trust store** | The system-wide list of root CAs, in `/etc/pki/ca-trust` |
+| **SAN** | Subject Alternative Name: the list of names a certificate is valid for. Clients check only this |
+| **SNI** | The hostname the client asks for at the start, so one IP can serve many certificates |
+| **CSR** | Certificate signing request: a key's public half plus the wanted name, sent to a CA |
+| **handshake** | The opening exchange where client and server agree on keys and check the certificate |
+| **crypto policy** | Rocky's system-wide setting (`DEFAULT`, `LEGACY`, `FUTURE`, `FIPS`) for allowed algorithms |
+| **PEM** | The text format for certificates and keys (`-----BEGIN CERTIFICATE-----`) |
+| **ML-KEM** / **ML-DSA** | Post-quantum key exchange / post-quantum signatures |
+
+### Where each piece lives on Rocky
 
 On Rocky Linux, many components cooperate to make that happen. Click through them:
 
@@ -98,7 +188,7 @@ The pieces:
 
 ### The chain of trust
 
-Root CAs almost never sign server certificates directly. Their keys stay offline. Instead they sign **intermediate CAs**, which sign **leaf** (server) certificates. The client must build a path from the leaf back to a root it already trusts:
+This is **check 1** from the big picture. Root CAs almost never sign server certificates directly. Their keys stay offline. Instead they sign **intermediate CAs**, which sign **leaf** (server) certificates. The client must build a path from the leaf back to a root it already trusts:
 
 ```mermaid
 flowchart BT
@@ -163,6 +253,8 @@ Certificate:
         3f:88:…
 ```
 
+The fields map straight onto the five checks: **Issuer** feeds check 1 (chain), **SAN** is check 2 (name), **Validity** is check 3 (dates), and the **public key** and **signature algorithm** are what check 4 (policy) inspects.
+
 | Field | What it means | What breaks if it's wrong |
 |---|---|---|
 | **Issuer** | Who signed it | Client can't find that CA: "unable to get local issuer certificate" |
@@ -182,7 +274,7 @@ Certificate:
 
 ## The system trust store
 
-Every TLS client needs a list of roots to trust. Rocky keeps one list for the whole system, managed by the **ca-certificates** package and the **p11-kit** `trust` tool. You add sources; `update-ca-trust` compiles them into the formats each library expects.
+The trust store is the client side of **check 1**. Every TLS client needs a list of roots to trust. Rocky keeps one list for the whole system, managed by the **ca-certificates** package and the **p11-kit** `trust` tool. You add sources; `update-ca-trust` compiles them into the formats each library expects.
 
 ```mermaid
 flowchart TB
@@ -213,7 +305,7 @@ Applications pick up the change on their next connection (long-running daemons m
 !!! warning "Don't edit the extracted bundles"
     Files under `/etc/pki/ca-trust/extracted/` are regenerated by every `update-ca-trust` run and every `ca-certificates` update. Appending your CA to `tls-ca-bundle.pem` works until the next update, then silently stops. Always use `source/anchors/`.
 
-!!! note "Python, Node, and Java"
+??? note "Python, Node, and Java: when an app ignores the system store"
     Rocky's own packages use the system store: Python's `ssl` module, the RPM-packaged `python3-requests`, Java (through the extracted `cacerts` file), and Rocky's Node.js packages, which are built to use OpenSSL's default store. Things you install from upstream often don't: `pip install requests` brings the `certifi` CA list, and Node.js binaries from nodejs.org or `nvm` use their own built-in list unless started with `--use-openssl-ca` or given `NODE_EXTRA_CA_CERTS`. When "curl works but the app doesn't", check which CA list the app actually loads.
 
 ## Building your own CA with openssl
@@ -296,7 +388,7 @@ Put `ca.crt` in the trust store of every client (`/etc/pki/ca-trust/source/ancho
 
 ## Crypto policies: one switch for every library
 
-Each TLS library has its own way to configure allowed protocols, ciphers, and key sizes. Keeping OpenSSL, GnuTLS, NSS, Java, OpenSSH, Kerberos, BIND, and libreswan consistent by hand is hopeless. Rocky solves this with **system-wide cryptographic policies** (**crypto-policies**): you pick one policy, and a tool generates a matching config snippet for each library.
+This is the rulebook behind **check 4**. Each TLS library has its own way to configure allowed protocols, ciphers, and key sizes. Keeping OpenSSL, GnuTLS, NSS, Java, OpenSSH, Kerberos, BIND, and libreswan consistent by hand is hopeless. Rocky solves this with **system-wide cryptographic policies** (**crypto-policies**): you pick one policy, and a tool generates a matching config snippet for each library.
 
 ```mermaid
 flowchart TB
@@ -447,18 +539,19 @@ $ openssl s_client -connect web.lab.example:443 -groups X25519 </dev/null 2>/dev
 Peer Temp Key: X25519, 253 bits
 ```
 
-!!! tip "Why the output line changes"
+??? tip "Why the output line changes"
     `s_client` prints `Peer Temp Key:` when the server's key share is a classic key it can describe (X25519, P-256), and `Negotiated TLS1.3 group:` when it's a hybrid KEM, which has no single "temp key". OpenSSL 3.2 on Rocky 10.0 prints `Server Temp Key:` instead. So grep for both, or a script that only looks for `Negotiated` sees nothing on a classic connection.
 
-ML-DSA certificates are another matter: browsers and public CAs don't use them yet, so they're for internal experiments only. Creating one with OpenSSL 3.5:
+??? question "For the curious: post-quantum (ML-DSA) certificates"
+    ML-DSA certificates are another matter: browsers and public CAs don't use them yet, so they're for internal experiments only. Creating one with OpenSSL 3.5:
 
-```console
-$ openssl req -x509 -newkey mldsa65 -nodes -keyout pq.key -out pq.crt \
-    -days 30 -subj "/CN=pq.lab.example"
-$ openssl x509 -in pq.crt -noout -text | grep -E 'Signature Algorithm|Public Key Algorithm' | head -2
-        Signature Algorithm: ML-DSA-65
-            Public Key Algorithm: ML-DSA-65
-```
+    ```console
+    $ openssl req -x509 -newkey mldsa65 -nodes -keyout pq.key -out pq.crt \
+        -days 30 -subj "/CN=pq.lab.example"
+    $ openssl x509 -in pq.crt -noout -text | grep -E 'Signature Algorithm|Public Key Algorithm' | head -2
+            Signature Algorithm: ML-DSA-65
+                Public Key Algorithm: ML-DSA-65
+    ```
 
 !!! warning "Hybrid key shares are big"
     An X25519MLKEM768 key share adds over 1 KB to the ClientHello, so it may no longer fit in one packet. Some old middleboxes, load balancers, and IDS appliances mishandle that and drop the connection. If clients on Rocky 10.1 time out against a server that Rocky 9 clients reach fine, test with `-groups X25519` and suspect the network path. `DEFAULT:NO-PQ` is the system-wide escape hatch.
@@ -599,6 +692,17 @@ $ curl -v https://web.lab.example/ -o /dev/null 2>&1 | grep -E '^\*  ?(SSL|Serve
 | `EE certificate key too weak` (client), `ee key too small` (server log) | Key smaller than the policy allows (RSA 2048 under FUTURE) | `update-crypto-policies --show`; key size in `-text` |
 | `CA signature digest algorithm too weak` (client), `ca md too weak` (server log) | SHA-1-signed certificate under DEFAULT | Signature Algorithm in `-text` |
 | `no protocols available` / `handshake failure` alert | No overlap in protocol versions or ciphers | `-tls1_2` / `-tls1_3`; compare policies on both sides |
+
+!!! example "Worked story: works in the browser, fails in curl"
+    **Symptom.** A new internal API loads fine in Firefox, but `curl https://api.internal/` fails, and so does a Python client.
+
+    **Evidence.** curl says `unable to get local issuer certificate`. `openssl s_client -connect api.internal:443 -servername api.internal -showcerts </dev/null` lists only one certificate under "Certificate chain", and its `i:` (issuer) line names an intermediate CA, not a root.
+
+    **Reasoning.** That's **check 1, the chain**. The server sent its leaf but not the intermediate that links it to the root. Firefox hides the problem because browsers often cache or fetch intermediates; curl, Python and Java don't.
+
+    **Fix.** On the server, put the leaf and then the intermediate in the certificate file (`cat web.crt intermediate.crt > web-fullchain.crt` for nginx, or append to `SSLCertificateFile` for httpd), test the config, and reload.
+
+    **Check.** `s_client -showcerts` now lists two certificates, `Verify return code: 0 (ok)`, and curl succeeds without `-k`.
 
 Trace a failed connection with this tree:
 
@@ -971,6 +1075,22 @@ pkcs11:id=%9E%42%…;type=cert
 
 <div class="card" markdown>
 
+Explain TLS in one sentence.
+
+The server shows a certificate and proves it owns it with its private key; the client accepts only if the chain ends at a CA in its trust store, the name and dates are right, and both sides agree on algorithms the crypto policy allows.
+
+</div>
+
+<div class="card" markdown>
+
+What are the five checks behind almost every TLS failure?
+
+Chain (trusted signer), name (SAN and SNI), dates (validity and clocks), policy (key size, signature, protocols, ciphers), and key (the private key matches the certificate).
+
+</div>
+
+<div class="card" markdown>
+
 What does SNI do?
 
 Sends the requested hostname in the ClientHello so a server with many sites picks the right certificate.
@@ -1046,6 +1166,7 @@ The server didn't send its intermediate, or the client doesn't trust the root.
 ## Recap
 
 !!! recap "Key takeaways"
+    - **The one idea:** the server shows a certificate and proves it owns it; the client checks the **chain**, the **name**, the **dates**, and the **policy**. Every TLS error is one of those checks failing.
     - TLS agrees keys with **ephemeral key exchange**, proves identity with a **certificate plus a live signature**, then encrypts with a fast symmetric cipher.
     - Clients validate a **chain** from the leaf to a trusted root, check the **SAN** against the hostname, and check the **dates**.
     - Rocky has one **trust store**: add CAs to `/etc/pki/ca-trust/source/anchors/` and run `update-ca-trust`.

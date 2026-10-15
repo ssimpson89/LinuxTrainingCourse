@@ -24,6 +24,14 @@ A monitoring alert fires: `/var` is 100% full. You delete a 20 GB log file, run 
 
 ## The big picture
 
+### Storage in one sentence
+
+Here is the whole idea:
+
+> **A disk is a long row of numbered blocks. You slice it into partitions, turn a slice into named files by formatting it with a filesystem, and hang that filesystem on a folder (mount it) so it appears in the one tree that starts at `/`.**
+
+Everything else in this module is detail around that sentence: **slice, format, mount**, and then make the mount survive a reboot.
+
 A disk is just a long row of numbered blocks. It has no idea what a "file" is. Everything that makes storage useful (names, folders, permissions, timestamps) is built in software on top of that row of blocks, in layers.
 
 ```mermaid
@@ -39,6 +47,47 @@ Read it left to right. A **partition table** divides the disk into regions. A **
 
 !!! analogy "Think of it like a warehouse"
     The disk is an empty warehouse floor. The partition table paints lines on the floor to mark separate areas. The filesystem installs shelves and an index card system in one area so you can find things by name. Mounting is putting a door to that area somewhere in the building's hallway, so people can walk in through `/data`.
+
+### The four moves that cover most storage work
+
+Almost every storage task is one or more of these four moves, always in this order. Learn them and you can bring any new disk into service.
+
+| Move | What it does | The command |
+|---|---|---|
+| **1. Slice** | Writes a partition table and carves out a partition | `parted -s /dev/vdb mklabel gpt` then `parted -s /dev/vdb mkpart data xfs 1MiB 100%` |
+| **2. Format** | Builds a filesystem (inodes, directories, journal) on the slice | `mkfs.xfs /dev/vdb1` |
+| **3. Mount** | Hangs the filesystem on a folder, until the next reboot | `mount /dev/vdb1 /data` |
+| **4. Persist** | Makes the mount happen at every boot | A `UUID=` line in `/etc/fstab`, tested with `findmnt --verify` and `mount -a` |
+
+And one map tells you which move a disk still needs:
+
+```mermaid
+flowchart TB
+    S["A disk you want to use"] --> L["Run lsblk -f"]
+    L --> Q1{"Does it have<br/>a partition?"}
+    Q1 -- "No" --> M1["Move 1: slice it<br/>parted"]
+    Q1 -- "Yes" --> Q2{"Does the partition<br/>show an FSTYPE?"}
+    Q2 -- "No" --> M2["Move 2: format it<br/>mkfs.xfs"]
+    Q2 -- "Yes" --> Q3{"Does it show<br/>a MOUNTPOINT?"}
+    Q3 -- "No" --> M3["Move 3: mount it<br/>mount"]
+    Q3 -- "Yes" --> M4["Move 4: is it in /etc/fstab?<br/>If not, persist it"]
+```
+
+When things go wrong instead, the problem is nearly always in the same four places: the wrong disk was sliced, a filesystem is full (of data or of inodes), a mount is missing or hiding something, or an fstab line breaks the boot. Each has its own section below.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **block device** | A disk-like file in `/dev` (`/dev/vda`, `/dev/nvme0n1`) that reads and writes in fixed-size blocks |
+| **partition** | A slice of a disk, listed in the partition table (`/dev/vda1`) |
+| **partition table** | The small map at the start of the disk saying where each slice begins and ends. **GPT** today, **MBR** on old systems |
+| **filesystem** | The structure that turns a slice of blocks into named files and folders. **XFS** or **ext4** on Rocky |
+| **inode** | One file's record: owner, permissions, size, where its blocks are. Everything except its name |
+| **mount** / **mount point** | Attaching a filesystem to a folder / the folder it's attached to |
+| **UUID** | A unique ID written inside a filesystem. Stable, unlike `sdb` |
+| **fstab** | `/etc/fstab`, the list of mounts to make at every boot |
+| **swap** | Disk (or compressed RAM) the kernel uses as overflow for memory |
 
 ## How Linux names disks
 
@@ -99,6 +148,48 @@ $ sudo blkid /dev/vda2
 
 The stable aliases live under `/dev/disk/` (`by-uuid/`, `by-id/`, `by-label/`, `by-path/`, `by-partuuid/`). Each is a symlink to the current kernel name, created by **udev**, the service that reacts to hardware events and builds `/dev`.
 
+### Practise: read `lsblk -f` and name the next move
+
+This is the core skill of the module. For any disk, read three columns of `lsblk -f` from left to right and ask one question per column:
+
+> **Is there a partition under the disk? Does it have an `FSTYPE`? Does it have a `MOUNTPOINT`?** The first "no" tells you the next move.
+
+Try these before opening the answers.
+
+**Disk A:**
+
+```text
+NAME        FSTYPE      FSVER    LABEL UUID                                   FSAVAIL FSUSE% MOUNTPOINTS
+vdb
+```
+
+??? success "Answer A"
+    `vdb` has no children, no `FSTYPE`, no `MOUNTPOINT`. It's a blank disk. **Move 1: slice it** with `parted`, then format, mount and persist.
+
+**Disk B:**
+
+```text
+NAME        FSTYPE      FSVER    LABEL UUID                                   FSAVAIL FSUSE% MOUNTPOINTS
+vdb
+└─vdb1      xfs                        3d2c9a10-5be4-4b7e-9f22-6a1e0c4b7d55
+```
+
+??? success "Answer B"
+    There's a partition, and it has an XFS filesystem with a UUID, but the `MOUNTPOINTS` column is empty. Someone sliced and formatted it and stopped there. **Move 3: mount it**, then **move 4**: add `UUID=3d2c9a10-…` to `/etc/fstab` so it survives a reboot. Don't run `mkfs` again; that would erase whatever is on it.
+
+**Disk C:**
+
+```text
+NAME        FSTYPE      FSVER    LABEL UUID                                   FSAVAIL FSUSE% MOUNTPOINTS
+vda
+└─vda3      LVM2_member LVM2 001       Yx3n2K-…
+  ├─rl-root xfs                        0f6a4b0e-2d1c-4a8e-b3a2-91e5d3c7a6f1      1.1G    97% /
+  └─rl-swap swap        1              b5d2c0f4-7e19-4c33-8a0b-2c6e4f1d9b80                  [SWAP]
+```
+
+??? success "Answer C"
+    Every layer is in place: partition, filesystem, mount. Nothing is missing, but `FSUSE%` says `/` is 97% full. This isn't a setup problem, it's a space problem. Jump to [Where did my space go?](#where-did-my-space-go). Notice `vda3` says `LVM2_member`: that partition is handed to LVM, which is how `/` can later be grown ([Module 10](10-lvm-raid-and-encryption.md)).
+
 ??? question "Under the hood: the /dev/disk aliases, and which UUID is which"
     ```console
     $ ls -l /dev/disk/by-uuid/
@@ -127,9 +218,7 @@ Right. `nvme1` is the controller, `n1` the namespace (think: the disk), and `p2`
 
 ## Partition tables: GPT and MBR
 
-A **partition table** is a small data structure at the start of the disk that lists where each partition begins and ends. There are two formats.
-
-**MBR** (Master Boot Record, also called "msdos" or "DOS") is the 1980s format. It fits in the first 512-byte sector, allows four primary partitions (more through an "extended" partition trick), and can't address beyond 2 TiB with 512-byte sectors.
+A **partition table** is a small data structure at the start of the disk that lists where each partition begins and ends. There are two formats, and you'll almost always use the newer one.
 
 **GPT** (GUID Partition Table) is the modern format, part of the UEFI standard. It allows 128 partitions by default, handles enormous disks, gives every partition a unique ID, and keeps a **backup copy** of the table at the end of the disk so a damaged header can be repaired. Rocky 10 uses GPT for new installs.
 
@@ -140,6 +229,9 @@ flowchart TB
     P["Protective MBR<br/>(sector 0)"] --> H["GPT header +<br/>partition entries"] --> D1["Partition 1"] --> D2["Partition 2"] --> D3["…free space…"] --> B["Backup entries +<br/>backup header"]
     end
 ```
+
+??? question "For the curious: MBR, the older format"
+    **MBR** (Master Boot Record, also called "msdos" or "DOS") is the 1980s format. It fits in the first 512-byte sector, allows four primary partitions (more through an "extended" partition trick), and can't address beyond 2 TiB with 512-byte sectors. You'll still meet it on old systems and small USB sticks.
 
 ??? question "Under the hood: the protective MBR and the backup table"
     The **protective MBR** is a fake MBR entry that covers the whole disk. Old tools that don't understand GPT see "one big partition of unknown type" and leave it alone instead of thinking the disk is empty.
@@ -154,7 +246,7 @@ flowchart TB
 | `parted` | Command line or interactive | Scriptable. **Changes apply immediately**, there is no "write" step. |
 | `gdisk` / `sgdisk` | Interactive / scriptable | GPT specialists. Not in the Rocky 10 repos: install `gdisk` from EPEL (Rocky 9 has it in AppStream). |
 
-A scripted GPT partition with `parted` looks like this:
+This is **move 1, slice**. A scripted GPT partition with `parted` looks like this:
 
 ```console
 $ sudo parted -s /dev/vdb mklabel gpt
@@ -179,6 +271,8 @@ Starting at `1MiB` keeps the partition **aligned**: its start lines up with the 
     `mklabel` on the wrong device wipes its partition table in an instant. Always run `lsblk` first and check that the disk you are about to touch has **no mountpoints** and the size you expect. All labs in this module use loop devices so you can't hurt a real disk.
 
 ## The storage stack
+
+The one-sentence model has three layers you can see (partition, filesystem, mount). Underneath, the kernel has a few more. You don't need them to do the four moves, but they tell you where to look when something is slow or broken.
 
 When an application saves a file, the data passes through several layers of the kernel before it reaches hardware. Each layer has one job, and knowing them tells you where to look when something is slow or broken. Click each layer.
 
@@ -358,6 +452,8 @@ Rocky Linux supports several filesystems, but two do almost all the work.
 
 **ext4** is the classic Linux filesystem, the default on many other distributions. It can grow and shrink (shrinking only while unmounted). It creates a fixed number of inodes at format time.
 
+Running `mkfs.xfs` or `mkfs.ext4` is **move 2, format**. It overwrites whatever filesystem was on the partition, so check `lsblk -f` first.
+
 Both are **journaling** filesystems. Before changing their metadata, they write a description of the change to a **journal** (a log). After a crash, the filesystem replays or discards the journal entries instead of scanning the entire disk.
 
 === "XFS"
@@ -432,7 +528,7 @@ Right. Production XFS can only grow. `resize2fs` is for ext4, and `xfs_repair` h
 
 ## Mounting
 
-**Mounting** attaches a filesystem to a directory, called the **mount point**. The directory's previous contents are hidden (not deleted) until you unmount.
+This is **move 3**. **Mounting** attaches a filesystem to a directory, called the **mount point**. The directory's previous contents are hidden (not deleted) until you unmount.
 
 ```console
 $ sudo mkdir -p /data
@@ -468,7 +564,7 @@ $ sudo umount /data
 
 ## /etc/fstab: mounting at boot
 
-`mount` by hand lasts until the next reboot. To make a mount permanent, add a line to `/etc/fstab`. Each line has six fields:
+This is **move 4, persist**. `mount` by hand lasts until the next reboot. To make a mount permanent, add a line to `/etc/fstab`. Each line has six fields:
 
 ```text title="/etc/fstab"
 UUID=0f6a4b0e-2d1c-4a8e-b3a2-91e5d3c7a6f1  /       xfs   defaults                 0 0
@@ -685,6 +781,8 @@ $ sudo find /var -xdev -type f -size +500M -exec ls -lh {} +
 
 ### Deleted but still open
 
+**The story:** `/var` alerts at 100%. You delete a 15 GB log. `df` still says full. Here's why, and the fix.
+
 When you `rm` a log file that a running service is still writing to, the name disappears but the inode lives on: its link count is 0, but a process holds it open. The space is not freed until that process closes the file. `lsof +L1` lists open files with a link count below 1:
 
 ```console
@@ -715,6 +813,8 @@ There's 15 GB pinned by PID 1873. Two fixes:
 ### Inode exhaustion
 
 A filesystem can run out of **inodes** while it still has free blocks. Every file needs one inode, so millions of tiny files (session files, mail queues, cache shards) can use them all. The symptom is baffling: "No space left on device" while `df -h` shows free space.
+
+**The story:** an app logs "No space left on device", but `df -h` shows the disk is under a quarter full. Symptom, then evidence:
 
 ```console
 $ touch /srv/cache/new
@@ -1176,6 +1276,22 @@ All labs use **loop devices**: a regular file attached as a fake disk with `lose
 
 <div class="card" markdown>
 
+Describe storage in one sentence.
+
+A disk is a row of numbered blocks. You slice it into partitions, format a slice with a filesystem so it holds named files, and mount that filesystem on a folder in the tree under `/`.
+
+</div>
+
+<div class="card" markdown>
+
+The four moves to bring a new disk into service, with commands?
+
+1. Slice: `parted mklabel gpt` + `mkpart`. 2. Format: `mkfs.xfs`. 3. Mount: `mount`. 4. Persist: a `UUID=` line in `/etc/fstab`, tested with `findmnt --verify` and `mount -a`.
+
+</div>
+
+<div class="card" markdown>
+
 What does the `n1` in `/dev/nvme0n1` mean?
 
 Namespace 1 on NVMe controller 0. Partitions add `p`: `/dev/nvme0n1p1`.
@@ -1259,6 +1375,7 @@ The kernel uses spare RAM as page cache (`buff/cache`) and gives it back on dema
 ## Recap
 
 !!! recap "Key takeaways"
+    - Storage in one sentence: slice a disk into partitions, format a slice with a filesystem, mount it on a folder, then persist the mount in fstab. `lsblk -f` shows which of those moves a disk still needs.
     - Disks are block devices in `/dev` (`sda`, `nvme0n1`, `vda`). Their names can change; UUIDs don't.
     - GPT is the modern partition table; `parted` and `fdisk` manage it. Always `lsblk` before you touch a disk.
     - The storage stack runs app → VFS → filesystem → (device mapper) → block layer → driver → disk.

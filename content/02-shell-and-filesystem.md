@@ -24,6 +24,14 @@ You type `rm *.log` and a second later you wonder: did that delete what you mean
 
 ## The big picture
 
+### The shell and the filesystem in one sentence
+
+Here is the whole idea:
+
+> **You type a line, Bash rewrites it (expands it, strips the quotes, wires up its input and output, finds the program), and the program only ever sees the finished list of words, three streams, and one tree of files starting at `/`.**
+
+Everything else in this module is detail around that sentence. The first half of the module is about the **rewrite**. The second half is about the **tree**.
+
 The **shell** is an ordinary program whose job is to read a line of text, turn it into a command, and ask the kernel to run that command. On Rocky Linux the default shell is **Bash** (the Bourne Again SHell). It is not part of the kernel and it is not magic: it is `/usr/bin/bash`, a program like any other.
 
 Every time you press ++enter++, Bash runs the same loop: read the line, break it into words, expand those words (variables, wildcards, `~`), set up any redirections, find the command, run it, and wait for it to finish. The command it runs gets three open "channels" for input and output, and sees a filesystem tree that starts at `/`.
@@ -42,6 +50,43 @@ flowchart TB
 ```
 
 If you keep one idea from this module, keep this: **the shell rewrites your line before the program sees it.** `rm` never sees `*.log`. It sees a list of real filenames that Bash produced. Once you can predict that rewrite, the shell stops being mysterious.
+
+### Four parts of the rewrite explain most surprises
+
+When the shell does something you didn't expect, it is nearly always one of these four. Learn them and most "why did it do that?" moments answer themselves.
+
+| What surprised you | Which part of the rewrite | How to see it or fix it |
+|---|---|---|
+| **1. The program got different words than you typed** (a `*` became filenames, a `$VAR` vanished) | **Expansion** | `set -x` (or put `echo` in front) to see the rewritten line |
+| **2. One filename became two arguments**, or a `*` you wanted literal got expanded | **Quoting** | Wrap variables in `"..."`; use `'...'` for fully literal text |
+| **3. Output or errors went somewhere unexpected** | **Redirection and pipes** | Redirections apply left to right: `> file 2>&1`. Pipes carry only stdout |
+| **4. The wrong program ran, or "command not found"** | **Command lookup** | `type -a name` shows what wins; check `PATH`; `hash -r` clears the cache |
+
+```mermaid
+flowchart TB
+    S["The shell surprised you"] --> X["Turn on set -x and run it again<br/>(see the rewritten line)"]
+    X --> Q{"What's wrong?"}
+    Q -- "words differ from<br/>what you meant" --> F1["Expansion / quoting:<br/>add or change quotes"]
+    Q -- "output in the<br/>wrong place" --> F2["Redirection:<br/>check the order"]
+    Q -- "wrong program or<br/>command not found" --> F3["Lookup:<br/>type -a, PATH, hash -r"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **shell** / **Bash** | The program that reads your command line and runs it. Bash is Rocky's default shell |
+| **word** / **argument** | One item in the finished command line. The first word is the command; the rest are its arguments |
+| **expansion** | Bash replacing something you typed (`*.log`, `$HOME`, `~`) with its value |
+| **glob** | A wildcard pattern like `*.conf` that expands to matching filenames |
+| **quoting** | `'...'`, `"..."` or `\` to stop some or all expansion |
+| **builtin** | A command built into Bash itself, like `cd` and `type` |
+| **PATH** | The list of directories Bash searches for programs |
+| **stdin / stdout / stderr** | The three streams every program starts with: input (0), output (1), errors (2) |
+| **redirection** / **pipe** | Pointing a stream at a file (`>`, `<`, `2>`) / at another program (the pipe symbol) |
+| **exit status** | A number a program returns when it ends; `0` means success. Stored in `$?` |
+| **FHS** | The Filesystem Hierarchy Standard: which kind of file lives in which directory |
+| **mount** | Attaching a disk or share onto a directory in the one tree |
 
 ## The shell is just a program
 
@@ -145,6 +190,29 @@ $ ls -l "$f"
 !!! tip "The one rule that prevents most shell bugs"
     Wrap variables in double quotes: `"$f"`, `"$HOME/dir"`, `"$@"`. Only leave them bare when you *want* word splitting, and you will rarely want it.
 
+### Practise: predict the rewrite
+
+This is the core skill of the module. Before you press ++enter++, say what the program will actually receive:
+
+> **"Bash will run `<program>` with the arguments `<word 1>`, `<word 2>`, …"**
+
+Then check yourself with `set -x`. Try these three before opening the answers.
+
+```text
+A:  echo file{1,2}.txt $((6*7))
+B:  f="my report.txt"; ls -l $f
+C:  echo '$HOME' "$HOME"
+```
+
+??? success "Answer A"
+    "Bash will run `echo` with the arguments `file1.txt`, `file2.txt`, `42`." Brace expansion makes two words, arithmetic expansion turns `$((6*7))` into `42`. `echo` never sees a brace or a `$`.
+
+??? success "Answer B"
+    "Bash will run `ls` with the arguments `-l`, `my`, `report.txt`" (plus `--color=auto` from the alias in an interactive shell). The unquoted `$f` is expanded, then **word splitting** cuts it at the space. That's why `ls` complains about two missing files. Write `ls -l "$f"` and `ls` gets one argument, `my report.txt`.
+
+??? success "Answer C"
+    "Bash will run `echo` with the arguments `$HOME` and `/home/alice`" (your own home directory). Single quotes switch off all expansion; double quotes still allow `$` expansion but keep the result as one word.
+
 <div class="quiz" data-answer="3" markdown>
 
 The current directory holds `a.txt`, `b.txt`, and `notes.md`. You run `echo '*.txt' "*.txt" *.txt`. What does `echo` print?
@@ -208,6 +276,27 @@ Bash searches these directories left to right and runs the first match. Where do
     ```
 
     The failure mode: you install a newer `tool` into `/usr/local/bin` (which comes earlier in `PATH`) but your open shell keeps running the old `/usr/bin/tool`, because the cached path still exists. `type tool` says "tool is hashed (/usr/bin/tool)". Run `hash -r`, or open a new shell.
+
+#### Worked story: "command not found", but the script is right there
+
+**Symptom.** You write a script called `deploy` in your current directory, make it executable, and type `deploy`. Bash says `bash: deploy: command not found`.
+
+**Evidence.**
+
+```console
+$ ls -l deploy
+-rwxr-xr-x. 1 alice alice 52 Oct 15 10:02 deploy
+$ type deploy
+bash: type: deploy: not found
+$ echo $PATH
+/home/alice/.local/bin:/home/alice/bin:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
+```
+
+**Reasoning.** This is part 4 of the rewrite, command lookup. `deploy` has no slash in it, so Bash searches only the `PATH` directories. Your current directory isn't one of them (and it shouldn't be, see the warning below). The file exists; Bash just never looks there.
+
+**Fix.** Either give Bash a path, which skips the search: `./deploy`. Or move the script into a directory that *is* on `PATH`: `mv deploy ~/.local/bin/`.
+
+**Check.** After the move, `type deploy` answers `deploy is /home/alice/.local/bin/deploy`, and plain `deploy` runs.
 
 !!! warning "Never put `.` in PATH"
     Adding the current directory to `PATH` means a file called `ls` dropped into `/tmp` by someone else runs when you type `ls` there. To run a program in the current directory, type `./program` explicitly.
@@ -1285,6 +1374,22 @@ Brace; then tilde, parameter, arithmetic, and command substitution in one left-t
 
 <div class="card" markdown>
 
+The shell and the filesystem in one sentence?
+
+Bash rewrites your line (expansion, quotes, redirection, command lookup), and the program only sees the finished words, three streams, and one tree starting at `/`.
+
+</div>
+
+<div class="card" markdown>
+
+Something in the shell surprised you. What's the first thing to turn on?
+
+`set -x`. It prints each command after Bash has rewritten it, so you see exactly what the program received. `set +x` turns it off.
+
+</div>
+
+<div class="card" markdown>
+
 Why must `cd` be a shell builtin?
 
 A child process cannot change its parent's current directory. A `cd` program would change only its own directory and then exit.
@@ -1344,6 +1449,7 @@ Your own shell performs the redirection, as you, before sudo runs. Use `echo x |
 ## Recap
 
 !!! recap "Key takeaways"
+    - **In one sentence:** Bash rewrites your line (expansion, quotes, redirection, command lookup), and the program only sees the finished words, three streams, and one tree starting at `/`. When surprised, `set -x` shows the rewrite.
     - Bash is an ordinary program that rewrites your line (expansions, quote removal) *before* running anything. Programs never see your wildcards.
     - Expansion happens in a fixed order; word splitting and globbing come late, so quote variables with `"..."` to keep them whole.
     - Commands are resolved as alias, function, builtin, then a left-to-right PATH search. `type -a` tells you which one wins.

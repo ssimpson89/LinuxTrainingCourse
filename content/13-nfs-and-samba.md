@@ -51,6 +51,98 @@ flowchart LR
 
 That "who is the user?" row is the most important difference, and it explains most of the surprises in this module.
 
+### File sharing in one sentence
+
+Here is the whole idea:
+
+> **A share is a door with a row of locks: the client must reach the server (firewall), be someone (NFS believes the client's UID, Samba makes you log in), pass the share's own rules, pass Linux permissions as that user, and pass SELinux. Every lock must open, and the first one that says no is your problem.**
+
+NFS and Samba have the same five locks. They differ in what the locks look like and in the error each one gives you. Learn the locks, and "the client can't access the share" turns from a mystery into a checklist.
+
+### The five locks
+
+| Lock | NFS | Samba | Typical symptom when it's shut |
+|---|---|---|---|
+| **1. Network** | firewalld service `nfs` (2049/tcp) | firewalld service `samba` (445/tcp) | The mount or `smbclient` hangs, then times out |
+| **2. Identity** | The client's UID, believed as-is. Client root becomes `nobody` (root squash) | Username and password in the passdb (`smbpasswd -a`) | NFS: files owned by the "wrong" user, root denied. Samba: `NT_STATUS_LOGON_FAILURE` |
+| **3. Share rules** | `/etc/exports`: which clients, `ro` or `rw` | `smb.conf`: `valid users`, `read only` | NFS: "access denied by server while mounting". Samba: `NT_STATUS_ACCESS_DENIED` on connect |
+| **4. Linux permissions** | Mode and ACLs on the server, checked for the client's UID | Mode and ACLs on the server, checked for the logged-in user's UID | "Permission denied" for one user but not another |
+| **5. SELinux** | Usually open by default (`nfs_export_all_rw`) | Files need the `samba_share_t` label | Everything above looks right, yet access is denied, and `ausearch -m AVC` shows a denial |
+
+Work through them in order, from the outside in:
+
+```mermaid
+flowchart TB
+    S["Client can't use the share"] --> N{"1. Can it reach<br/>the port at all?"}
+    N -- "no: timeout" --> F1["Firewall or service down"]
+    N -- "yes" --> I{"2. Does the server<br/>know who you are?"}
+    I -- "no" --> F2["NFS: UID / root squash<br/>Samba: passdb"]
+    I -- "yes" --> R{"3. Do the share<br/>rules allow it?"}
+    R -- "no" --> F3["exports / smb.conf"]
+    R -- "yes" --> P{"4. Do Linux permissions<br/>allow that UID?"}
+    P -- "no" --> F4["chmod, chgrp, ACLs"]
+    P -- "yes" --> L["5. SELinux:<br/>label or boolean"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **NFS** | Network File System. The Linux and Unix way to share directories. Server runs in the kernel (`nfsd`) |
+| **export** | A directory an NFS server shares, listed in `/etc/exports` or `/etc/exports.d/*.exports` |
+| **`sec=sys`** | NFS's default "security": the client says which UID it is and the server believes it |
+| **root squash** | NFS turning client root into the anonymous user `nobody`. On by default |
+| **hard mount** | An NFS mount that waits forever for a missing server instead of returning errors. The default |
+| **autofs** | A service that mounts a share when you first access its path, and unmounts it when idle |
+| **SMB** / **CIFS** | The Windows file-sharing protocol (CIFS is its old name) |
+| **Samba** / **`smbd`** | The Linux implementation of SMB, and its file server daemon |
+| **share** | A `[section]` in `smb.conf`: one directory exposed over SMB |
+| **passdb** | Samba's own password database, separate from `/etc/shadow` |
+| **`samba_share_t`** | The SELinux label Samba needs on the files it shares |
+| **ID mapping** | Turning a user's identity on one system (name, SID) into a UID on another |
+
+## Which lock said no? Reading the error
+
+The most useful skill in this module is turning an error message into a lock number. Use this template:
+
+> **"The `<client>` was refused at lock `<N>`, because `<what that lock checks>` did not match."**
+
+The error tells you more than it seems. A **timeout** means you never reached the server (lock 1). An answer, even "denied", means the network is fine and you can skip straight to locks 2 to 5. Words like "LOGON" point at identity, "by server while mounting" at the export list, and an AVC record at SELinux.
+
+### Practise: name the lock
+
+Decide which lock is shut before you open each answer.
+
+**Error A**, on an NFS client:
+
+```text
+mount.nfs: access denied by server while mounting server1:/srv/nfs/projects
+```
+
+??? success "Answer A"
+    The server answered, so the network is fine. It refused the *mount*, before any file was touched. That's **lock 3, share rules**: this client's address isn't allowed by `/etc/exports`. Compare `sudo exportfs -v` on the server with the client's address, and look for a space before the parenthesis.
+
+**Error B**, on an NFS client where alice can write but root can't:
+
+```console
+client$ sudo touch /mnt/projects/rootfile
+touch: cannot touch '/mnt/projects/rootfile': Permission denied
+```
+
+??? success "Answer B"
+    The mount works and alice can write, so locks 1 and 3 are open. Only root fails. That's **lock 2, identity**: root squash turned client root into `nobody`, and then lock 4 (Linux permissions) refused `nobody`. Working as designed. Act as the owning user instead.
+
+**Error C**, on a Samba server after a user reports "access denied". `testparm` is clean, the user is in the passdb and the group, and the directory is `2770`:
+
+```text
+avc:  denied  { read } for  pid=4211 comm="smbd" … scontext=system_u:system_r:smbd_t:s0 tcontext=unconfined_u:object_r:default_t:s0 tclass=dir permissive=0
+```
+
+??? success "Answer C"
+    Locks 1 to 4 are confirmed open, and the AVC record names SELinux. That's **lock 5**: the directory wears `default_t`, not `samba_share_t`. Fix with `semanage fcontext -a -t samba_share_t "<path>(/.*)?"` and `restorecon -Rv <path>`, as you'll see in the Samba section.
+
+Notice the pattern: the further in the lock, the more of the setup already works. Use what works to rule out the outer locks quickly.
+
 ## NFS: how it works
 
 **NFS** (Network File System) was designed for Unix machines on a trusted network sharing the same set of users. By default (security mode `sec=sys`), the client sends the **numeric UID and GID** of the process making each request, and the server simply believes it. There is no password. The server's protection is choosing *which machines* may mount the export.
@@ -147,6 +239,28 @@ drwxrwsr-x. 2 alice devs 6 Oct 15 10:02 /mnt/projects
 ```
 
 Client root is now "nobody", which isn't alice and isn't in `devs`. This surprises everyone the first time.
+
+### Worked story: the files belong to the wrong person
+
+**Symptom.** alice mounts `/mnt/projects` on a new client. Her files show up owned by `bob`, and she gets "Permission denied" writing to a directory she owns on the server.
+
+**Evidence.** Compare numbers, not names. On the client, `id` shows who alice is:
+
+```console
+client$ id alice
+uid=1002(alice) gid=1002(alice) groups=1002(alice)
+```
+
+On the server, `ls -ln` shows the owners as numbers:
+
+```console
+server$ ls -ln /srv/nfs/projects
+-rw-rw-r--. 1 1001 2001 1840 Oct 15 10:02 report.txt
+```
+
+**Reasoning.** With `sec=sys`, the client sends UID 1002 and the server believes it (lock 2). The file is owned by UID 1001. On the client, UID 1001 happens to be bob, so `ls -l` there prints `bob`. Linux permissions (lock 4) then judge UID 1002, which isn't the owner.
+
+**Fix and check.** Make UIDs agree: give alice the same UID on every machine, or better, use a central directory (FreeIPA, AD or LDAP via SSSD). Then `ls -l /mnt/projects` on the client shows `alice`, and her write succeeds.
 
 ### Publishing exports
 
@@ -663,9 +777,14 @@ There are two "client software" choices, and picking the right one matters:
 
 Red Hat's guidance: if the machine runs Samba shares for AD users, use **winbind**, because `smbd` relies on features winbind provides. If the machine only needs AD logins, use **SSSD** (the default). After joining, `id 'AD\alice'` (winbind) or `id alice@ad.example.com` (SSSD) should show a domain user with a UID.
 
-The detail that bites later is **ID mapping**: AD identifies users by SIDs, Linux needs UIDs. Every Samba server in the domain must map each SID to the same UID, or files appear owned by the wrong people across servers. The `idmap config` lines in `smb.conf` control this. The Red Hat guide in Go deeper covers the choices (`rid`, `ad`, `autorid`).
+In the five-lock picture, joining AD replaces lock 2 (identity): users log in with their domain credentials instead of a local passdb entry. Locks 3 to 5 work exactly as before.
+
+??? question "Under the hood: ID mapping, the detail that bites later"
+    AD identifies users by SIDs, Linux needs UIDs. Every Samba server in the domain must map each SID to the same UID, or files appear owned by the wrong people across servers. The `idmap config` lines in `smb.conf` control this. The Red Hat guide in Go deeper covers the choices (`rid`, `ad`, `autorid`).
 
 ## Troubleshooting: the client can't access the share
+
+This decision tree walks the five locks in order, with the exact commands for each protocol.
 
 <div class="decision" markdown>
 
@@ -985,13 +1104,13 @@ These labs use one Rocky 10 VM as both server and client, connecting to `localho
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| NFS mount hangs forever | Server down or firewall dropping 2049; `hard` mount keeps retrying | Fix connectivity; use autofs or `nofail` for non-critical mounts |
-| "access denied by server while mounting" | Client not matched by `/etc/exports` | `exportfs -v`; check client IP and the space before `(` |
-| Files on NFS owned by the wrong user | UIDs differ between client and server | Central identity (IdM/AD via SSSD) or matching UIDs |
-| Root can't write on NFS | `root_squash` (default) | Expected. Use a normal user. |
+| NFS mount hangs forever | Lock 1: server down or firewall dropping 2049; `hard` mount keeps retrying | Fix connectivity; use autofs or `nofail` for non-critical mounts |
+| "access denied by server while mounting" | Lock 3: client not matched by `/etc/exports` | `exportfs -v`; check client IP and the space before `(` |
+| Files on NFS owned by the wrong user | Lock 2: UIDs differ between client and server | Central identity (IdM/AD via SSSD) or matching UIDs |
+| Root can't write on NFS | Lock 2: `root_squash` (default) | Expected. Use a normal user. |
 | `showmount -e` fails | `showmount` uses NFSv3 helpers, off on a v4-only server | Mount the server's `/` with NFSv4 and browse, or check `exportfs -v` on the server |
-| Samba login fails for a new user | No passdb entry | `smbpasswd -a user` |
-| Samba "access denied" though `smb.conf` looks right | Linux permissions or SELinux label | `ls -ld`, `ls -Zd`, `ausearch -m avc` |
+| Samba login fails for a new user | Lock 2: no passdb entry | `smbpasswd -a user` |
+| Samba "access denied" though `smb.conf` looks right | Lock 4 or 5: Linux permissions or SELinux label | `ls -ld`, `ls -Zd`, `ausearch -m avc` |
 | Edits to smb.conf seem ignored | Typo in a parameter name, silently skipped | `testparm -s` |
 | New files not editable by teammates | `create mask` default `0744` strips group write | `create mask = 0660`, setgid directory, `force group` |
 
@@ -1026,6 +1145,22 @@ These labs use one Rocky 10 VM as both server and client, connecting to `localho
 ## Flashcards
 
 <div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+Explain file sharing in one sentence.
+
+A share is a door with a row of locks: network (firewall), identity (NFS believes the client's UID, Samba makes you log in), share rules, Linux permissions as that user, and SELinux. Every lock must open; the first one that says no is the problem.
+
+</div>
+
+<div class="card" markdown>
+
+A mount or `smbclient` *times out*. Which lock, and which locks can you rule out?
+
+Lock 1, the network: firewall or a stopped service. Any answer at all (even "denied") means lock 1 is open and the problem is further in.
+
+</div>
 
 <div class="card" markdown>
 
@@ -1112,6 +1247,7 @@ winbind. SSSD is the default for machines that only need AD logins.
 ## Recap
 
 !!! recap "Key takeaways"
+    - File sharing in one sentence: every request must pass five locks in order (network, identity, share rules, Linux permissions, SELinux), and the first lock that says no is your problem.
     - NFS trusts the client's UID numbers (with `sec=sys`); access control is by client address in `/etc/exports`. UIDs must match across machines.
     - Prefer NFSv4 only: one port (2049), `vers3=n` in `/etc/nfs.conf`, firewalld service `nfs`.
     - `root_squash` (default) turns client root into `nobody`. That's a feature.

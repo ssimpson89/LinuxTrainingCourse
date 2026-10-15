@@ -19,6 +19,8 @@ a container by hand with ordinary Linux commands, then see that Podman is doing
 exactly the same thing, only faster and more safely.
 
 !!! abstract "What you'll learn"
+    - Explain a container in one sentence, and tell from a symptom which of
+      its four wrappers is involved.
     - Explain what a container really is: a normal process plus namespaces,
       cgroups, a filesystem image, and security restrictions.
     - Create and inspect namespaces with `unshare`, `lsns` and `nsenter`.
@@ -31,6 +33,14 @@ exactly the same thing, only faster and more safely.
     - Build an image from a `Containerfile` and copy images with `skopeo`.
 
 ## The big picture
+
+### Containers in one sentence
+
+Here is the whole idea:
+
+> **A container is an ordinary process wearing four wrappers: blinders (namespaces) for what it can see, a meter with a breaker (cgroups) for how much it can use, a borrowed root folder (the image) for what it finds at `/`, and a leash (security) for what it may do.**
+
+That's it. Podman, Quadlet and Buildah are tools that put the wrappers on for you.
 
 A **container** is not a thing the kernel knows about. There is no "container"
 object anywhere in Linux. A container is an ordinary process (the same kind you
@@ -141,6 +151,86 @@ flowchart TB
     H1 --> HW[Hardware]
     K2 --> HW
 ```
+
+### The good news: every container problem lives in one wrapper
+
+When a container misbehaves, ask which wrapper is involved. Each one has a typical symptom, a command that shows it from the host, and a usual fix.
+
+| Symptom | Wrapper | Look with | Usual fix |
+|---|---|---|---|
+| `Permission denied` or 403 on a bind mount, even with mode `777` | **Leash** (SELinux) | `sudo ausearch -m AVC -ts recent` | Add `:Z` (or `:z`) to the volume |
+| Killed for no visible reason, or slow at exactly its CPU limit | **Meter** (cgroups) | `memory.events`, `cpu.stat` in its cgroup | Raise `MemoryMax=` / `CPUQuota=`, or use `MemoryHigh=` and `CPUWeight=` |
+| Can't reach it, or it can't reach anything | **Blinders** (net namespace) | `sudo nsenter -t PID -n ss -tlnp` | Publish the port with `-p`; check what it listens on |
+| Files in a volume owned by odd UIDs like `524388` | **Blinders** (user namespace) | `podman unshare cat /proc/self/uid_map` | `podman unshare chown`, or `--userns=keep-id` |
+| Container exits immediately with status 0 | **The process itself** | `podman logs`, the image's `CMD` | Run the app in the foreground |
+| Changes vanish after `podman rm` | **Borrowed root** (image layers) | `podman diff N` | Keep data in a volume |
+
+And one process to find the wrapper:
+
+```mermaid
+flowchart TB
+    S["A container misbehaves"] --> A["1. Find its host PID<br/>with podman inspect"]
+    A --> B["2. Look at it from the host<br/>ps -Z, /proc/PID/cgroup, lsns -p, nsenter"]
+    B --> C{"3. Which wrapper?"}
+    C -- "AVC denial" --> F1["Leash: relabel with :Z"]
+    C -- "oom_kill or nr_throttled<br/>counter rising" --> F2["Meter: adjust the limit"]
+    C -- "Wrong ports, routes,<br/>or UIDs inside" --> F3["Blinders: fix -p,<br/>network or user mapping"]
+    C -- "Missing or lost files" --> F4["Borrowed root:<br/>use a volume"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **namespace** | A private view of one global resource (PIDs, network, hostname, mounts, users…). The blinders |
+| **cgroup** | A group of processes the kernel counts and limits together. The meter |
+| **image** | Read-only layers of files plus a default command. The borrowed root folder |
+| **overlayfs** | The filesystem that stacks image layers and adds a writable layer on top |
+| **rootless** | Containers run by a normal user, with "root" inside mapped to that user outside |
+| **subuid** | A block of spare host UIDs a user may map into containers (`/etc/subuid`) |
+| **`container_t`** | The SELinux badge every container process wears, plus unique categories |
+| **seccomp** / **capabilities** | A system call filter / root's powers split into pieces, most of them dropped |
+| **pod** | Containers that share a network namespace and reach each other on `localhost` |
+| **Quadlet** | A `.container` file that systemd turns into a real service |
+
+## Taking a container apart from the host
+
+This is the core skill. Because a container is just a process, everything about it is visible from the host with ordinary tools, even if the image has no shell or debugging tools at all. The template:
+
+> **"Find the PID. Then each wrapper has a place to look: `/proc/PID/ns` or `lsns` for the blinders, `/proc/PID/cgroup` for the meter, `ps -Z` for the leash, `podman diff` for the borrowed root."**
+
+```console
+$ PID=$(podman inspect -f '{{.State.Pid}}' web)
+$ cat /proc/$PID/cgroup
+0::/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-3f2a…e1.scope/container
+$ ps -eZ | grep nginx
+system_u:system_r:container_t:s0:c214,c739 4120 ? 00:00:00 nginx
+```
+
+You'll practise the full sequence in the "Take a container apart" exercise further down. First, practise reading the evidence.
+
+### Practise: which wrapper is it?
+
+**Case A.** A rootless nginx container serves `~/site` and returns 403. You find:
+
+```text
+denied  { read } for  pid=4410 comm="nginx" name="index.html" … scontext=system_u:system_r:container_t:s0:c51,c902 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
+```
+
+??? success "Answer A"
+    **The leash (SELinux).** "`container_t` was denied read on a file wearing `user_home_t`." Unix permissions were never the problem. Re-run with `-v ~/site:/usr/share/nginx/html:Z` so Podman relabels the directory `container_file_t` with this container's categories. See "Volumes and the :Z suffix".
+
+**Case B.** A service with `CPUQuota=50%` on a 4-CPU machine sits at exactly 50% in `top` and feels slow.
+
+??? success "Answer B"
+    **The meter (cgroups).** `CPUQuota=50%` is half of *one* CPU, and a process pinned at exactly its quota is almost always being throttled. Confirm by watching `nr_throttled` grow in the cgroup's `cpu.stat`, then raise the quota or switch to `CPUWeight=`. See "cgroups v2".
+
+**Case C.** Inside a rootless container, files look owned by `nginx` (UID 101). On the host, `ls -ln` shows the same volume's files owned by UID `524388`.
+
+??? success "Answer C"
+    **The blinders (user namespace).** With alice's mapping (container UID 0 is host UID 1000, and container UIDs from 1 map onto host UIDs from 524288), container UID 101 is host UID 524288 + 101 - 1 = 524388. Nothing is broken; it's the mapping doing its job. Use `podman unshare chown` to fix ownership from your side, or `--userns=keep-id` to map your own UID straight through. See "Rootless containers".
+
+Notice the pattern. A **denial in the audit log** is the leash. A **limit or counter in the cgroup** is the meter. **Different IDs, ports or interfaces inside and outside** are the blinders.
 
 ## Namespaces: private views of a shared system
 
@@ -421,20 +511,22 @@ system.slice/sshd.service                    1    0.0     4.1M        -        -
 ### The control files
 
 Inside each cgroup directory are files you read for stats and write for
-limits. The ones you will use most:
+limits. The two you'll check most when debugging are `memory.events` (look
+for the `oom_kill` counter) and `cpu.stat` (look at `nr_throttled`).
 
-| File | Meaning |
-|------|---------|
-| `cgroup.procs` | PIDs in this group (write a PID here to move it) |
-| `memory.current` | Memory in use right now, in bytes |
-| `memory.max` | Hard limit; the kernel OOM-kills inside the group above this |
-| `memory.high` | Soft limit; the kernel slows the group down and reclaims memory |
-| `memory.events` | Counters, including `oom_kill` |
-| `cpu.max` | `quota period` in microseconds; `50000 100000` means half a CPU |
-| `cpu.weight` | Relative share when CPUs are contended (default 100) |
-| `cpu.stat` | Usage and `nr_throttled` / `throttled_usec` |
-| `pids.max` | Maximum number of processes (stops fork bombs) |
-| `io.max` | Per-device bandwidth and IOPS caps |
+??? question "Reference: the cgroup control files"
+    | File | Meaning |
+    |------|---------|
+    | `cgroup.procs` | PIDs in this group (write a PID here to move it) |
+    | `memory.current` | Memory in use right now, in bytes |
+    | `memory.max` | Hard limit; the kernel OOM-kills inside the group above this |
+    | `memory.high` | Soft limit; the kernel slows the group down and reclaims memory |
+    | `memory.events` | Counters, including `oom_kill` |
+    | `cpu.max` | `quota period` in microseconds; `50000 100000` means half a CPU |
+    | `cpu.weight` | Relative share when CPUs are contended (default 100) |
+    | `cpu.stat` | Usage and `nr_throttled` / `throttled_usec` |
+    | `pids.max` | Maximum number of processes (stops fork bombs) |
+    | `io.max` | Per-device bandwidth and IOPS caps |
 
 ### Setting limits the systemd way
 
@@ -831,8 +923,9 @@ A **volume** is a directory from outside the container mounted into it, so
 data survives the container. Podman has named volumes (`podman volume create
 data`, stored under its storage directory) and bind mounts of any host path.
 
-Here is the classic surprise. You bind-mount a directory and the container
-gets `Permission denied`, even with mode `777`:
+Here is the classic surprise, told as a story. **Symptom:** you bind-mount a
+directory and the container gets `Permission denied`, even with mode `777`.
+**Evidence:**
 
 ```console
 $ mkdir ~/site && echo hello > ~/site/index.html
@@ -843,9 +936,11 @@ $ sudo ausearch -m AVC -ts recent | grep -o 'denied.*' | head -1
 denied  { read } for  pid=4410 comm="nginx" name="index.html" … scontext=system_u:system_r:container_t:s0:c51,c902 tcontext=unconfined_u:object_r:user_home_t:s0 tclass=file permissive=0
 ```
 
-SELinux (from [16 · SELinux](16-selinux.md)) blocks `container_t` from reading
-`user_home_t` files. Unix permissions were never the problem. Add a suffix and
-Podman relabels the directory for you:
+**Reasoning:** say the denial as a sentence: "`container_t` was denied read
+on a file wearing `user_home_t`." That's the leash, not the file mode. SELinux
+(from [16 · SELinux](16-selinux.md)) blocks `container_t` from reading
+`user_home_t` files. Unix permissions were never the problem. **Fix:** add a
+suffix and Podman relabels the directory for you:
 
 | Suffix | Effect | Use when |
 |--------|--------|----------|
@@ -860,6 +955,9 @@ hello
 $ ls -Z ~/site/index.html
 system_u:object_r:container_file_t:s0:c87,c612 /home/alice/site/index.html
 ```
+
+**Check:** `curl` returns the page, and the file now wears `container_file_t`
+with this container's categories.
 
 !!! danger "Never use :Z on system directories"
     `-v /home:/home:Z` or `-v /etc:/etc:Z` relabels the host's files with a
@@ -1393,6 +1491,22 @@ to stay in the foreground.
 
 <div class="card" markdown>
 
+Explain a container in one sentence.
+
+An ordinary process wearing four wrappers: blinders (namespaces) for what it sees, a meter (cgroups) for what it uses, a borrowed root folder (the image) for what is at `/`, and a leash (security) for what it may do.
+
+</div>
+
+<div class="card" markdown>
+
+A container misbehaves. How do you find which wrapper is involved?
+
+Get its host PID (`podman inspect -f '{{.State.Pid}}' N`), then look from the host: an AVC denial means the leash, `oom_kill` or `nr_throttled` in its cgroup means the meter, different ports or UIDs inside means the blinders, lost files means the image layer.
+
+</div>
+
+<div class="card" markdown>
+
 What four building blocks make up a container?
 
 Namespaces (what it sees), cgroups (what it uses), a filesystem image (what is at `/`), and security restrictions: SELinux, seccomp and capabilities (what it may do).
@@ -1460,6 +1574,10 @@ They live in the container's writable overlayfs upper layer, which is deleted wi
 ## Recap
 
 !!! recap "Key takeaways"
+    - Containers in one sentence: an ordinary process wearing blinders
+      (namespaces), a meter (cgroups), a borrowed root folder (the image) and
+      a leash (security). Debug by finding its PID and asking which wrapper
+      is involved.
     - A container is a normal process with namespaces (what it sees), cgroups
       (what it uses), an image (what is at `/`) and security restrictions
       (what it may do). The kernel is shared.

@@ -14,6 +14,8 @@ description: Turn a default Rocky Linux install into a hardened server, layer by
 A new server goes on the internet at 10:00. By 10:05 its SSH port is being hammered by password-guessing bots, and by next week a critical OpenSSL advisory will be published. Security is not one setting you switch on; it is a set of small, boring, verifiable habits stacked on top of each other. In this module you will build that stack on Rocky Linux 10 and, just as important, learn how to *prove* each layer is doing its job.
 
 !!! abstract "What you'll learn"
+    - Explain hardening in one sentence: independent locks, each with a command that proves it's on.
+    - Read a proof command's output and tell whether a control really works, and what overrides it if not.
     - Explain defense in depth and map Rocky's security tools onto it.
     - Find and apply security updates by advisory (`RLSA`) and severity, and automate them.
     - Harden SSH with keys and drop-in config, and verify the effective settings.
@@ -23,6 +25,18 @@ A new server goes on the internet at 10:00. By 10:05 its SSH port is being hamme
     - Scan a system against a CIS or STIG profile with OpenSCAP, and know when fapolicyd and USBGuard help.
 
 ## The big picture
+
+### Hardening in one sentence
+
+Here is the whole idea:
+
+> **Stack small, independent locks so an attacker has to beat all of them, and for every lock, run the one command that proves it's really on.**
+
+Everything in this module is either a lock or a proof.
+
+- A **lock** (a **control**) is one setting or tool that blocks or limits something: a closed port, key-only SSH, a patched library, SELinux.
+- A **proof** is the command that shows the lock is actually working on *this* machine right now: `ss -tulpn`, `sshd -T`, `dnf needs-restarting`, `getenforce`. A lock you set but never proved is a guess.
+- **Watchers** (auditd and AIDE) are a special kind of lock: they don't block anything, they tell you when something got through or changed.
 
 No single control stops every attack. A firewall does not help once an attacker has a valid password; SELinux does not help if you never install the patch for a remote exploit. **Defense in depth** means stacking independent layers so that each one catches what the others miss, and an attacker must beat *all* of them.
 
@@ -95,6 +109,95 @@ Click through the layers to see which Rocky tool covers each one and where this 
 </div>
 
 </div>
+
+### The few locks that stop most attacks
+
+You can spend weeks on hardening. These five locks, with their proofs, stop the large majority of real attacks on a Linux server. Do them first.
+
+| Lock | Why it matters | The change | The proof |
+|---|---|---|---|
+| **1. Fewer doors** | Every listening service is something to attack | Disable and remove what the server doesn't need | `sudo ss -tulpn` shows only intended ports |
+| **2. Patched** | Most compromises use known holes that already have a fix | `sudo dnf upgrade --security`, then `dnf-automatic` | `dnf updateinfo list --security` is empty and `dnf needs-restarting -r` says no reboot is needed |
+| **3. Keys, not passwords** | Bots guess passwords all day | `/etc/ssh/sshd_config.d/10-hardening.conf` with `PasswordAuthentication no`, `PermitRootLogin no` | `sudo sshd -T` shows `passwordauthentication no` and `permitrootlogin no` |
+| **4. Contained** | A hijacked service should stay stuck in its own room | SELinux enforcing, narrow sudo rules | `getenforce` prints `Enforcing`; `sudo -l -U <user>` shows only what you meant |
+| **5. Watched** | You need to know when something got through | Audit rules and an AIDE baseline | `sudo auditctl -l` lists your rules; `sudo aide --check` runs clean |
+
+And one loop for every control in the module:
+
+```mermaid
+flowchart TB
+    A["Pick a lock<br/>(from the table or a benchmark)"] --> B["Change it the supported way<br/>(drop-in file, tool, not the packaged file)"]
+    B --> C["Run its proof command"]
+    C --> D{"Does the proof show<br/>the lock is on?"}
+    D -- "Yes" --> E["Save the output as evidence.<br/>Next lock."]
+    D -- "No" --> F["Something else wins<br/>(earlier drop-in, old process,<br/>another tool). Find it."]
+    F --> B
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **control** | One lock: a setting or tool that blocks, limits or records something |
+| **defense in depth** | Stacking independent controls so one failing doesn't expose everything |
+| **attack surface** | Everything an attacker can reach: open ports, installed software, accounts |
+| **CVE** | A public, numbered vulnerability, like `CVE-2026-12345` |
+| **RLSA** | A Rocky Linux Security Advisory: an update that fixes one or more CVEs |
+| **drop-in** | A small config file in a `.d/` directory that adds to or overrides the main config |
+| **effective configuration** | What a program actually uses after merging all its files. The thing to prove |
+| **crypto policy** | One system-wide setting that decides which encryption algorithms every library allows |
+| **auid** | The audit UID: who originally logged in, even after `sudo` |
+| **baseline** | A saved snapshot of "how it looked when it was good", used by AIDE |
+| **profile** / **benchmark** | A published list of required settings (CIS, STIG) that OpenSCAP checks |
+
+## Proving a control: read the proof, not the config file
+
+This is the core skill of the module. A config file tells you what someone *asked for*. A proof command tells you what the system is *actually doing*. They often differ, because another file wins, a process is still running old code, or a tool overrode your setting.
+
+The template is the same every time:
+
+> **"I set `<lock>`. The proof command `<command>` says `<value>`. Is that what I set? If not, what else is winning?"**
+
+### Practise: is the lock really on?
+
+Each case shows a lock someone set and the output of its proof. Decide whether the lock works before opening the answer.
+
+**Case A.** You installed the OpenSSL security update an hour ago.
+
+```console
+$ sudo dnf needs-restarting -s
+sshd.service
+httpd.service
+```
+
+??? success "Answer A"
+    **Not yet.** The new library is on disk, but `sshd` and `httpd` still have the old one loaded in memory. Until you restart them, they are as vulnerable as before the update. Restart those services (and reboot if `-r` says the kernel changed). See "Keeping patched".
+
+**Case B.** You wrote `/etc/ssh/sshd_config.d/90-hardening.conf` with `PermitRootLogin no` and reloaded sshd.
+
+```console
+$ ls /etc/ssh/sshd_config.d/
+01-permitrootlogin.conf  50-redhat.conf  90-hardening.conf
+$ sudo sshd -T | grep '^permitrootlogin '
+permitrootlogin yes
+```
+
+??? success "Answer B"
+    **No.** Drop-ins are read in alphabetical order and, for most options, the first value wins. `01-permitrootlogin.conf` sorts first and says `yes`. Rename yours to sort earlier (`00-` or `10-`, and remove the old file), reload, and run `sshd -T` again. See "SSH hardening".
+
+**Case C.** You're on Rocky 10.1 with the `DEFAULT` crypto policy and want to know whether SSH prefers post-quantum key exchange.
+
+```console
+$ update-crypto-policies --show
+DEFAULT
+$ ssh -G localhost | grep '^kexalgorithms'
+kexalgorithms mlkem768x25519-sha256,curve25519-sha256,curve25519-sha256@libssh.org,…
+```
+
+??? success "Answer C"
+    **Yes.** The policy is `DEFAULT`, and the first key exchange offered is the hybrid post-quantum `mlkem768x25519-sha256`. Nothing is overriding the policy. See "System-wide crypto policies".
+
+Notice the pattern. When a proof disagrees with what you set, the cause is almost always one of three things: **another file wins** (drop-in order), **old code is still running** (restart or reboot), or **another tool set it** (tuned, a compliance remediation, a second timer). Look for those before assuming the setting itself is broken.
 
 ## Start small: minimal installs and unused services
 
@@ -420,6 +523,23 @@ Status for the jail: sshd
 
 If SSH allows keys only, password guessing against SSH simply fails, and fail2ban becomes mostly log-noise reduction. Disabling passwords is the real fix.
 
+### Example: a real user keeps getting locked out
+
+- **Symptom:** Bob can't log in to the console. He swears he typed his password correctly.
+- **Evidence:**
+
+    ```console
+    $ sudo faillock --user bob
+    bob:
+    When                Type  Source                                           Valid
+    2026-10-15 11:10:02 RHOST 203.0.113.50                                         V
+    2026-10-15 11:10:09 RHOST 203.0.113.50                                         V
+    ```
+
+- **Reasoning:** the failures came from a remote host (`RHOST 203.0.113.50`), not from Bob at the console. Someone on the network is guessing Bob's password over SSH, and faillock is doing its job by locking the *account*. That's the risk in the table: an attacker can lock out a real user on purpose. The lock that's missing is lock 3: SSH still accepts passwords.
+- **Fix:** unlock Bob with `sudo faillock --user bob --reset`, then set `PasswordAuthentication no` in your SSH drop-in so remote guesses can't count against the account at all. If the noise bothers you, add fail2ban to ban the address.
+- **Check:** `sudo sshd -T | grep '^passwordauthentication '` prints `passwordauthentication no`, and `sudo faillock --user bob` stays empty.
+
 ## System-wide crypto policies
 
 Dozens of programs do cryptography: OpenSSH, OpenSSL (used by `curl`, `httpd`, Python), GnuTLS, NSS, Kerberos, Java. Configuring allowed algorithms in each one separately would be error-prone. Rocky solves this with **system-wide cryptographic policies**: you pick one policy level, and `update-crypto-policies` writes a matching config file for every library into `/etc/crypto-policies/back-ends/`.
@@ -666,16 +786,17 @@ $ sudo fapolicyd-cli --update
 
 Locally built or vendor tools outside RPM must be added to the trust database, as shown. Test in permissive mode (`permissive = 1` in `/etc/fapolicyd/fapolicyd.conf`) before enforcing it on a production host.
 
-**USBGuard** blocks USB devices that are not on an allow list, protecting physical machines from rogue keyboards and storage sticks.
+**USBGuard** blocks USB devices that are not on an allow list, protecting physical machines from rogue keyboards and storage sticks. Most VMs and cloud servers don't need it.
 
-```console
-$ sudo dnf install -y usbguard
-$ sudo sh -c 'usbguard generate-policy > /etc/usbguard/rules.conf'
-$ sudo systemctl enable --now usbguard
-$ sudo usbguard list-devices
-```
+??? question "For physical machines: setting up USBGuard"
+    ```console
+    $ sudo dnf install -y usbguard
+    $ sudo sh -c 'usbguard generate-policy > /etc/usbguard/rules.conf'
+    $ sudo systemctl enable --now usbguard
+    $ sudo usbguard list-devices
+    ```
 
-Generate the policy *before* starting the service, while your keyboard is plugged in, or you may block it.
+    Generate the policy *before* starting the service, while your keyboard is plugged in, or you may block it.
 
 ## systemd sandboxing: hardening one service at a time
 
@@ -1121,6 +1242,22 @@ maxauthtries 3
 
 <div class="card" markdown>
 
+Explain hardening in one sentence.
+
+Stack small, independent locks so an attacker has to beat all of them, and for every lock, run the one command that proves it's really on.
+
+</div>
+
+<div class="card" markdown>
+
+A proof command disagrees with the setting you wrote. What are the three usual causes?
+
+Another file wins (drop-in order), old code is still running (restart or reboot), or another tool set it (tuned, a compliance remediation, a second timer).
+
+</div>
+
+<div class="card" markdown>
+
 What is defense in depth?
 
 Stacking independent security layers (network, authentication, privilege, patching, containment, detection) so an attacker must defeat all of them, and a failure in one is caught by another.
@@ -1204,6 +1341,7 @@ What do OpenSCAP and the SCAP Security Guide each provide?
 ## Recap
 
 !!! recap "Key takeaways"
+    - Hardening in one sentence: stack small, independent locks, and prove each one with its command (`ss -tulpn`, `sshd -T`, `needs-restarting`, `getenforce`, `auditctl -l`). A lock you never proved is a guess.
     - Security is layers: expose little, authenticate strongly, grant little, patch fast, contain damage, detect changes, and verify all of it.
     - Patch by advisory with `dnf updateinfo` and `dnf upgrade --security`, automate with `dnf-automatic`, and restart what `needs-restarting` reports.
     - SSH: Ed25519 keys, no root login, no passwords, settings in an early-sorting drop-in, proven with `sshd -T`.

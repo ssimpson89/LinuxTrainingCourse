@@ -24,6 +24,14 @@ Your database volume is 95% full and the business won't accept downtime. With pl
 
 ## The big picture
 
+### Three tools in one sentence
+
+Here is the whole idea:
+
+> **Each tool takes disks in and hands one new disk out. LVM pools disks so volumes can grow, RAID copies data across disks so one can die, and LUKS scrambles a disk so a thief reads only noise. Because each one outputs "a disk", you can stack them like bricks.**
+
+Everything else in this module is detail around that sentence: **pool, copy, scramble, stack**.
+
 In [Module 09](09-disks-and-filesystems.md) a filesystem sat directly on a partition. That's rigid: the filesystem can never be bigger than its partition, and the partition can't grow into space owned by its neighbour. The fix is to put a **virtualization layer** between disks and filesystems. Linux has one built in, called **device-mapper**, and three popular tools drive it or sit beside it.
 
 ```mermaid
@@ -43,6 +51,98 @@ flowchart TB
 
 Each layer takes one or more block devices and presents a new block device. The layer above can't tell the difference. That's what makes them stackable: you can encrypt a RAID array and carve it into LVM volumes, and the filesystem on top just sees "a disk".
 
+### Which tool solves which problem
+
+Pick the tool by the problem you have. Most real storage needs are one of these three.
+
+| The problem | The tool | What you get | The command to remember |
+|---|---|---|---|
+| **"This volume is full and I can't take it offline"** | **LVM** (pool) | Volumes that grow online, across several disks | `lvextend -r -L +3G /dev/data/app` |
+| **"If a disk dies, the server must keep running"** | **md RAID** (copy) | An array that survives a failed disk | `mdadm --create /dev/md0 --level=1 …`, then watch `/proc/mdstat` |
+| **"If this disk is stolen, nobody may read it"** | **LUKS** (scramble) | Data that is unreadable without a passphrase or key | `cryptsetup luksFormat`, then `cryptsetup open` |
+
+```mermaid
+flowchart TB
+    S["What do you need from<br/>this storage?"] --> Q1{"Room to grow<br/>without downtime?"}
+    Q1 -- "Yes" --> L["LVM"]
+    S --> Q2{"Survive a<br/>dead disk?"}
+    Q2 -- "Yes" --> R["RAID (mdadm)"]
+    S --> Q3{"Unreadable if<br/>stolen?"}
+    Q3 -- "Yes" --> C["LUKS"]
+    L --> ST["Need more than one?<br/>Stack them, bottom up:<br/>RAID, then LUKS, then LVM"]
+    R --> ST
+    C --> ST
+```
+
+The questions aren't either/or. A database server often answers yes to all three, which is what [Stacking it all together](#stacking-it-all-together) shows.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **PV** (physical volume) | A disk or partition handed to LVM |
+| **VG** (volume group) | LVM's pool of space, made from one or more PVs |
+| **LV** (logical volume) | A slice of the pool that acts like a partition. You put a filesystem on it |
+| **extent** | The fixed-size chunk (4 MiB by default) LVM builds every LV from |
+| **snapshot** | A frozen view of an LV at one moment |
+| **thin pool** | An LVM pool that hands out space only when it's written, so you can promise more than you have |
+| **device-mapper** | The kernel engine under LVM and LUKS. It makes new block devices from rules |
+| **RAID level** | How RAID spreads data: 0 (stripe), 1 (mirror), 5/6 (parity), 10 (mirror + stripe) |
+| **resync** / **rebuild** | RAID copying data so every disk matches, after creation / after a disk is replaced |
+| **LUKS header** | The area at the start of an encrypted disk that holds the locked keyslots |
+| **keyslot** | One locked copy of the volume key, opened by one passphrase or key file |
+| **crypttab** | `/etc/crypttab`, the list of encrypted devices to unlock at boot |
+
+### Practise: read the stack from `lsblk`
+
+The core skill in this module is looking at a machine and seeing which bricks it's built from. `lsblk` shows them in its `TYPE` column: `disk` and `part` are real, `raid1` is md RAID, `crypt` is LUKS, `lvm` is an LVM logical volume. Read the tree from the top down, and each indent is one brick sitting on the one above it.
+
+> **Read each line as "this `TYPE` sits on the line above it". The brick you need to touch is the one whose job matches your problem.**
+
+**Machine A:** `/` is full. Which brick do you work on, and is there room?
+
+```console
+$ lsblk -o NAME,TYPE,SIZE,MOUNTPOINTS /dev/vda
+NAME        TYPE  SIZE MOUNTPOINTS
+vda         disk   40G
+├─vda1      part  600M /boot/efi
+├─vda2      part    1G /boot
+└─vda3      part 38.4G
+  ├─rl-root lvm  34.4G /
+  └─rl-swap lvm     4G [SWAP]
+$ sudo vgs
+  VG #PV #LV #SN Attr   VSize   VFree
+  rl   1   2   0 wz--n- <38.41g    0
+```
+
+??? success "Answer A"
+    `/` is `rl-root`, `TYPE lvm`, so it's an LVM logical volume and the brick to touch is LVM. But `vgs` shows `VFree 0`: the pool is empty. You can't `lvextend` yet. Add a disk to the pool first (`pvcreate` + `vgextend rl`), then `lvextend -r`. That's exactly the [Add a disk to the pool](#add-a-disk-to-the-pool) flow.
+
+**Machine B:** you're asked to add a new `/srv/logs` volume. Will it be encrypted? Will it survive a disk failure?
+
+```console
+$ lsblk -o NAME,TYPE,SIZE,MOUNTPOINTS /dev/vdb
+NAME               TYPE   SIZE MOUNTPOINTS
+vdb                disk    20G
+└─md0              raid1   20G
+  └─cryptraid      crypt   20G
+    ├─vault-db     lvm     12G /var/lib/pgsql
+    └─vault-files  lvm      6G /srv/files
+```
+
+??? success "Answer B"
+    Yes to both. Read upwards from the LVs: they sit on `cryptraid` (`crypt`, LUKS), which sits on `md0` (`raid1`, a mirror). A new LV created in the `vault` VG lands on the same stack, so it's mirrored and encrypted automatically. You only touch the LVM brick: `lvcreate -n logs -L 1G vault`.
+
+**Machine C:** monitoring says "RAID degraded". What does this mean, and is data lost?
+
+```text
+md0 : active raid1 vdb[0]
+      10476544 blocks super 1.2 [2/1] [U_]
+```
+
+??? success "Answer C"
+    `[2/1]` means two devices expected, one present. `[U_]` means the first is **U**p and the second is missing. The array is **degraded**: still working, data intact, but with no safety net. Nothing is lost yet. Replace the dead disk (`--fail`, `--remove`, `--add`, as in Lab 3) before a second one fails.
+
 ## LVM: the core idea
 
 **LVM** (Logical Volume Manager) has three building blocks:
@@ -51,7 +151,8 @@ Each layer takes one or more block devices and presents a new block device. The 
 - A **volume group (VG)** is a pool of storage made from one or more PVs. It's one big bucket of space.
 - A **logical volume (LV)** is a slice of the pool that acts like a partition. You put a filesystem on it.
 
-Under the hood, LVM cuts every PV into fixed-size chunks called **physical extents** (4 MiB by default). An LV is just a list of extents, which can come from any PV in the group, in any order. Growing an LV means adding extents to the list.
+??? question "Under the hood: extents, the unit LVM counts in"
+    LVM cuts every PV into fixed-size chunks called **physical extents** (4 MiB by default). An LV is just a list of extents, which can come from any PV in the group, in any order. Growing an LV means adding extents to the list. That's why `lvextend` output reports sizes in extents as well as GiB, and why `-l` takes an extent count.
 
 ```mermaid
 flowchart BT
@@ -126,6 +227,8 @@ $ sudo mkdir -p /srv/app && sudo mount /dev/data/app /srv/app
 `-L 5G` gives an exact size. `-l` takes extents or percentages instead: `-l 100%FREE` uses everything left in the VG, `-l 50%VG` uses half the group.
 
 ### Grow a volume while it's in use
+
+**The story:** the app volume at `/srv/app` is filling up and the app can't stop. `df -h /srv/app` shows 5 GiB, nearly used. The VG has free space. The fix is one command.
 
 Growing is two steps: make the LV bigger, then make the filesystem fill it. The `-r` (`--resizefs`) flag does both in one go, calling `xfs_growfs` or `resize2fs` for you:
 
@@ -388,6 +491,8 @@ Right. The snapshot only had 2 GB to store old blocks. Once full, it's invalidat
 
 ## Device-mapper: the engine underneath
 
+This is the "how" behind "each tool hands one new disk out". You don't need it day to day, but it's the ground truth when tools disagree.
+
 LVM is a set of user-space tools. The kernel doesn't know what a "volume group" is. What it knows is **device-mapper (dm)**: a generic kernel framework that creates virtual block devices from a **table** of rules like "sectors 0 to 1,000,000 of this device go to sectors 2,048 onwards of `/dev/vda3`".
 
 Each kind of rule is a **target**: `linear` (plain mapping, used by most LVs), `striped`, `snapshot`, `thin`, `raid`, and `crypt` (encryption, used by LUKS). LVM and cryptsetup are just friendly front-ends that write these tables for you.
@@ -416,6 +521,8 @@ vda         disk   40G
 ```
 
 ## Software RAID with mdadm
+
+This is the **copy** brick.
 
 **RAID** (Redundant Array of Independent Disks) combines several disks so that the array survives a disk failure, gets faster, or both. Linux has software RAID built in, called **md** (multiple devices), managed with `mdadm`. Arrays appear as `/dev/md0`, `/dev/md/name`, and so on.
 
@@ -500,6 +607,8 @@ $ sudo mount /dev/stratis/pool1/fs1 /mnt
 It's convenient for simple setups, but LVM is far more common in the wild, so this course focuses on LVM. If you put a Stratis filesystem in fstab, add `x-systemd.requires=stratis-fstab-setup@POOL_UUID.service` to the options (the pool UUID comes from `stratis pool list`).
 
 ## Encryption with LUKS2
+
+This is the **scramble** brick.
 
 A stolen laptop, a decommissioned disk sent for recycling, a cloud volume snapshot copied by the wrong person: all of these leak data unless it's encrypted **at rest** (while stored). Linux does this at the block layer with **dm-crypt**, the device-mapper `crypt` target. **LUKS** (Linux Unified Key Setup) is the standard on-disk format that stores how the data is encrypted and who may unlock it. Rocky uses **LUKS2**, managed with `cryptsetup`.
 
@@ -957,6 +1066,22 @@ Every lab creates image files in `/var/tmp`, attaches them as loop devices, and 
 
 <div class="card" markdown>
 
+LVM, RAID and LUKS in one sentence?
+
+Each takes disks in and hands one new disk out: LVM pools so volumes can grow, RAID copies so a disk can die, LUKS scrambles so a thief reads noise. Because each outputs a disk, they stack.
+
+</div>
+
+<div class="card" markdown>
+
+In `lsblk`, what do `TYPE` values `lvm`, `raid1` and `crypt` tell you?
+
+`lvm` is an LVM logical volume, `raid1` is an md RAID mirror, `crypt` is an open LUKS device. Each line sits on the line above it in the tree.
+
+</div>
+
+<div class="card" markdown>
+
 PV, VG, LV in one line each?
 
 PV: a disk or partition given to LVM. VG: a pool built from PVs. LV: a slice of the pool used like a partition.
@@ -1040,6 +1165,7 @@ Which file unlocks encrypted volumes at boot?
 ## Recap
 
 !!! recap "Key takeaways"
+    - The one idea: LVM (pool), RAID (copy) and LUKS (scramble) each take disks in and hand one disk out, so they stack. Read the stack from the `TYPE` column of `lsblk`.
     - LVM pools disks (PVs) into volume groups and carves them into logical volumes made of 4 MiB extents.
     - Rocky installs onto LVM by default: VG `rl`, LVs `root`, `swap`, and sometimes `home`.
     - Grow online with `lvextend -r`; add disks with `pvcreate` + `vgextend`. Shrink only ext4, only with `-r`.

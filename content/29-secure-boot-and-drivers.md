@@ -36,13 +36,108 @@ flowchart LR
     MOK -.-> K
 ```
 
-Three ideas carry the whole module:
+### Secure Boot in one sentence
+
+Here is the whole idea:
+
+> **Each stage of the boot checks the signature on the next stage before running it, all the way down to every kernel module. Code signed by a key on a trusted list runs; anything else is refused. The MOK list is the one trusted list you can add your own key to.**
+
+Everything else in this module is detail around that sentence. Unpacked, it's three ideas:
 
 1. **Firmware trusts Microsoft, not Rocky.** PC vendors ship firmware that trusts Microsoft's certificates. Rocky gets in the door with **shim**, a tiny boot loader that Microsoft signs once after review.
 2. **Shim carries Rocky's certificate.** From shim onward, Rocky's own key vouches for GRUB, the kernel and every module Rocky ships.
 3. **You can add your own key.** The **MOK list** is a key database *you* control. Enroll a key there and anything you sign with it (a driver you compiled, a DKMS-built NVIDIA module) is as trusted as Rocky's own code.
 
 The "disable Secure Boot" advice skips step 3. The rest of this module is about doing step 3 properly.
+
+### The good news: three answers cover almost every driver problem
+
+When a third-party driver won't load under Secure Boot, the kernel log almost always says one of three things, and each has one fix.
+
+| What `dmesg` says | In chain-of-trust terms | The fix |
+|---|---|---|
+| **`Loading of unsigned module is rejected`** | Nobody signed the module | Sign it: let DKMS sign it, or run `sign-file` yourself |
+| **`Loading of module with unavailable key is rejected`** | It's signed, but the key isn't on any trusted list | Add the key to the MOK list: `mokutil --import`, reboot, confirm at the console |
+| **No error, but the driver isn't working** | Trust is fine. The module wasn't built for this kernel, or another driver got there first | `dkms status`, install `kernel-devel-matched`, or blacklist nouveau |
+
+And one short process to pick the row:
+
+```mermaid
+flowchart TB
+    S["Driver doesn't work"] --> A["1. mokutil --sb-state<br/>Is Secure Boot enforcing?"]
+    A --> B["2. sudo modprobe the module<br/>then sudo dmesg | tail"]
+    B --> C{"3. What does the log say?"}
+    C -- "unsigned module<br/>is rejected" --> F1["Sign it<br/>(DKMS or sign-file)"]
+    C -- "unavailable key<br/>is rejected" --> F2["Enroll the key<br/>mokutil --import"]
+    C -- "no rejection" --> F3["Build or conflict:<br/>dkms status, nouveau"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **signature** | A cryptographic stamp proving who built a file and that it hasn't changed since |
+| **chain of trust** | Each stage checks the next before running it |
+| **PK**, **KEK**, **db**, **dbx** | The firmware's key lists: the owner's key, the keys allowed to update the lists, the allow list, the deny list |
+| **shim** | A tiny Microsoft-signed boot loader that carries Rocky's certificate and checks everything after it |
+| **MOK** | Machine Owner Key: a key *you* enroll in shim's own list |
+| **MokManager** | The blue pre-boot screen where a person at the console approves a MOK enrollment |
+| **lockdown** | Kernel mode that stops even root from changing the running kernel, including loading unsigned modules |
+| **out-of-tree module** | A driver that doesn't ship with the kernel package (NVIDIA, ZFS, your own code) |
+| **DKMS** / **kmod** / **akmods** | Three ways to get an out-of-tree module built for your kernel |
+| **tainted** | The kernel's flag for "I'm running code my vendor didn't build" |
+
+## Reading a rejection: which link broke?
+
+This is the most useful skill in the module. Whenever a driver fails under Secure Boot, turn the kernel log into one sentence:
+
+> **"The kernel refused `<module>` because `<nobody signed it | it's signed by a key I don't trust>`."**
+
+You need two commands, run right after the failure:
+
+```console
+$ mokutil --sb-state
+SecureBoot enabled
+$ sudo modprobe nvidia
+modprobe: ERROR: could not insert 'nvidia': Key was rejected by service
+$ sudo dmesg | tail -1
+[ 1204.551203] Loading of module with unavailable key is rejected
+```
+
+The `modprobe` error, `Key was rejected by service`, is the same for both kinds of rejection, so it doesn't tell you much. The `dmesg` line does. Here it says "unavailable key": the module *is* signed, by a key the kernel doesn't trust. The fix is to enroll that key, not to rebuild anything.
+
+### Practise: read three kernel messages
+
+Say the sentence and pick the fix before opening each answer.
+
+**Message A**, right after a hand-built `insmod ./hello.ko`:
+
+```text
+[  412.118202] Loading of unsigned module is rejected
+```
+
+??? success "Answer A"
+    "The kernel refused `hello.ko` because nobody signed it." Enrolling a key won't help yet, because there's no signature to check. Sign the module with `sign-file` (and a key you enroll), as in "Signing a module yourself" below.
+
+**Message B**, on a machine where `mokutil --sb-state` says `SecureBoot disabled`:
+
+```text
+module verification failed: signature and/or required key missing - tainting kernel
+```
+
+??? success "Answer B"
+    This isn't a rejection at all. Secure Boot is off, so nothing enforces signatures: the kernel loaded the module anyway and marked itself **tainted**. The driver works, but nothing protects this kernel from unsigned code either. If the machine is meant to have Secure Boot on, that's the problem to fix.
+
+**Message C**, `nvidia.ko` built by DKMS, after a firmware update that reset the BIOS settings:
+
+```text
+Loading of module with unavailable key is rejected
+```
+
+??? success "Answer C"
+    "The kernel refused `nvidia.ko` because it's signed by a key the kernel doesn't trust." DKMS signed it with `/var/lib/dkms/mok.key` as usual, but a firmware reset can clear the MOK list, which un-trusts every key you enrolled. Check with `mokutil --test-key /var/lib/dkms/mok.pub`, then re-import it and confirm in MokManager.
+
+Notice the pattern. **"Unsigned"** means fix the *build*. **"Unavailable key"** means fix the *trust*. **"Tainting"** means nothing is enforcing at all.
 
 ## The firmware's keys: PK, KEK, db and dbx
 
@@ -107,7 +202,7 @@ $ sudo mokutil --kek | grep 'Subject:'
 
 On a machine booted in legacy BIOS mode, `mokutil --sb-state` prints `EFI variables are not supported on this system`. That is a quick way to tell how a box booted. The raw variables also appear as files under `/sys/firmware/efi/efivars/`, named like `db-d719b2cb-…`.
 
-!!! tip "efi-readvar"
+??? question "For the curious: efi-readvar"
     The `efi-readvar` tool from the **efitools** project prints the same databases in a different format (`efi-readvar -v db`). It isn't in Rocky's base repositories; `mokutil --db`, `--kek`, `--pk` and `--dbx` cover the same ground with a tool that is already installed.
 
 <div class="quiz" data-answer="3" markdown>
@@ -286,6 +381,8 @@ Read the `dmesg` line carefully, because it tells you which link is broken:
 </div>
 
 ## MOK: your own key in the chain
+
+This is the "one trusted list you can add your own key to" from the one-sentence model.
 
 The **Machine Owner Key** (MOK) list is shim's own key database, stored in an EFI variable that only shim (running before the OS) may write. Keys in it are trusted by shim (for boot loaders and kernels) and imported by the kernel (for modules). This is how you, the machine's owner, extend trust without asking Microsoft or Rocky.
 
@@ -656,7 +753,7 @@ Two facts keep this from being scary:
 1. **Expiry doesn't stop existing binaries booting.** UEFI firmware generally doesn't check certificate dates (it has no trustworthy clock at boot). A shim signed in 2024 keeps booting after June 2026. What changes is that Microsoft *stops issuing new signatures* with the old CAs, so future shims and future `dbx` revocations will carry only 2023 signatures.
 2. **Rocky ships dual-signed shims.** Rocky Linux said in June 2026 that its shim carries signatures from both the old and the new Microsoft CA in one binary, so the same shim boots on older firmware that only trusts the 2011 CA and on newer firmware with the 2023 CA. (Red Hat did the same starting with RHEL 9.8 and 10.2.) This relies on the firmware handling a PE binary with two signatures correctly, which some old firmware gets wrong.
 
-!!! note "aarch64 is different"
+??? question "For the curious: aarch64 is different"
     Arm servers generally shipped with the 2023 Microsoft CA already in `db`, so other EL rebuilds sign their aarch64 shim (`shim-aa64`) with the 2023 CA only. On Arm hardware, run `sudo mokutil --db | grep 'UEFI CA 2023'` before you rely on a new shim, and check Rocky's release notes for the current aarch64 signing status.
 
 What can still bite you:
@@ -989,6 +1086,22 @@ If the 2023 entries are missing, the normal fix is a **firmware update from your
 
 <div class="card" markdown>
 
+Explain Secure Boot in one sentence.
+
+Each boot stage checks the signature on the next, down to every kernel module. Code signed by a key on a trusted list runs; anything else is refused. The MOK list is the trusted list you can add your own key to.
+
+</div>
+
+<div class="card" markdown>
+
+`dmesg` says "unsigned module is rejected" vs "module with unavailable key is rejected". What does each mean you fix?
+
+Unsigned: fix the build (sign it with DKMS or `sign-file`). Unavailable key: fix the trust (enroll the signing key with `mokutil --import`).
+
+</div>
+
+<div class="card" markdown>
+
 What do `db` and `dbx` hold?
 
 `db` is the allow list of certificates and hashes that may run at boot. `dbx` is the deny list of revoked ones, which always wins.
@@ -1056,6 +1169,7 @@ Where does DKMS keep its signing key?
 ## Recap
 
 !!! recap "Key takeaways"
+    - Secure Boot in one sentence: each stage checks the signature on the next, down to every module; signed by a trusted key runs, anything else is refused; the MOK list is where you add your own key.
     - Secure Boot is a **chain**: firmware (`db`/`dbx`) trusts Microsoft, Microsoft signs **shim**, shim's Rocky CA trusts GRUB and the kernel, the kernel checks every module.
     - **KEK** keys sign updates to `db`/`dbx`; the **PK** owns the platform.
     - **Lockdown** (`integrity` mode under Secure Boot) stops root from loading unsigned code into the kernel.

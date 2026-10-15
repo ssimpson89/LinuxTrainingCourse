@@ -24,6 +24,12 @@ Users can't log in to half your servers. The error says "Clock skew too great". 
 
 ## The big picture
 
+### Time sync in one sentence
+
+> **Every clock drifts. chrony keeps asking several time servers how wrong your clock is, trusts the ones that agree, and nudges the clock back gently (slewing), jumping it (stepping) only when it's far off and only early on.**
+
+Everything else in this module hangs off that sentence. **Asking servers** is NTP (or PTP for extreme precision). **Trusting the ones that agree** is source selection. **Nudging and jumping** are slew and step. **Proving the server is who it says** is NTS.
+
 Every computer has a cheap quartz oscillator that drifts by a few seconds a day. Left alone, a fleet of servers slowly disagrees about what time it is. **Time synchronisation** keeps each clock close to a shared reference (ultimately atomic clocks and GPS) by measuring the difference over the network and gently correcting it.
 
 On Rocky Linux the job belongs to **chronyd**, the daemon from the **chrony** package, installed and enabled by default. It speaks **NTP** (Network Time Protocol) to servers, disciplines the kernel's clock, and can serve time to others.
@@ -43,6 +49,109 @@ Three ideas carry the whole module:
 1. **Measure, don't trust.** NTP measures the offset to several servers, weighs them by quality, and rejects liars.
 2. **Correct gently.** chrony prefers to **slew** (speed up or slow down the clock slightly) rather than **step** (jump), because time jumping backwards breaks software.
 3. **Learn the drift.** chrony learns how fast your oscillator runs wrong and compensates continuously, so the clock stays good even between measurements.
+
+### The few problems behind most clock trouble
+
+When a host's time is wrong, it's nearly always one of four things. Each matches a part of the sentence above:
+
+| What's wrong | In "ask, trust, nudge" terms | The fix |
+|---|---|---|
+| **1. No server answers** | chrony is asking, but nobody replies | Check DNS and outbound UDP 123 (and TCP 4460 for NTS) |
+| **2. Servers disagree** | chrony can't tell who to trust | Use three or more sources; don't mix smeared and non-smeared servers |
+| **3. Far off, and slewing slowly** | The clock is being nudged, but the gap is big | `sudo chronyc makestep` to jump it now |
+| **4. Something else is setting the clock** | Two daemons are nudging the same clock | Run exactly one: chronyd (or phc2sys, but not both on the system clock) |
+
+And the order to check:
+
+```mermaid
+flowchart TB
+    S["Clock wrong, or 'clock skew' errors"] --> A{"chronyd active?<br/>Only one sync daemon?"}
+    A -- "no" --> F4["4. Start chronyd,<br/>stop the other one"]
+    A -- "yes" --> B{"chronyc sources:<br/>a '*' source?"}
+    B -- "all '?', Reach 0" --> F1["1. Network: DNS, UDP 123"]
+    B -- "marked x or ~" --> F2["2. Add sources,<br/>remove the bad one"]
+    B -- "yes" --> C{"chronyc tracking:<br/>System time small?"}
+    C -- "seconds or more" --> F3["3. chronyc makestep"]
+    C -- "yes" --> OK["This host is fine:<br/>check the other end"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **RTC** | The battery-backed hardware clock; only used to set the time at boot |
+| **system clock** | The kernel's clock while running; the one chrony corrects |
+| **offset** | How far your clock is from the server's |
+| **delay** | How long the network round trip took; half of it is the worst-case error |
+| **jitter** | How much measurements vary from one to the next |
+| **stratum** | Hops from a reference clock: 1 is attached to GPS or an atomic clock |
+| **poll** | How often chrony asks, as a power of two seconds (6 = 64 s) |
+| **reach** | Which of the last eight polls got an answer, in octal (`377` = all eight) |
+| **slew** / **step** | Gently speed up or slow the clock / jump it instantly |
+| **falseticker** | A source that disagrees with the majority, so chrony ignores it |
+| **NTS** | Network Time Security: NTP with TLS-based authentication |
+| **PTP** / **PHC** | Precision Time Protocol / the PTP hardware clock on a NIC |
+
+## Core skill: is this clock healthy?
+
+The question you'll answer most often is "is this host's time right, and if not, why?" Two commands answer it. Read them with this template:
+
+```text
+chronyc tracking   →  "System time : X seconds fast/slow"   small = good right now
+chronyc sources    →  one line per server:
+                      MS  Name  Stratum  Poll  Reach  LastRx  Last sample
+                      ^*  = the server chrony trusts most
+                      377 = answered all of the last eight polls
+```
+
+A healthy host has a `*` source, `Reach` of `377` on most sources, and a `System time` measured in microseconds to low milliseconds. Here's one:
+
+```console
+$ chronyc sources
+MS Name/IP address         Stratum Poll Reach LastRx Last sample
+===============================================================================
+^* time.cloudflare.com           3   6   377    35   +112us[ +140us] +/-   12ms
+^+ ntp1.example.net              2   6   377    34   -320us[ -292us] +/-   25ms
+```
+
+"chrony asks two servers every 64 seconds (poll 6), both answered all of the last eight times, it trusts Cloudflare most (`*`) and combines the other (`+`), and the estimated error is about 12 ms." Healthy.
+
+Now read three lines yourself. (Every column is explained in full later, in [Reading chronyc sources -v](#reading-chronyc-sources-v).)
+
+**Line A:**
+
+```text
+^? 198.51.100.7                  0   6     0     -     +0ns[   +0ns] +/-    0ns
+```
+
+??? success "Answer A"
+    "This server has never answered." `Reach 0` means none of the last eight polls got a reply, and `?` means unusable. Stratum `0` here just means "no reply yet", not an atomic clock. This is problem 1: blocked UDP 123, a wrong name, or a dead server.
+
+**Line B:**
+
+```text
+^- 192.0.2.10                    2   7   377    98  +1203us[+1231us] +/-   41ms
+```
+
+??? success "Answer B"
+    "This server answers every time, but chrony doesn't combine it." The `-` means acceptable but not used in the result. Its error bound (41 ms) is far worse than the others and its offset is over a millisecond, so chrony leaves it out. Nothing to fix; this is chrony doing its job.
+
+**Line C:** a source that was `377` a minute ago now shows `Reach 376`.
+
+??? success "Answer C"
+    In binary, `376` is `11111110`: the seven polls before were answered, but the most recent one was lost. One lost packet is normal on a busy network. If the register keeps filling with zeros (`374`, `370`…), replies have stopped arriving and you're heading for problem 1.
+
+!!! example "Worked story: 'Clock skew too great'"
+    **Symptom.** Users can't log in to one server with their domain accounts. The error says "Clock skew too great". Kerberos tolerates 5 minutes of difference.
+
+    **Evidence.** `chronyc tracking` shows a `System time` several minutes slow. `chronyc sources` shows every server as `^?` with `Reach 0`.
+
+    **Reasoning.** chrony is asking, nobody is answering (problem 1), so the clock has drifted freely, probably since a network change. It's not a Kerberos problem; it's a time problem with a Kerberos symptom.
+
+    **Fix.** Prove the network path with `sudo tcpdump -ni any udp port 123` while chrony polls, find the blocked outbound UDP 123 (a cloud security group, a corporate firewall), and open it. Once a source shows `*`, the clock is still minutes off and would slew for hours, so jump it now with `sudo chronyc makestep`.
+
+    **Check.** `chronyc tracking` shows `System time` in microseconds or milliseconds, and logins work again.
+
 
 ## Why time matters
 
@@ -104,7 +213,8 @@ Programs ask the kernel for time through several clocks. Two matter most:
 - **`CLOCK_REALTIME`**: wall-clock time, "it's 10:12 UTC". It can **jump** when someone or something steps the clock. Use it for timestamps humans read.
 - **`CLOCK_MONOTONIC`**: time since boot (roughly). It **never goes backwards** and is never stepped, though chrony's slewing does adjust its rate. Use it for "how long did this take?" and timeouts.
 
-There are others: `CLOCK_BOOTTIME` (monotonic, but includes time suspended) and `CLOCK_TAI` (atomic time, no leap seconds, used by PTP).
+??? question "For the curious: the other kernel clocks"
+    There are others: `CLOCK_BOOTTIME` (monotonic, but includes time suspended) and `CLOCK_TAI` (atomic time, no leap seconds, used by PTP).
 
 !!! analogy "Think of it like a wall clock and a stopwatch"
     `CLOCK_REALTIME` is the wall clock: correct it and the hands jump. `CLOCK_MONOTONIC` is a stopwatch: it only ever moves forward. A program that measures a timeout with the wall clock can wait forever (or zero seconds) when the clock is stepped. Well-written software uses the stopwatch for durations.
@@ -889,6 +999,22 @@ Now get PHC time into the system clock. Two ways:
 
 <div class="card" markdown>
 
+Explain time synchronisation in one sentence.
+
+Every clock drifts. chrony asks several servers how wrong the clock is, trusts the ones that agree, and slews it back gently, stepping only when it's far off and only early on.
+
+</div>
+
+<div class="card" markdown>
+
+What does a healthy `chronyc sources` look like?
+
+A `*` source, `Reach 377` on most lines, and small offsets. `chronyc tracking` should show a `System time` of microseconds to low milliseconds.
+
+</div>
+
+<div class="card" markdown>
+
 RTC vs system clock?
 
 The RTC is the battery-backed hardware clock, read at boot. The system clock is the kernel's in-memory clock that chrony disciplines while running.
@@ -964,6 +1090,7 @@ PTP hardware clocks run in TAI, currently 37 seconds ahead of UTC.
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: every clock drifts; chrony asks several servers, trusts the ones that agree, and slews gently, stepping only when far off. Health check: a `*` source, `Reach 377`, a small `System time`.
     - Wrong time breaks **Kerberos, TLS, logs, clusters, and databases**, often with misleading errors.
     - The kernel's **system clock** is the truth while running; the **RTC** only seeds it at boot. Time zones are just display.
     - NTP measures **offset** and **delay**; use **three or more** sources so bad ones can be outvoted.

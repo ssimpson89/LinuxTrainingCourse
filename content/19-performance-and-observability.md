@@ -32,6 +32,31 @@ perf and eBPF) to prove exactly what is going on.
 
 ## The big picture
 
+### Performance in one sentence
+
+Here is the whole idea:
+
+> **A server has four resources (CPU, memory, disk, network). "Slow" almost always means work is waiting in a queue for one of them, so you check each one for busy, queued and broken, and chase the queue.**
+
+Everything in this module hangs off that sentence. The checklist finds *which*
+queue. History (`sar`) tells you *when* it started. Tracing (perf, eBPF) tells
+you *who* is filling it.
+
+### The good news: four queues cover most "slow" tickets
+
+When a Linux server feels slow, the cause is nearly always one of these four.
+Each has one number that gives it away.
+
+| Queue | In plain words | The giveaway | Next step |
+|---|---|---|---|
+| **1. CPU** | Tasks are waiting for a CPU | `vmstat 1`: `r` above `nproc` | `pidstat 1` to see who |
+| **2. Memory** | The box has run out of RAM and is swapping or killing | `vmstat 1`: `si`/`so` non-zero; OOM lines in `journalctl -k` | `ps -eo pid,rss,comm --sort=-rss` |
+| **3. Disk** | Requests are queued at the storage | `vmstat 1`: `b` high, `wa` high; `iostat -xz 1`: big `aqu-sz` and `await` | `pidstat -d 1` to see who |
+| **4. Network** | The link is full or packets are being lost | `sar -n DEV 1`: `%ifutil` near 100; `sar -n ETCP 1`: `retrans/s` | `ss`, `tcplife` |
+
+If all four look healthy, the slowness is inside the application (locks, a
+slow remote call, a bad query), and you move on to its logs and to tracing.
+
 Performance work is detective work. You do not start by guessing a culprit;
 you start by checking every resource for three simple signals, then zoom into
 the one that looks wrong.
@@ -57,21 +82,40 @@ The tools fall into three groups, and you will use them in this order:
 | **History** | What happened earlier, and what is normal? | `sar` (sysstat), PCP (`pmlogger`, `pmrep`), Cockpit |
 | **Tracing** | Exactly which event, process or file? | `perf`, bcc-tools, `bpftrace` |
 
-```mermaid
-flowchart TB
-    subgraph User["User space"]
-        APP["Applications"] --- PS["pidstat, top, perf top"]
-    end
-    subgraph Kernel["Kernel"]
-        SCHED["Scheduler"] --- S1["mpstat, vmstat r, runqlat"]
-        MEM["Memory"] --- S2["free, vmstat si/so, /proc/pressure"]
-        FS["Filesystems"] --- S3["opensnoop, df -i"]
-        BLK["Block layer"] --- S4["iostat -xz, biolatency"]
-        NET["TCP/IP"] --- S5["sar -n DEV/ETCP, ss, tcplife"]
-    end
-    APP --> SCHED & MEM & FS & NET
-    FS --> BLK
-```
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **utilization** | How busy a resource is, as a percentage of time or capacity |
+| **saturation** | Work queued up because the resource is full. What users feel as "slow" |
+| **run queue** | Tasks ready to run but waiting for a CPU (`r` in `vmstat`) |
+| **`D` state** | Uninterruptible sleep: a task blocked on disk or NFS (`b` in `vmstat`) |
+| **load average** | Average count of running, runnable and `D`-state tasks over 1, 5 and 15 minutes |
+| **`available`** | Memory that can be handed to programs without swapping |
+| **swapping** | Moving memory pages to disk because RAM is short (`si`/`so`) |
+| **await** | Average milliseconds a disk request took, including time in the queue |
+| **PSI** | Pressure Stall Information: percentage of time tasks were stalled on CPU, memory or I/O |
+| **eBPF** | Small, kernel-checked programs that trace events inside the kernel cheaply |
+
+??? question "For the curious: which tool looks at which layer"
+    Each tool reads a different layer of the system. This map helps when you
+    know *where* the problem is and want the matching tool.
+
+    ```mermaid
+    flowchart TB
+        subgraph User["User space"]
+            APP["Applications"] --- PS["pidstat, top, perf top"]
+        end
+        subgraph Kernel["Kernel"]
+            SCHED["Scheduler"] --- S1["mpstat, vmstat r, runqlat"]
+            MEM["Memory"] --- S2["free, vmstat si/so, /proc/pressure"]
+            FS["Filesystems"] --- S3["opensnoop, df -i"]
+            BLK["Block layer"] --- S4["iostat -xz, biolatency"]
+            NET["TCP/IP"] --- S5["sar -n DEV/ETCP, ss, tcplife"]
+        end
+        APP --> SCHED & MEM & FS & NET
+        FS --> BLK
+    ```
 
 ## A method first: USE
 
@@ -428,6 +472,59 @@ should already know what you are looking for; `top` confirms it.
 
 Diagnosis: several `report-gen` workers saturate both CPUs, and the high
 `%wait` shows each spends most of its time waiting for a CPU.
+
+### Practise: name the queue
+
+This is the core skill of the module. For any output, ask one question:
+**"which of the four queues is growing?"** Then say it as a sentence:
+
+> **"Work is waiting for `<resource>`, and the evidence is `<number>`."**
+
+Try these three before opening the answers.
+
+**Output A** (a 2-CPU box):
+
+```text
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu
+ 8  0      0 512044   5120 2190312    0    0     0    12 1210 2450 96  4  0  0  0  0
+ 7  0      0 511820   5120 2190340    0    0     0     0 1185 2390 97  3  0  0  0  0
+```
+
+??? success "Answer A"
+    "Work is waiting for **CPU**, and the evidence is `r` at 7 to 8 on 2 CPUs
+    with `id` at 0." `b`, `si`/`so` and `wa` are all zero, so memory and disk
+    are fine. Next: `pidstat 1` to name the process.
+
+**Output B** (a 4-CPU box with load average around 9):
+
+```text
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu
+ 1  8      0 812044   5120 4190312    0    0  9820 48212 2210 3120  6  4 41 49  0  0
+ 0  9      0 811820   5120 4190340    0    0 10240 51200 2301 3290  5  4 40 51  0  0
+```
+
+??? success "Answer B"
+    "Work is waiting for **disk**, and the evidence is `b` at 8 to 9 and `wa`
+    around 50%." `r` is low and the CPUs are 40% idle, so this is not a CPU
+    problem even though load is high: the load is made of `D`-state tasks.
+    Next: `iostat -xz 1` for which disk, `pidstat -d 1` for who.
+
+**Output C:**
+
+```text
+10:16:40 AM     IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+10:16:41 AM    enp1s0  81240.00  79810.00 115320.11   6102.47      0.00      0.00      0.00     94.47
+```
+
+??? success "Answer C"
+    "Work is waiting for **network**, and the evidence is `%ifutil` at 94%."
+    About 115 MB/s received is the whole of a 1 Gb/s link. Next: confirm the
+    link speed with `ethtool enp1s0 | grep Speed` and find the traffic with
+    `ss` or `tcplife`.
+
+Notice the pattern. **Utilization alone** (a busy CPU, a busy link) is a
+hint. **A queue** (`r` above `nproc`, `b` high, `aqu-sz` above 1,
+retransmits) is the proof.
 
 !!! version "Rocky 9 vs 10"
     The checklist is the same on both. Rocky 10 ships `procps-ng` 4, whose
@@ -1156,6 +1253,22 @@ the ticket.
 
 <div class="card" markdown>
 
+Explain performance troubleshooting in one sentence.
+
+A server has four resources (CPU, memory, disk, network); "slow" almost always means work is queued for one of them, so check each for busy, queued and broken, and chase the queue.
+
+</div>
+
+<div class="card" markdown>
+
+`vmstat` shows `r` low, `b` at 9, `wa` at 50%. Which queue is growing?
+
+Disk. Tasks are blocked in `D` state waiting for I/O. Check `iostat -xz 1` and `pidstat -d 1`.
+
+</div>
+
+<div class="card" markdown>
+
 What are the three letters of the USE method?
 
 Utilization (how busy), Saturation (how much work is queued), Errors (what is failing). Check all three for every resource.
@@ -1223,6 +1336,9 @@ For 30% of the last 10 seconds, every non-idle task was stalled waiting on I/O.
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: four resources, and "slow" means work is queued for
+      one of them. Find the queue (`r`, `b`, `si`/`so`, `aqu-sz`,
+      retransmits), then find who fills it.
     - Start with a method, not a tool: define the problem, then check
       utilization, saturation and errors for every resource.
     - The 60-second checklist (`uptime`, kernel log, `vmstat`, `mpstat`,

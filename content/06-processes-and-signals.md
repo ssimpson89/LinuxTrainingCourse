@@ -71,6 +71,58 @@ acting on it.
     which cook gets the stove (CPU) next and can shout instructions at them
     (signals).
 
+### Processes in one sentence
+
+Here is the whole module in one line:
+
+> **A process is a running program with a number (PID), a parent, and a state. You read it through `ps` and `/proc`, and you steer it with signals, priority and limits.**
+
+Every section below hangs off that sentence. "Number and parent" is the
+family tree. "State" is the one letter that tells you busy from stuck.
+"Signals, priority and limits" are the three levers you can pull.
+
+### The few moves that solve most process problems
+
+When a process misbehaves, the fix is nearly always one of these:
+
+| Situation | What to look at | The move |
+|---|---|---|
+| **"Which process is it?"** | Name, PID, parent | `pgrep -a <name>`, `ps -eo pid,ppid,stat,cmd` |
+| **"Is it busy or stuck?"** | The state letter (`R`, `S`, `D`, `Z`, `T`) | `ps -o pid,stat,wchan:32,cmd -p <pid>` |
+| **"Make it stop"** | Is it in `D` or `Z`? If not, ask first | `kill <pid>` (TERM), wait, then `kill -KILL <pid>` |
+| **"It's hogging the CPU"** | `%CPU` in `top` | `renice -n 15 -p <pid>` |
+| **"It vanished"** | Kernel log | `journalctl -k -g 'Out of memory'` |
+| **"Too many open files"** | `/proc/<pid>/limits` | `ulimit -n` for a shell, `LimitNOFILE=` for a service |
+
+And one short flow to pick the move:
+
+```mermaid
+flowchart TB
+    S["A process misbehaves"] --> F["1. Find it<br/>pgrep -a NAME"]
+    F --> R["2. Read its state<br/>ps -o pid,stat,wchan:32,cmd -p PID"]
+    R --> Q{"3. Which letter?"}
+    Q -- "R: using CPU" --> A["renice it, or TERM it"]
+    Q -- "S or T: waiting or paused" --> B["TERM it (CONT first if T)"]
+    Q -- "D: stuck in I/O" --> C["Fix the disk or NFS mount.<br/>Signals wait."]
+    Q -- "Z: already dead" --> D["Fix or restart the parent"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **program** | A file on disk, like `/usr/bin/sleep` |
+| **process** | A program that is running, with its own memory and PID |
+| **PID** / **PPID** | The process's number / its parent's number |
+| **thread** | A second line of execution inside one process, sharing its memory |
+| **state** | One letter saying what the process is doing right now (`R S D Z T I`) |
+| **signal** | A tiny numbered message to a process: "stop", "reload", "die now" |
+| **zombie** | A finished process whose parent hasn't collected its exit status |
+| **D state** | Stuck inside the kernel waiting for I/O. Signals can't reach it yet |
+| **nice value** | Priority from -20 (greedy) to 19 (polite) |
+| **rlimit** / **ulimit** | A per-process ceiling, like "at most 1024 open files" |
+| **OOM killer** | The kernel's last resort when memory runs out: it kills one process |
+
 ## Programs, processes, and PIDs
 
 Each process gets a **PID** (process ID), a number unique among running
@@ -156,10 +208,11 @@ sequenceDiagram
     Note over B: prints the next prompt
 ```
 
-Copying a whole process sounds expensive, but the kernel cheats with
-**copy-on-write**: parent and child share the same memory pages until one of
-them writes to a page, and only then is that page copied. That is why `fork()`
-is fast even for big processes.
+??? question "Under the hood: why copying a process is cheap"
+    Copying a whole process sounds expensive, but the kernel cheats with
+    **copy-on-write**: parent and child share the same memory pages until one of
+    them writes to a page, and only then is that page copied. That is why `fork()`
+    is fast even for big processes.
 
 Why split it into two steps? Because the gap between `fork()` and `exec()` is
 where the child sets itself up. Redirection like `ls > out.txt` works because
@@ -234,26 +287,30 @@ Threads are cheaper to create and talk to each other through shared memory,
 but one bad thread can crash the whole process, while separate processes are
 isolated from each other.
 
-To the Linux scheduler, a thread and a process are nearly the same thing: both
-are a **task** that can be put on a CPU. A thread is a task that shares its
-memory with siblings. Each thread even has its own ID (a **TID**). The PID you
-see in `ps` is the ID of the process's first thread, and the kernel calls it
-the **thread group ID**.
+For day-to-day work, the `l` in a `STAT` column like `Ssl` is enough: it
+tells you the process has threads.
 
-```console
-$ ps -o pid,nlwp,cmd -C firewalld
-    PID NLWP CMD
-    810    2 /usr/bin/python3 -sP /usr/sbin/firewalld --nofork --nopid
-$ ls /proc/810/task
-1002  810
-$ ps -L -o pid,tid,comm -p 810
-    PID     TID COMMAND
-    810     810 firewalld
-    810    1002 firewalld
-```
+??? question "Under the hood: threads are tasks too"
+    To the Linux scheduler, a thread and a process are nearly the same thing: both
+    are a **task** that can be put on a CPU. A thread is a task that shares its
+    memory with siblings. Each thread even has its own ID (a **TID**). The PID you
+    see in `ps` is the ID of the process's first thread, and the kernel calls it
+    the **thread group ID**.
 
-`NLWP` is "number of lightweight processes", an old name for threads. Each
-thread shows up as a directory under `/proc/<pid>/task/`.
+    ```console
+    $ ps -o pid,nlwp,cmd -C firewalld
+        PID NLWP CMD
+        810    2 /usr/bin/python3 -sP /usr/sbin/firewalld --nofork --nopid
+    $ ls /proc/810/task
+    1002  810
+    $ ps -L -o pid,tid,comm -p 810
+        PID     TID COMMAND
+        810     810 firewalld
+        810    1002 firewalld
+    ```
+
+    `NLWP` is "number of lightweight processes", an old name for threads. Each
+    thread shows up as a directory under `/proc/<pid>/task/`.
 
 ## Process states
 
@@ -437,6 +494,68 @@ sleep. Low CPU use plus high load points at I/O. Check with
 load.
 
 </div>
+
+## Reading a process line as a sentence
+
+This is the core skill of the module. Any line from `ps` with the columns
+`pid,ppid,stat,cmd` (add `wchan` when something looks stuck) fits one
+sentence:
+
+> **"Process `<PID>`, child of `<PPID>`, running `<command>`, is `<state>`."**
+
+Then ask one question: **is that state what you'd expect for this
+program?** A daemon waiting for work should be `S`. A busy compile should be
+`R`. Anything in `D` for long, or a pile of `Z`, needs a closer look.
+
+Use the [state table](#process-states) to turn the first letter into a word,
+and the extra characters (`s`, `l`, `+`, `<`, `N`) into detail.
+
+### Practise: read three lines
+
+Say the sentence and decide what, if anything, you'd do before opening the
+answer.
+
+**Line A:**
+
+```text
+    810 Ssl  firewalld
+```
+
+??? success "Answer A"
+    "Process 810, running `firewalld`, is **sleeping** (`S`), is a session
+    leader (`s`) and has threads (`l`)." A daemon waiting for work is
+    supposed to sleep. **Nothing to do.** This is what healthy looks like.
+
+**Line B:**
+
+```text
+   4120 D    rpc_wait_bit_killable            ls /mnt/share
+```
+
+??? success "Answer B"
+    "Process 4120, running `ls /mnt/share`, is in **uninterruptible sleep**
+    (`D`), waiting in `rpc_wait_bit_killable`." `rpc` points at NFS: the
+    `ls` is waiting for a reply from the file server. `kill -9` won't help
+    yet, because signals wait until the kernel call returns. **Fix the NFS
+    server or network**, and check `/proc/4120/stack` if you need proof.
+
+**Line C:**
+
+```text
+   5120    5118 Z    [sleep] <defunct>
+```
+
+??? success "Answer C"
+    "Process 5120, child of 5118, was running `sleep` and is a **zombie**
+    (`Z`)." It has already exited; it's waiting for parent 5118 to collect
+    its exit status. You can't kill it. One zombie is harmless. Thousands
+    from the same parent mean **that parent is buggy**: restart or fix PID
+    5118.
+
+Notice the pattern. **`S` and `R` are normal life.** `T` means someone
+paused it. **`D` points away from the process** (at a disk or a mount), and
+**`Z` points at the parent.** In both of those cases, signalling the process
+itself does nothing.
 
 ## Watching processes: ps, top, htop, pgrep
 
@@ -842,6 +961,31 @@ Notice bash reports `Terminated` versus `Killed`: it saw different signals.
     If a process ignores `SIGTERM`, find out why (is it in `D` state? stuck on
     a lock?) before reaching for `-9`. And `kill -9` does nothing to a zombie
     (already dead) or a D-state process (signal can't be delivered yet).
+
+!!! example "Story: the job that won't die"
+    **Symptom.** A colleague says "`ls /mnt/share` hung, and even `kill -9`
+    won't kill it." The load average keeps climbing.
+
+    **Evidence.** Read the state before sending anything else:
+
+    ```console
+    $ ps -eo pid,stat,wchan:32,cmd | awk '$2 ~ /^D/'
+       4120 D    rpc_wait_bit_killable            ls /mnt/share
+       4133 D    rpc_wait_bit_killable            df -h
+    ```
+
+    **Reasoning.** Both are `D`, waiting in an RPC (NFS) function. A signal
+    is only delivered when the task leaves the kernel, and it can't leave
+    until the NFS server answers. So `kill -9` is queued, not ignored. Each
+    stuck task also adds 1 to the load average.
+
+    **Fix.** Fix what they're waiting on: bring the NFS server or the
+    network back. Then the pending `SIGKILL` (or the normal reply) lets
+    them finish.
+
+    **Check.** Run the same `ps … | awk` line again. When it prints nothing,
+    no task is stuck in `D`, and the load average falls over the next few
+    minutes.
 
 `pkill -HUP rsyslogd` signals by name, and `kill -TERM -- -3700` (a negative
 number) signals a whole **process group**, every process in one pipeline or
@@ -1343,6 +1487,22 @@ Services started by systemd use `LimitNOFILE=` (set it with
 
 <div class="card" markdown>
 
+Say the whole module in one sentence.
+
+A process is a running program with a number (PID), a parent, and a state. You read it through `ps` and `/proc`, and you steer it with signals, priority and limits.
+
+</div>
+
+<div class="card" markdown>
+
+Read this line as a sentence: `4120 D rpc_wait_bit_killable ls /mnt/share`
+
+"Process 4120, running `ls /mnt/share`, is stuck in uninterruptible sleep waiting on NFS." Signals can't reach it yet; fix the NFS server or network.
+
+</div>
+
+<div class="card" markdown>
+
 What's the difference between a program and a process?
 
 A program is a file on disk. A process is a running instance of it, with its own PID, memory, open files, and state.
@@ -1418,6 +1578,11 @@ In the kernel log: `journalctl -k -g 'Out of memory'`. For a service with `Memor
 ## Recap
 
 !!! recap "Key takeaways"
+    - The one sentence: a process is a running program with a PID, a parent
+      and a state; read it through `ps` and `/proc`, steer it with signals,
+      priority and limits.
+    - Read a `ps` line as "process PID, child of PPID, is STATE". `S` and `R`
+      are normal; `D` points at storage or NFS; `Z` points at the parent.
     - A program is a file; a process is a running instance with a PID, a
       parent, memory, and open files. Everything descends from systemd, PID 1.
     - New processes come from `fork()` (copy me) plus `exec()` (become a

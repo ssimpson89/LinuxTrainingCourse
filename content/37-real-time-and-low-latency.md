@@ -24,6 +24,12 @@ A motion controller has to send a new position to a motor every 250 microseconds
 
 ## The big picture
 
+### Real-time in one sentence
+
+> **Real-time means the worst delay is small, not the average. Give your thread a CPU of its own, clear everything else off that CPU (other tasks, interrupts, the timer tick, deep sleep), and measure the maximum under load to prove it.**
+
+Everything else in this module hangs off that sentence. **A CPU of its own** is CPU isolation and pinning. **Clearing everything else off** is IRQ affinity, `nohz_full`, real-time priority, C-state limits and locked memory. **Measuring the maximum** is cyclictest, hwlatdetect and rteval. `kernel-rt` shrinks what's left.
+
 **Latency** here means the delay between an event (a timer expiring, a packet arriving) and the moment the code that handles it actually runs. A **real-time** system is one where that delay has a known, small upper bound. Real-time is about **determinism**, not speed: a system that answers in 50 µs every single time is "more real-time" than one that answers in 2 µs on average but sometimes in 5 ms.
 
 ```mermaid
@@ -43,6 +49,85 @@ sequenceDiagram
 ```
 
 Every pause in that diagram is a place where something else can get in the way. Tuning a system for real-time is the job of finding each of those somethings and moving it out of the way, then **measuring** to prove you got them all.
+
+### The few moves that do most of the work
+
+A handful of moves remove most latency. Apply them roughly in this order, measuring between each:
+
+| Move | What it clears off your CPU | How |
+|---|---|---|
+| **1. Measure first** | Nothing yet: it tells you how bad the worst case is | `cyclictest` under load, and `hwlatdetect` for firmware |
+| **2. Isolate a CPU** | Other tasks, the timer tick, RCU callbacks | tuned `cpu-partitioning` (or `realtime`) with `isolated_cores=` |
+| **3. Move interrupts away** | Device IRQs landing on that CPU | `/proc/irq/N/smp_affinity_list`, `irqaffinity=`, irqbalance bans |
+| **4. Pin and prioritise the thread** | Being time-sliced with normal tasks | `taskset -c` plus `chrt -f`, or `CPUAffinity=` and `CPUSchedulingPolicy=` in the unit |
+| **5. Keep the CPU awake, lock memory** | C-state exits, page faults | tuned's `force_latency`, `mlockall()` |
+| **6. Use `kernel-rt`** | Long non-preemptible kernel sections | `kernel-rt` from the `rt` repo |
+
+```mermaid
+flowchart TB
+    M["1. Measure: cyclictest Max<br/>under load"] --> Q{"Max within<br/>your budget?"}
+    Q -- "yes" --> D["Done. Re-measure<br/>for hours to be sure"]
+    Q -- "no" --> H{"hwlatdetect finds<br/>samples over threshold?"}
+    H -- "yes" --> FW["Firmware or hypervisor:<br/>fix the platform first"]
+    H -- "no" --> T["Apply moves 2 to 6,<br/>one at a time"]
+    T --> M
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **latency** | The delay between an event and your code actually running |
+| **jitter** / **tail** | How much latency varies / the rare worst cases at the far end of the distribution |
+| **preemption** | The kernel stopping one thing to run something more urgent |
+| **PREEMPT_RT** / **`kernel-rt`** | The build option that makes almost all kernel code preemptible / Rocky's kernel built with it |
+| **housekeeping CPU** / **isolated CPU** | CPUs that run the OS and interrupts / CPUs kept for your real-time work |
+| **IRQ** / **IRQ affinity** | A hardware interrupt / the list of CPUs it may land on |
+| **tick** | The periodic timer interrupt the scheduler uses; `nohz_full` stops it |
+| **`SCHED_FIFO`** | A real-time scheduling policy: runs until it blocks or something higher wakes |
+| **C-state** / **P-state** | CPU sleep depth / CPU frequency step |
+| **SMI** | A firmware interrupt that freezes every CPU, invisible to Linux |
+| **fair server** | Rocky 10's per-CPU reservation that rescues starving normal tasks |
+
+### Core skill: read cyclictest
+
+Everything in real-time tuning is judged by one number: the worst wake-up delay. cyclictest measures it, and each output line reads like this:
+
+```text
+T: thread (tid) P:priority I:interval C:cycles Min: Act: Avg: Max:     ← all in µs
+                                                              ^^^^
+                                                   the only number you tune for
+```
+
+Here's a baseline:
+
+```console
+T: 0 ( 3412) P:95 I:200 C: 299991 Min:      2 Act:    3 Avg:    3 Max:      38
+```
+
+"Thread 0, at `SCHED_FIFO` priority 95, asked to be woken every 200 µs, did so about 300,000 times, and was typically 3 µs late. The worst wake-up was 38 µs late." If your deadline is 250 µs, that run passes, with room to spare. If it's 20 µs, it fails, however good the 3 µs average looks.
+
+Try three readings. (The options and histograms are covered in full in [Measuring latency](#measuring-latency-cyclictest-hwlatdetect-rteval).)
+
+**Reading A:** your application must respond within 250 µs. cyclictest on the target CPU shows `Avg: 3` and `Max: 45`, but the run was 60 seconds on an idle machine.
+
+??? success "Answer A"
+    Promising but not proof. An idle, one-minute test misses the rare events that make up the tail: SMIs every few minutes, a daily cron job, interrupts that only fire under load. Run it again for hours while a load generator works the **other** CPUs, then judge the Max.
+
+**Reading B:** a histogram run ends with
+
+```text
+# Max Latencies: 00038 00029
+# Histogram Overflows: 00000 00000
+```
+
+??? success "Answer B"
+    Two CPUs measured, worst cases 38 µs and 29 µs, and no samples fell beyond the histogram's range. Overflows of zero mean the Max values are trustworthy for the range you recorded. A non-zero overflow count would mean some samples were worse than the histogram could show.
+
+**Reading C:** cyclictest's Max won't drop below a few hundred µs no matter what you isolate, and `hwlatdetect` reports samples exceeding its threshold on bare metal.
+
+??? success "Answer C"
+    The delay isn't coming from Linux. hwlatdetect spins with interrupts off, so gaps it finds were caused by firmware (SMIs) or, in a VM, the hypervisor. Nothing in Linux can fix an SMI: fix the platform first (vendor low-latency BIOS settings, certified hardware), then come back to tuning.
 
 There are degrees:
 
@@ -477,6 +562,17 @@ Two things fight you:
 
 On `kernel-rt`, the handler for each IRQ is also a thread named `irq/<N>-<name>`, which you can see in `ps` and prioritise with `chrt`.
 
+!!! example "Worked story: the stutter that tuning didn't fix"
+    **Symptom.** The motion controller from the start of this module runs pinned to isolated CPU 3 at `SCHED_FIFO` 80. cyclictest on CPU 3 (with the controller stopped) still shows a Max far worse than the other isolated CPU, and only while the network is busy.
+
+    **Evidence.** `/proc/interrupts` shows network receive IRQ 25 (`virtio1-input.0`) with 512 deliveries on CPU 3, and `cat /proc/irq/25/smp_affinity_list` prints `0-3`.
+
+    **Reasoning.** CPU isolation keeps *tasks* off CPU 3, but not interrupts. Each network packet that lands on CPU 3 interrupts the controller, and the softirq that follows can run for a long time. The load-dependent pattern fits.
+
+    **Fix.** Move the IRQ with `echo 0-1 | sudo tee /proc/irq/25/smp_affinity_list`, and stop irqbalance moving it back with `IRQBALANCE_BANNED_CPULIST=2-3` in `/etc/sysconfig/irqbalance` and a restart. (Or let tuned's isolation profile manage both.)
+
+    **Check.** The CPU 3 column for IRQ 25 in `/proc/interrupts` stops rising, and a long cyclictest run under network load shows CPU 3's Max back in line with CPU 2.
+
 ## Real-time scheduling policies
 
 Normal processes run under **`SCHED_OTHER`** (the fair scheduler): everybody gets a share, weighted by nice value ([module 06](06-processes-and-signals.md)). Real-time work uses the **real-time policies**, which always beat `SCHED_OTHER`:
@@ -899,6 +995,22 @@ $ sudo dnf install -y realtime-tests stress-ng tuned-profiles-cpu-partitioning k
 
 <div class="card" markdown>
 
+Explain real-time tuning in one sentence.
+
+Real-time means the worst delay is small, not the average: give your thread a CPU of its own, clear everything else off it (tasks, IRQs, tick, deep sleep), and measure the maximum under load.
+
+</div>
+
+<div class="card" markdown>
+
+In cyclictest output, which number do you tune for, and in what unit?
+
+`Max`, in microseconds: the worst wake-up delay seen. Averages hide the tail.
+
+</div>
+
+<div class="card" markdown>
+
 What does "real-time" mean?
 
 A bounded, predictable worst-case latency. It's about determinism, not raw speed.
@@ -974,6 +1086,7 @@ They're managed IRQs: the driver and kernel own their affinity. Use `isolcpus=ma
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: give the thread its own CPU, clear everything else off it (tasks, IRQs, tick, deep C-states, page faults), and prove it with cyclictest's Max under load.
     - Real-time is about the worst case. Measure maxima and tails, under load, for a long time.
     - Latency comes from every layer: firmware SMIs, power states, interrupts, kernel housekeeping, non-preemptible kernel code, the scheduler, and your own page faults.
     - Rocky's standard kernel uses voluntary preemption (switchable with `preempt=full`); `kernel-rt` from the disabled-by-default `rt` repo brings PREEMPT_RT.

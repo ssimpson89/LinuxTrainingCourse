@@ -19,6 +19,24 @@ Most people learn Linux by copying commands from blog posts until something work
     - How to build a lab virtual machine you can break and restore safely
     - How to get help on any command, offline, using man pages
 
+## The course in one sentence
+
+> **Rocky Linux is a free copy of Red Hat Enterprise Linux, and this course teaches you how it works underneath, one simple idea per module, on a practice machine you are allowed to break.**
+
+Keep that sentence in mind and the rest of this page is just detail. You'll learn what Rocky is, how the modules are laid out, and how to build that practice machine.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **kernel** | The core program that runs the hardware and shares it between all other programs |
+| **distribution** (distro) | The kernel plus thousands of tested tools, packaged so you can install and update them |
+| **RHEL** | Red Hat Enterprise Linux, the commercial distribution Rocky is rebuilt from |
+| **major / minor version** | A new platform (9 → 10) / a refresh of the same platform (10.0 → 10.1) |
+| **VM** | Virtual machine: a pretend computer running inside your real one |
+| **snapshot** | A saved copy of a VM's whole state that you can roll back to in seconds |
+| **man page** | The manual for a command or file, installed on the machine itself |
+
 ## What is Rocky Linux?
 
 **Linux** is, strictly speaking, just the **kernel**: the core program that controls the hardware and shares it between everything else. On its own it can't do anything useful for you. To get a working system you need thousands of other pieces: a shell, core utilities like `ls` and `cp`, a service manager, a package manager, networking tools, security frameworks, and so on.
@@ -94,8 +112,8 @@ flowchart TB
 
 Every module has the same shape, so you always know where you are:
 
-1. **The big picture.** A diagram and a few paragraphs that give you the mental model. If you only read this part, you'll still understand the idea.
-2. **Concept sections.** Each one explains a problem, the idea that solves it, and what it looks like on a real system.
+1. **The big picture.** It opens with the whole topic in **one plain sentence** in a quote box, like the one at the top of this page. Then a diagram, the few things that solve most problems, and a "Words you'll see" table. If you only read this part, you'll still understand the idea.
+2. **Concept sections.** Each one explains a problem, the idea that solves it, and what it looks like on a real system, usually as a short story: symptom, evidence, reasoning, fix, check.
 3. **Checkpoints.** Short quizzes. Click an answer; if you're wrong you can try again.
 4. **Labs.** Hands-on exercises on your VM, each with a "Check your work" step and a clean-up.
 5. **Pitfalls, cheat sheet, recap.** The things that bite people, the commands in one table, and the key ideas.
@@ -114,7 +132,10 @@ Here is a sample of each so you recognise them later.
     Red boxes describe mistakes almost everyone makes once, and how to spot them.
 
 ??? question "For the curious: what's in a collapsed box?"
-    Collapsed boxes hold optional deeper detail. Skip them on your first pass if you like. Nothing later depends on them.
+    Collapsed boxes hold optional deeper detail. Skip them on your first pass if you like. Nothing later depends on them: if you skip every collapsed box, you still get a correct, complete picture. Open them all and you get the expert depth.
+
+??? success "Answer"
+    Green collapsed boxes hide the answer to a practice question. Try it yourself first, then click to check.
 
 Interactive diagrams look like this. Click a layer:
 
@@ -479,6 +500,14 @@ A VM snapshot. Take one after installing and before any lab that breaks things.
 
 <div class="card" markdown>
 
+What is the first thing every module's big picture gives you?
+
+The whole topic in one plain sentence (the mental model). Everything else in the module hangs off it.
+
+</div>
+
+<div class="card" markdown>
+
 What does `man -k` do?
 
 Searches man page names and descriptions, like `apropos`.
@@ -490,9 +519,10 @@ Searches man page names and descriptions, like `apropos`.
 ## Recap
 
 !!! recap "Key takeaways"
+    - The course in one sentence: Rocky is a free copy of RHEL, and you'll learn how it works one simple idea per module, on a VM you're allowed to break.
     - Rocky Linux is a free, community rebuild of RHEL, so skills transfer directly to the whole Enterprise Linux family.
     - Major versions (9 → 10) are new platforms; minor releases (10.0 → 10.1) are normal updates.
-    - Each module goes big picture → concepts → checkpoints → labs → recap.
+    - Each module goes one-sentence mental model → big picture → concepts → checkpoints → labs → recap.
     - Your lab VM is disposable. Snapshot early and often.
     - `man`, `man -k`, and `--help` answer most questions offline, for the exact version you're running.
 

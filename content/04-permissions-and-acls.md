@@ -23,6 +23,19 @@ description: How Linux decides whether you may read, write, or run a file, from 
 
 ## The big picture
 
+### Permissions in one sentence
+
+Here is the whole idea:
+
+> **Every file has three seats: owner, group and everyone else. The kernel puts you in exactly one seat, reads only that seat's `rwx`, and you need `x` on every directory along the way.**
+
+Everything else in this module is an extra layer on that sentence. ACLs add more named seats (and a cap called the mask). Special bits change what happens when a program runs or a file is created. Attributes and capabilities sit outside the seats altogether.
+
+!!! analogy "Think of it like a theatre"
+    Each room has three kinds of seat: the owner's box, the members' section, and the public gallery. The usher looks at your ticket and puts you in the first seat that matches. If you own the box, you sit in the box, even if the public gallery has a better view. And to reach any room you have to be allowed through every corridor on the way. Where the analogy breaks: a Linux directory is more like a guest list than a corridor. Being allowed to edit the list (`w` on the directory) lets you cross anyone's name off it, which is how you can delete a file you cannot read.
+
+### What the kernel looks at
+
 Every file and directory on a Linux filesystem carries a small amount of security information in its **inode** (the record that describes a file): an owning user, an owning group, and a set of permission bits. Some files carry extra layers: an **ACL** (Access Control List) with entries for more users and groups, **attributes** such as immutable, and **capabilities** for programs.
 
 When a process tries to open, write, or run a file, the kernel compares the process's identity (UID and groups, from [03 · Users, Groups and sudo](03-users-groups-and-sudo.md)) with that information. If the answer is no, you get `Permission denied` (the `EACCES` error) or `Operation not permitted` (`EPERM`).
@@ -37,6 +50,94 @@ flowchart TB
 ```
 
 The model in this module is called **Discretionary Access Control** (DAC): the file's owner decides who gets access. SELinux adds a second, independent layer on top called Mandatory Access Control, which can deny something even when DAC allows it. Both must say yes. SELinux gets its own module, [16 · SELinux](16-selinux.md). Here, we stay with DAC.
+
+### The few things that solve most problems
+
+When you hit `Permission denied` and the reason is not obvious, it is nearly always one of these.
+
+| What's wrong | In seat terms | The check | The fix |
+|---|---|---|---|
+| **1. A directory on the path lacks `x`** | You never reach the room | `namei -l /full/path` | `chmod` or group membership on that directory |
+| **2. You sit in the wrong seat** | Wrong owner or group on the file | `ls -l`, `id` | `chown` / `chgrp`, or add the user to the group |
+| **3. Your seat lacks the bit** | Right seat, missing `r`, `w` or `x` | `ls -l`, `stat -c '%A %a'` | `chmod` |
+| **4. The ACL mask is cutting a named entry** | An extra seat, capped by the mask | `getfacl` shows `#effective:` | `setfacl -m m::rw` or re-run `setfacl -m` |
+| **5. An attribute forbids the change** | Nobody may change it, root included | Error says `Operation not permitted`; `lsattr` | `chattr -i` (on purpose) |
+| **6. The bits are fine, SELinux says no** | A second, separate check | `ls -Z`, `ausearch -m avc` | See [16 · SELinux](16-selinux.md) |
+
+And a short way to pick:
+
+```mermaid
+flowchart TB
+    S["Permission denied<br/>or Operation not permitted"] --> E{"Which error?"}
+    E -- "Operation not permitted<br/>(EPERM)" --> F5["Fix 5: lsattr<br/>immutable or append-only"]
+    E -- "Permission denied<br/>(EACCES)" --> N{"namei -l path:<br/>x on every directory?"}
+    N -- "no" --> F1["Fix 1: directory x"]
+    N -- "yes" --> W{"Which seat am I in?<br/>owner, group, other"}
+    W -- "wrong seat" --> F2["Fix 2: chown, chgrp, groups"]
+    W -- "right seat,<br/>bit missing" --> F3["Fix 3: chmod"]
+    W -- "named in ACL" --> F4["Fix 4: getfacl, mask"]
+    W -- "bits all allow it" --> F6["Fix 6: SELinux"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **mode** | The permission bits of a file, like `rw-r--r--` or `644` |
+| **owner** / **owning group** | The user and group a file belongs to, shown by `ls -l` |
+| **other** | Everyone who is neither the owner nor in a matching group |
+| **octal** | Writing each `rwx` triplet as one digit: r=4, w=2, x=1 |
+| **umask** | Bits removed from every new file's mode |
+| **setuid** / **setgid** / **sticky** | Special bits: run as owner, inherit group, only owners delete |
+| **ACL** | Access Control List: extra named users and groups on one file |
+| **mask** | The ceiling on every ACL entry except owner and other |
+| **default ACL** | A template on a directory, copied to new files inside it |
+| **attribute** | A flag like immutable (`i`) or append-only (`a`) that even root obeys |
+| **capability** | One named slice of root's power, such as binding to port 80 |
+| **EACCES** / **EPERM** | "Permission denied" (bits said no) / "Operation not permitted" (often an attribute) |
+
+### Core skill: predict the answer before the kernel does
+
+The thing you most need is to look at `ls -l` and say whether a given user gets in. Use this template every time:
+
+1. **Path:** does the user have `x` on every directory leading to the file? If not, stop: denied.
+2. **Seat:** is the user the owner? Then use the owner bits only. Otherwise, is any of their groups the owning group? Then use the group bits only. Otherwise, use other.
+3. **Bits:** does that one seat have the bit they need? (For deleting or renaming, look at the *directory's* `w` and `x` instead, and check for a sticky `t`.)
+
+Two exceptions you'll meet later: root skips steps 2 and 3 (but not attributes), and a user named in an ACL gets their own seat, capped by the mask.
+
+The sections below explain each step in detail. Try the template first.
+
+**Practice 1.** bob is not in group `apps`. The file `/srv/app/conf/app.ini` is mode `644`.
+
+```console
+$ ls -ld /srv/app
+drwxr-x---. 3 root apps 18 Oct 15 11:10 /srv/app
+```
+
+??? success "Answer"
+    Denied at step 1. bob sits in "other" on `/srv/app`, and other has `---`, so no `x`. He never reaches `conf/`, whatever the file's own mode says. `namei -l /srv/app/conf/app.ini` shows exactly where the path stops.
+
+**Practice 2.** alice runs `cat mine.txt`.
+
+```console
+$ ls -l mine.txt
+----rwxrwx. 1 alice alice 6 Oct 15 12:00 mine.txt
+```
+
+??? success "Answer"
+    Denied. alice is the owner, so step 2 puts her in the owner seat, which is `---`. The kernel stops there and never looks at the generous group and other bits. Everyone else can read it. She can still `chmod` it back, because changing the mode is the owner's right, not a bit.
+
+**Practice 3.** alice cannot read `boss.txt`. Can she delete it?
+
+```console
+$ ls -ld ~/drop ~/drop/boss.txt
+drwxrwxr-x. 2 alice alice  22 Oct 15 11:02 /home/alice/drop
+-r--------. 1 root  root   10 Oct 15 11:02 /home/alice/drop/boss.txt
+```
+
+??? success "Answer"
+    Yes. Deleting changes the directory's list of names, so step 3 looks at the directory: alice owns `drop` and has `w` and `x`, and there is no sticky `t`. The file's own `r--------` does not matter for deletion.
 
 ## Reading permissions
 
@@ -592,6 +693,17 @@ bob's entry still says `rw-`, but the mask is `r--`, so he can only read. Runnin
 !!! tip "Rule of thumb"
     On files with ACLs, change permissions with `setfacl`, not `chmod`. If a named user "should" have access but does not, look for `#effective:` in `getfacl`.
 
+!!! example "Story: the deploy script that took bob's write access"
+    **Symptom:** bob could edit `report.txt` yesterday. Today, after a deploy, he gets `Permission denied` when saving.
+
+    **Evidence:** `ls -l report.txt` still shows a `+`, so the ACL is there. `getfacl report.txt` shows `user:bob:rw-  #effective:r--` and `mask::r--`.
+
+    **Reasoning:** bob has a named seat, and his seat still says `rw-`. But the mask caps every named seat, and the deploy script ran `chmod 640`, which on a file with an ACL sets the mask.
+
+    **Fix:** `setfacl -m m::rw report.txt` (or `setfacl -m u:bob:rw report.txt`, which recalculates the mask). Then change the script to use `setfacl`.
+
+    **Check:** `getfacl report.txt` no longer shows `#effective:` next to bob's entry.
+
 ### Default ACLs: inheritance for new files
 
 An ACL on a directory only controls the directory itself. To make new files *inside* it get ACL entries automatically, set a **default ACL** (`-d`). Default ACLs exist only on directories; they are a template, copied onto each new file and subdirectory.
@@ -1063,11 +1175,28 @@ One named slice of root's power, such as `CAP_NET_BIND_SERVICE`, that a process 
 
 </div>
 
+<div class="card" markdown>
+
+State the permissions mental model in one sentence.
+
+Every file has three seats (owner, group, other). The kernel puts you in exactly one seat, reads only that seat's `rwx`, and you need `x` on every directory along the way.
+
+</div>
+
+<div class="card" markdown>
+
+`Permission denied` versus `Operation not permitted`: which points at an attribute?
+
+`Operation not permitted` (EPERM). Check `lsattr` for `i` or `a`. `Permission denied` (EACCES) points at mode bits or ACLs.
+
+</div>
+
 </div>
 
 ## Recap
 
 !!! recap "Key takeaways"
+    - One sentence: three seats (owner, group, other), the kernel seats you in exactly one and reads only its `rwx`, and every directory on the path needs `x`. ACLs, special bits, attributes and capabilities are layers on top.
     - Permissions are three triplets (owner, group, other) of `rwx`, written symbolically or as octal digits (r=4, w=2, x=1).
     - On directories, `r` lists names, `w` creates and deletes entries, and `x` lets you pass through. Deleting a file depends on the directory, not the file.
     - The kernel checks owner, then group, then other, and **stops at the first match**. Root bypasses most checks; attributes and SELinux can still stop it.

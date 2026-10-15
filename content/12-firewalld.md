@@ -28,6 +28,39 @@ A **firewall** is a set of rules that decides, for every packet, whether to let 
 
 Why have both? Because a network firewall only sees traffic that crosses it. It cannot protect you from another machine on the same subnet, from a compromised neighbour VM, or from the database you accidentally started listening on `0.0.0.0` instead of `127.0.0.1`. A host firewall is a second, independent wall. That idea, **defense in depth**, runs through the whole security part of this course.
 
+### firewalld in one sentence
+
+Here is the whole idea:
+
+> **Every new incoming connection is sorted into exactly one zone (by its source address first, then by the interface it arrived on), and it gets in only if that zone allows its service or port. Every change you make has two copies: runtime (now) and permanent (after a reboot).**
+
+Everything else in this module hangs off that sentence. Rich rules, port forwards, policies and logging are all extra rules attached to a zone or between zones. Almost every "the firewall is blocking me" problem is one of three questions: which zone did the traffic land in, does that zone allow it, and is the change in both copies?
+
+### The few moves that solve most problems
+
+| Symptom | What's wrong | The move |
+|---|---|---|
+| **1.** Works with `curl localhost`, times out or is refused from other machines | The zone the traffic lands in does not list the service | `firewall-cmd --zone=<z> --add-service=<svc>` |
+| **2.** Worked yesterday, broken after a reload or reboot | The change was only in the runtime copy | `firewall-cmd --runtime-to-permanent` (or `--permanent`, then `--reload`) |
+| **3.** One group of clients needs different access from everyone else | They land in the same zone as everyone | Bind their subnet to another zone: `--zone=<z> --add-source=<cidr>` |
+| **4.** One exception: "this service, only from that subnet" | A plain service is too broad | A rich rule: `--add-rich-rule='rule … accept'` |
+
+And one short process to find which move you need:
+
+```mermaid
+flowchart TB
+    S["Clients can't reach a service"] --> L{"Is it listening on a<br/>non-loopback address?<br/>ss -tlnp"}
+    L -- "no, 127.0.0.1 only" --> APP["Not a firewall problem:<br/>fix the service's listen address"]
+    L -- "yes" --> Z["Which zone does the client land in?<br/>firewall-cmd --get-active-zones"]
+    Z --> A{"Does that zone allow it?<br/>firewall-cmd --zone=Z --list-all"}
+    A -- "no" --> M1["Move 1: add the service<br/>(or move 3 / move 4)"]
+    A -- "yes" --> P{"Same answer with --permanent?"}
+    P -- "no" --> M2["Move 2: save runtime<br/>to permanent"]
+    P -- "yes" --> D["Look deeper: LogDenied,<br/>SELinux port label, routing"]
+```
+
+### The engine and the manager
+
 On Rocky Linux, the firewall has two parts:
 
 - **netfilter** is the packet filtering framework inside the kernel. **nftables** is the modern way to program it: a set of tables, chains and rules that the kernel evaluates for each packet. This is the *engine*.
@@ -48,6 +81,24 @@ flowchart TB
 
 Rules on the inbound path generally fall into three verdicts. **Accept** lets the packet in. **Reject** throws it away and tells the sender ("connection refused" or an ICMP "administratively prohibited"), so clients fail fast. **Drop** throws it away silently, so clients wait until they time out. firewalld's default for unknown inbound traffic in most zones is reject.
 
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **host firewall** | A firewall running on the server itself, not in a router or cloud security group |
+| **netfilter** / **nftables** | The packet filter inside the kernel, and the modern language for programming it. The *engine* |
+| **firewalld** / **firewall-cmd** | The daemon that writes nftables rules for you, and the command you talk to it with. The *manager* |
+| **zone** | A named trust level with its own list of allowed services and ports. Each packet lands in exactly one |
+| **source** | An address or subnet bound to a zone. Checked before interfaces |
+| **default zone** | The zone for traffic that matches no source and no bound interface. Usually `public` |
+| **service** | A named bundle of ports (and helpers), like `https` or `samba` |
+| **target** | What a zone does with traffic nothing else allowed: `default` (reject), `ACCEPT`, `DROP`, `%%REJECT%%` |
+| **runtime** / **permanent** | What the kernel enforces now / what is saved in `/etc/firewalld/` and loaded at boot |
+| **rich rule** | A one-line rule with conditions, such as "this service, only from this subnet" |
+| **policy** | Rules for traffic passing *between* zones, rather than into this host |
+| **conntrack** | The kernel's memory of existing connections, so replies are let back in automatically |
+| **port forwarding** / **masquerading** | Rewriting a packet's destination / rewriting its source to the host's address (NAT) |
+
 ## Netfilter and nftables: the engine
 
 Netfilter gives the kernel a handful of **hooks**, which are checkpoints a packet passes on its way through the network stack. Rules attach to hooks.
@@ -65,11 +116,14 @@ flowchart TB
     POST --> WIRE["Out of the NIC"]
 ```
 
-- **prerouting** sees every arriving packet first. Port forwarding (rewriting the destination) happens here.
-- **input** is for packets addressed to this machine. This is where "is port 443 open?" is decided.
-- **forward** is for packets passing *through* this machine to somewhere else (a router, or a host for containers and VMs).
-- **output** is for packets this machine creates.
-- **postrouting** is the last stop. **Masquerading** (rewriting the source to the host's address) happens here.
+For everyday work you only need one of these: **input**, where "is port 443 open?" is decided. The others matter once you forward ports, route traffic, or run containers.
+
+??? question "For the curious: what each hook is for"
+    - **prerouting** sees every arriving packet first. Port forwarding (rewriting the destination) happens here.
+    - **input** is for packets addressed to this machine. This is where "is port 443 open?" is decided.
+    - **forward** is for packets passing *through* this machine to somewhere else (a router, or a host for containers and VMs).
+    - **output** is for packets this machine creates.
+    - **postrouting** is the last stop. **Masquerading** (rewriting the source to the host's address) happens here.
 
 One more kernel feature makes firewalls practical: **connection tracking** (conntrack). The kernel remembers every connection it has seen. When your server makes an outgoing request, the reply is recognised as part of an **established** connection and allowed back in automatically. That is why you only write rules for *new* inbound connections.
 
@@ -177,6 +231,41 @@ internal
 Right. The source matches `trusted`, so that zone handles the packet and its target is `ACCEPT`. Source bindings are powerful: binding a wide subnet to `trusted` can quietly expose everything.
 
 </div>
+
+### Practise: will this packet get in?
+
+This is the core skill of the module. Every "is the firewall blocking it?" question fits one template:
+
+> **"A new connection from `<source>` arriving on `<interface>` lands in zone `<Z>`. It gets in if `<Z>` lists its service or port (or a rich rule accepts it). Otherwise `<Z>`'s target decides."**
+
+Use this setup for all three questions. It is the output you'd get from `--get-active-zones` and `--list-services` on a real host:
+
+```text
+internal
+  sources: 10.0.5.0/24
+public (default)
+  interfaces: enp1s0
+
+public services:   cockpit dhcpv6-client ssh
+internal services: postgresql
+```
+
+**Question A:** a client at `203.0.113.9` connects to port 443 on `enp1s0`.
+
+??? success "Answer A"
+    `203.0.113.9` matches no zone's sources, and `enp1s0` is bound to `public`, so the packet lands in `public`. `public` does not list `https`, so its target (`default`) rejects it. The client sees a fast "connection refused" style failure, not a timeout. **Move 1:** add `https` to `public`.
+
+**Question B:** an admin at `10.0.5.20` tries to SSH in (port 22) on `enp1s0`.
+
+??? success "Answer B"
+    The source matches `internal`, so `internal` handles the packet, and *only* `internal`. It lists `postgresql` but not `ssh`, so the packet is rejected, even though `public` allows `ssh`. A packet never falls through to a second zone (see "zone drifting" below). **Move 1 in the right zone:** add `ssh` to `internal`.
+
+**Question C:** the same host, but `firewall-cmd --list-services` shows `cockpit dhcpv6-client http ssh` while `firewall-cmd --permanent --list-services` shows `cockpit dhcpv6-client ssh`. Will port 80 from `203.0.113.9` still work after tonight's reboot?
+
+??? success "Answer C"
+    Today, yes: the runtime copy of `public` lists `http`. After the reboot, no: the permanent copy is loaded and it does not list `http`. **Move 2:** `sudo firewall-cmd --runtime-to-permanent`.
+
+Notice the pattern: **find the zone first**, then read only that zone's list. Most mistakes come from reading the right list in the wrong zone, or the right zone in the wrong copy.
 
 ??? question "Under the hood: zone drifting, and why old answers on forums are wrong"
     Before firewalld 1.0, a packet that matched a *source* zone but was not accepted there could "drift" on to the *interface* zone and be accepted by that zone's rules instead. A subnet you meant to restrict could still reach everything the `public` zone allowed. This was called **zone drifting** and was controlled by `AllowZoneDrifting=` in `firewalld.conf`.
@@ -287,7 +376,11 @@ There are two good workflows. Pick one and use it every time.
 !!! tip "Changes that undo themselves"
     `--timeout` adds a runtime rule that expires on its own: `sudo firewall-cmd --add-service=http --timeout=10m`. Perfect for "let me test this for a moment" without leaving a hole open.
 
-To check whether runtime and permanent differ, compare them:
+### Worked story: it worked until the reboot
+
+**Symptom.** You opened HTTP last week and the site worked. After Sunday's patch reboot, browsers time out or get refused. The web server is running and `curl localhost` works.
+
+**Evidence.** Compare the two copies of the zone:
 
 ```console
 $ sudo firewall-cmd --zone=public --list-services
@@ -296,7 +389,11 @@ $ sudo firewall-cmd --permanent --zone=public --list-services
 cockpit dhcpv6-client ssh
 ```
 
-Here `http` is open *now* but will vanish at the next reload. That is the bug from this module's opening story.
+(That first output is from *before* the reboot. Run the same pair on any host to spot this bug before it bites.)
+
+**Reasoning.** `http` is in the runtime copy but not the permanent one. It was added without `--permanent` and never saved, so the reboot loaded the permanent copy and it vanished. This is the bug from this module's opening story.
+
+**Fix and check.** Add it to both copies with one of the two workflows above, then run the same two commands again. Both lists should now include `http`.
 
 ### Where the permanent config lives
 
@@ -997,6 +1094,22 @@ Right. Publishing a port is itself a "please expose this" instruction. Bind it t
 
 <div class="card" markdown>
 
+Explain firewalld in one sentence.
+
+Every new incoming connection lands in exactly one zone (source address first, then interface, then the default zone) and gets in only if that zone allows its service or port. Every change has a runtime copy (now) and a permanent copy (after reboot).
+
+</div>
+
+<div class="card" markdown>
+
+A client can't reach a service that works with `curl localhost`. What three questions do you ask?
+
+1. Which zone does the client land in (`--get-active-zones`)? 2. Does *that* zone allow the service (`--zone=Z --list-all`)? 3. Is the change in both copies (repeat with `--permanent`)?
+
+</div>
+
+<div class="card" markdown>
+
 firewalld vs nftables: who does what?
 
 nftables (netfilter) is the kernel engine that filters packets. firewalld is the daemon that generates and manages those rules from zones, services and policies.
@@ -1072,6 +1185,7 @@ netavark forwards published ports with its own nftables rules in prerouting, bef
 ## Recap
 
 !!! recap "Key takeaways"
+    - firewalld in one sentence: each new connection lands in exactly one zone and gets in only if that zone allows it, and every change has a runtime copy and a permanent copy.
     - A host firewall is a second wall that protects each server on its own, even from its neighbours.
     - nftables in the kernel enforces rules; firewalld manages them. Make changes through firewalld and only *read* with `nft`.
     - Each new inbound packet lands in exactly one zone: matching source first, then interface, then the default zone.

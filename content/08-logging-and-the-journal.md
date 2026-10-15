@@ -66,6 +66,55 @@ Two things to notice:
     rsyslog is a clerk who photocopies certain letters into labelled binders
     (`messages`, `secure`), and can mail copies to head office.
 
+### Logging in one sentence
+
+Here is the whole module in one line:
+
+> **Almost every message on the machine lands in one place, the journal, stamped with who said it, when, during which boot, and how serious it was. You find any answer by filtering on those stamps.**
+
+The "who" is the unit or program. The "when" is a time range. The "which
+boot" matters after a crash or reboot. The "how serious" is the priority.
+rsyslog's text files, logrotate and remote logging are all about copying
+or keeping those same messages.
+
+### The few filters that answer most questions
+
+| Question | Stamp to filter on | The command |
+|---|---|---|
+| **"What did this service say?"** | Who | `journalctl -u <unit>` |
+| **"What happened before the reboot?"** | Which boot | `journalctl -b -1` (needs a persistent journal) |
+| **"Show me only the bad stuff"** | How serious | `journalctl -p err` |
+| **"What happened at 02:14?"** | When | `journalctl --since "02:00" --until "02:30"` |
+| **"Did the kernel complain?"** | Who (the kernel) | `journalctl -k` |
+| **"Watch it happen live"** | When (now) | `journalctl -f` |
+
+Filters of different kinds combine with AND, so you stack them until only
+the answer is left:
+
+```mermaid
+flowchart TB
+    S["Something broke"] --> A["1. Who? -u UNIT (or -k for the kernel)"]
+    A --> B["2. Which boot? -b, or -b -1 if it rebooted"]
+    B --> C["3. When? --since / --until around the event"]
+    C --> D["4. Still too much? -p err"]
+    D --> E["5. Read each line as a sentence"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **journal** | systemd's indexed, structured log store |
+| **journald** | The daemon (`systemd-journald`) that collects messages into the journal |
+| **journalctl** | The command that queries the journal |
+| **field** | One stamp on an entry, like `_SYSTEMD_UNIT=sshd.service` or `PRIORITY=6` |
+| **priority** | Severity, from 0 (`emerg`) to 7 (`debug`) |
+| **boot ID** | A unique ID for each boot, so you can ask for "the previous boot" |
+| **persistent** / **volatile** | Journal kept on disk across reboots / kept in RAM and lost at reboot |
+| **ring buffer** | The kernel's small in-memory log, read by `dmesg` |
+| **rsyslog** | The daemon that copies messages into text files like `/var/log/messages` |
+| **logrotate** | The tool that renames, compresses and deletes old text log files |
+
 ## Where log messages come from
 
 ### The kernel ring buffer
@@ -177,6 +226,71 @@ always used:
 
 `-p err` means "priority `err` *and more severe*" (0 to 3).
 
+## Reading a log line as a sentence
+
+This is the core skill of the module. Every line in the default `journalctl`
+output (and in `/var/log/messages`) has the same shape:
+
+```text
+Oct 15 02:14:09 rocky10 systemd[1]: httpd.service: Failed with result 'oom-kill'.
+└─── when ─────┘└host─┘└─who[PID]┘ └──────────── what ─────────────────────┘
+```
+
+Say it as a sentence:
+
+> **"At `<time>`, on `<host>`, `<program>` (PID `<n>`) said `<message>`."**
+
+Then ask two questions. **Who is speaking?** A line from `systemd[1]` is
+systemd *reporting on* a service, not the service itself. **Is it a
+cause or an effect?** Read upwards from the effect until you find the
+first line that explains it.
+
+### Practise: read three lines
+
+Say the sentence before opening each answer.
+
+**Line A:**
+
+```text
+Oct 15 02:14:09 rocky10 systemd[1]: httpd.service: Main process exited, code=killed, status=9/KILL
+```
+
+??? success "Answer A"
+    "At 02:14:09, systemd (PID 1) reported that httpd's main process was
+    killed by signal 9." systemd is the speaker, and this is an **effect**:
+    something sent `SIGKILL`. The next line says what: `Failed with result
+    'oom-kill'`, so memory ran out. A `kill -9` from a person would not say
+    `oom-kill`.
+
+**Line B:**
+
+```text
+Oct 15 10:31:07 rocky10 sshd-session[2836]: Accepted publickey for alice from 192.168.122.1 port 51234 ssh2: ED25519 SHA256:…
+```
+
+??? success "Answer B"
+    "At 10:31:07, `sshd-session` (PID 2836) said Alice logged in with a
+    public key from 192.168.122.1." The program is speaking for itself.
+    This is normal, `info`-level activity, and it's the kind of line you
+    search for when auditing logins.
+
+**Line C** (from `dmesg -T`, the kernel's own format):
+
+```text
+[Thu Oct 15 12:03:55 2026] python3[5012]: segfault at 0 ip 00007f… sp 00007ffd… error 4 in libc.so.6
+```
+
+??? success "Answer C"
+    "At 12:03:55, the kernel said `python3` (PID 5012) crashed with a
+    segmentation fault." The speaker is the **kernel**, reporting on a
+    process. `segfault at 0` means the program touched address zero, a
+    bug in the program or a library it uses, not a system problem. You'd
+    find the same line with `journalctl -k`.
+
+Notice the pattern. **systemd and kernel lines describe what happened to a
+process. The process's own lines describe why.** When a service dies, look
+for both.
+
 ## journalctl power use
 
 `journalctl` with no options dumps the whole journal, oldest first, into a
@@ -208,6 +322,29 @@ Oct 15 02:14:03 rocky10 httpd[1822]: AH00558: …
 Oct 15 02:14:09 rocky10 systemd[1]: httpd.service: Main process exited, code=killed, status=9/KILL
 Oct 15 02:14:09 rocky10 systemd[1]: httpd.service: Failed with result 'oom-kill'.
 ```
+
+!!! example "Story: what happened at 02:14?"
+    **Symptom.** Monitoring paged at 02:14, httpd was restarted, and your
+    manager wants a cause.
+
+    **Evidence.** Stack the filters: who (`-u httpd`), which boot (`-b`),
+    how serious (`-p err`), when (`--since`/`--until`). The three lines
+    above are the whole answer.
+
+    **Reasoning.** Read them as sentences, bottom up. systemd says the
+    unit failed with result `oom-kill`. The line above says the main
+    process was killed with signal 9. So httpd didn't crash on its own:
+    it was killed for using too much memory. The `httpd[1822]` line just
+    before is the service's own last word, worth reading for what it was
+    doing.
+
+    **Fix.** That depends on why memory ran out (a leak, a traffic spike,
+    or a `MemoryMax=` limit set too low in the unit, see
+    [07 · systemd and Services](07-systemd-and-services.md)). The log
+    gave you the right question to ask.
+
+    **Check.** Once fixed, `journalctl -u httpd -f` during the next busy
+    period should show normal traffic, and no new `oom-kill` result.
 
 ### Time ranges
 
@@ -248,29 +385,30 @@ crond.service
 | `cat` | Just the message, no metadata |
 | `json` / `json-pretty` | Machine-readable, for scripts and log shippers |
 
-```console
-$ journalctl -u chronyd -n 1 -o json-pretty --output-fields=MESSAGE,_PID,PRIORITY
-{
-        "__CURSOR" : "s=3c1f…",
-        "__REALTIME_TIMESTAMP" : "1792060267118204",
-        "__MONOTONIC_TIMESTAMP" : "5120334812",
-        "__SEQNUM" : "6702",
-        "__SEQNUM_ID" : "3c1f…",
-        "_BOOT_ID" : "8e4c2f0d6a7b4e1c9d3f5a6b7c8d9e0f",
-        "PRIORITY" : "6",
-        "MESSAGE" : "Selected source 162.159.200.1 (2.rocky.pool.ntp.org)",
-        "_PID" : "806"
-}
-```
+??? question "For scripts: JSON output and jq"
+    ```console
+    $ journalctl -u chronyd -n 1 -o json-pretty --output-fields=MESSAGE,_PID,PRIORITY
+    {
+            "__CURSOR" : "s=3c1f…",
+            "__REALTIME_TIMESTAMP" : "1792060267118204",
+            "__MONOTONIC_TIMESTAMP" : "5120334812",
+            "__SEQNUM" : "6702",
+            "__SEQNUM_ID" : "3c1f…",
+            "_BOOT_ID" : "8e4c2f0d6a7b4e1c9d3f5a6b7c8d9e0f",
+            "PRIORITY" : "6",
+            "MESSAGE" : "Selected source 162.159.200.1 (2.rocky.pool.ntp.org)",
+            "_PID" : "806"
+    }
+    ```
 
-Pipe `-o json` into `jq` (in the Rocky BaseOS repo) for quick reports:
+    Pipe `-o json` into `jq` (in the Rocky BaseOS repo) for quick reports:
 
-```console
-$ journalctl -b -p err -o json | jq -r '._SYSTEMD_UNIT // .SYSLOG_IDENTIFIER' | sort | uniq -c | sort -rn | head -3
-      7 kernel
-      3 httpd.service
-      1 NetworkManager.service
-```
+    ```console
+    $ journalctl -b -p err -o json | jq -r '._SYSTEMD_UNIT // .SYSLOG_IDENTIFIER' | sort | uniq -c | sort -rn | head -3
+          7 kernel
+          3 httpd.service
+          1 NetworkManager.service
+    ```
 
 !!! tip "Who can read the journal?"
     Normal users see only their own messages. Members of the `wheel` group
@@ -1057,6 +1195,22 @@ from this module. Pick the noisiest or earliest source and go back to
 
 <div class="card" markdown>
 
+Say logging on Rocky in one sentence.
+
+Almost every message lands in the journal, stamped with who said it, when, during which boot, and how serious it was. You find answers by filtering on those stamps.
+
+</div>
+
+<div class="card" markdown>
+
+Read as a sentence: `Oct 15 02:14:09 rocky10 systemd[1]: httpd.service: Main process exited, code=killed, status=9/KILL`
+
+"At 02:14:09 systemd reported that httpd's main process was killed by signal 9." systemd is reporting an effect; look at the lines around it (and httpd's own lines) for the cause.
+
+</div>
+
+<div class="card" markdown>
+
 Who writes `/var/log/messages` on Rocky Linux?
 
 rsyslog, which reads messages from the journal (via `imjournal`) and writes them out by facility and priority.
@@ -1132,6 +1286,12 @@ In rsyslog, what's the difference between `@host` and `@@host`?
 ## Recap
 
 !!! recap "Key takeaways"
+    - The one sentence: almost every message lands in the journal, stamped
+      with who, when, which boot and how serious. Filter on those stamps
+      (`-u`, `--since`, `-b`, `-p`) until only the answer is left.
+    - Read each line as "at TIME, on HOST, PROGRAM[PID] said MESSAGE", and
+      notice whether the speaker is the service itself or systemd or the
+      kernel reporting on it.
     - Kernel messages, service output, and `syslog()` calls all flow into
       **journald**; rsyslog then writes classic files like
       `/var/log/messages` and `/var/log/secure`.

@@ -23,6 +23,21 @@ The RAID controller in your oldest Rocky server dies and takes both mirrors with
 
 ## The big picture
 
+### Disaster recovery in one sentence
+
+Here is the whole idea:
+
+> **A backup saves your data. Recovery means you can rebuild the whole machine around that data (disks, packages, config, labels, boot) in a time you have actually measured.**
+
+Everything else in this module hangs off that sentence. A server is a stack of **layers**: data on top, then configuration, the package set, security labels, the disk layout and the boot setup at the bottom. A nightly copy of `/home` saves one layer. To recover, you need a way back for every layer, and you need to know how long the trip takes.
+
+!!! analogy "Think of it like a house fire"
+    Your photo albums in a fireproof safe are a backup. They survive. But a safe full of photos is not a house. To live there again you also need the floor plan, the wiring diagram, the list of furniture and where it went. Disaster recovery is the safe *plus* the plans *plus* a builder who has rebuilt this house before and knows it takes three days.
+
+    Where the analogy breaks: with servers, you can practise the rebuild as often as you like on a VM, and you should.
+
+### Backup, HA and DR are three different things
+
 Three different things get called "backup" in conversation. They answer different questions:
 
 ```mermaid
@@ -44,6 +59,8 @@ flowchart LR
 - A **backup** is a point-in-time copy you can go back to. It survives mistakes, but on its own it doesn't tell you how to rebuild the machine around the data.
 - **Disaster recovery** (DR) is the plan, the tooling and the practice that turn backups back into working systems: bare-metal restore, documented layout, known-good configuration, a run book, and drills.
 
+### Two numbers: RPO and RTO
+
 Two numbers make DR goals concrete:
 
 - **RPO** (Recovery Point Objective): how much data you can afford to lose, measured in time. Nightly backups mean an RPO of up to 24 hours.
@@ -62,9 +79,52 @@ flowchart TB
 
 Every choice in this module moves one of those two numbers. More frequent backups shrink the RPO. Image-based bare-metal recovery and automation shrink the RTO.
 
+### The good news: three ways back cover almost everything
+
+Whatever went wrong, you get the machine back in one of three ways. Learn these and you can plan for nearly any failure or move.
+
+| Way back | What it restores | The tools | Use it when |
+|---|---|---|---|
+| **1. Restore files, with their metadata** | The data and config layers, with SELinux labels and ACLs intact | `tar --xattrs --acls --selinux`, restic, borg, `semanage export`, LVM snapshots for consistency | Files were deleted or corrupted, but the machine is fine |
+| **2. Restore the whole machine (bare metal)** | Every layer, including partitions, LVM, LUKS and the boot loader | ReaR: `rear mkbackup`, then `rear recover` from the rescue ISO | The disks or the server are gone, and the replacement is the same or similar hardware |
+| **3. Rebuild from a description** | A fresh, clean system with your changes reapplied | An inventory (`rpm -Va`, unowned files, `dnf repoquery --userinstalled`), then kickstart and Ansible | A major version move (9 to 10), very different hardware, or no ReaR image exists |
+
+A fourth, narrower path is **converting** another EL distribution to Rocky in place, within the same major version, with `migrate2rocky`.
+
+And one short question picks the right way:
+
+```mermaid
+flowchart TB
+    S["Something is lost<br/>or must move"] --> Q1{"Is the machine itself OK?"}
+    Q1 -- "Yes, only files are lost" --> F1["Way 1: restore files<br/>with labels and ACLs"]
+    Q1 -- "No, or it must move" --> Q2{"Same major version,<br/>similar hardware?"}
+    Q2 -- "Yes, and a current<br/>ReaR image exists" --> F2["Way 2: rear recover"]
+    Q2 -- "No (9 to 10, new platform,<br/>no ReaR image)" --> F3["Way 3: inventory,<br/>codify, rebuild"]
+    Q2 -- "Same version, but it's<br/>RHEL / Alma / Oracle / Stream" --> F4["migrate2rocky"]
+```
+
+The rest of the module teaches each way back, starting with the skill all three depend on: knowing what is on the machine in the first place.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **RPO** | How much data, measured in time, you can afford to lose |
+| **RTO** | How long you can afford to be down |
+| **HA** | High availability: failover to another node. Not a backup |
+| **layer** | One part of a server you must be able to restore: data, config, packages, labels, disk layout, boot |
+| **metadata** | SELinux labels, ACLs and extended attributes (xattrs) stored alongside a file. Plain copies lose them |
+| **snapshot** | An instant frozen view of an LVM volume, used to back up a consistent copy |
+| **ReaR** | Relax-and-Recover, the bare-metal recovery tool |
+| **rescue image** | ReaR's bootable ISO, built from your own system, that recreates the disks and restores the backup |
+| **`disklayout.conf`** | ReaR's plain-text record of your partitions, LVM, RAID, LUKS and filesystems |
+| **drift** | Changes made to a server after install that nobody wrote down |
+| **x86-64-v3** | The CPU feature level Rocky 10 needs on x86_64 |
+| **migrate2rocky** | The Rocky project's script that converts another EL distribution to Rocky, same major version only |
+
 ## What to back up on a Rocky system
 
-A server isn't just its data. To *rebuild* one you need several layers, and each has its own way of being captured. Click through them from the data down to the disks:
+This section is the inventory that every way back depends on. A server isn't just its data. To *rebuild* one you need several layers, and each has its own way of being captured. Click through them from the data down to the disks:
 
 <div class="layers" data-open="0" data-hint="Click a layer to see what it contains and how to capture it." markdown>
 
@@ -127,7 +187,7 @@ $ cp -a /etc/yum.repos.d /etc/pki/rpm-gpg backup/
 
 ### Keeping SELinux labels and ACLs
 
-This is the most common silent failure in Linux backups. A plain `tar` or `cp` drops SELinux labels and ACLs. When you restore, files get whatever label their new directory implies, which may be wrong for files that were deliberately relabelled.
+This is **way 1** done properly, and it is the most common silent failure in Linux backups. A plain `tar` or `cp` drops SELinux labels and ACLs. When you restore, files get whatever label their new directory implies, which may be wrong for files that were deliberately relabelled.
 
 ```console
 $ sudo tar --xattrs --acls --selinux -czpf /backup/etc.tar.gz -C / etc
@@ -156,6 +216,22 @@ fcontext -a -f a -t httpd_sys_content_t -r 's0' '/srv/www(/.*)?'
 
 On the new system, `sudo semanage import -f selinux-local.txt` replays them. ACLs can be dumped and restored on their own too: `getfacl -R /srv > acls.txt` and `setfacl --restore=acls.txt`.
 
+!!! example "Worked story: everything restored, nothing works"
+    **Symptom.** You restore `/srv/www` from last night's archive onto a rebuilt server. Owners and modes look right, but Apache answers every request with 403.
+
+    **Evidence.** `sudo ausearch -m AVC -ts recent` shows AVC denials for `httpd_t`, and `ls -Z /srv/www` shows the files wearing a generic label instead of `httpd_sys_content_t` ([module 16](16-selinux.md) teaches how to read both).
+
+    **Reasoning.** Two pieces of the security metadata layer are missing. The archive was made without `--selinux`, so the labels never travelled. And the `fcontext` rule that says "`/srv/www` is web content" lived in the old server's local policy, which nobody exported, so `restorecon` has nothing to put back.
+
+    **Fix.** Replay the local policy, then relabel from it:
+
+    ```console
+    $ sudo semanage import -f /backup/selinux-local.txt
+    $ sudo restorecon -Rv /srv/www
+    ```
+
+    **Check.** The page loads, and `sudo ausearch -m AVC -ts recent` shows no new denials. Next time, archive with `--xattrs --acls --selinux` and keep `semanage export` output with every backup.
+
 <div class="quiz" data-answer="2" markdown>
 
 You restore `/srv/www` from a `tar` archive made without `--selinux`. The files are all there with the right owners, but Apache returns 403 and the audit log shows AVC denials. Why?
@@ -171,7 +247,7 @@ Without `--selinux`, labels aren't in the archive. And if the custom `fcontext` 
 
 ## Consistent backups with LVM snapshots
 
-Backing up a filesystem while it changes gives you an archive where some files are from 02:00:00 and others from 02:14:37. For most files that's fine. For anything that must be consistent across files (a database, a mail store, a git repository) it isn't.
+Still **way 1**: this is about making the files you copy agree with each other. Backing up a filesystem while it changes gives you an archive where some files are from 02:00:00 and others from 02:14:37. For most files that's fine. For anything that must be consistent across files (a database, a mail store, a git repository) it isn't.
 
 An LVM **snapshot** ([module 10](10-lvm-raid-and-encryption.md)) gives you a frozen view of a volume in an instant. You back up the snapshot at your leisure, then delete it. LVM briefly freezes the filesystem while it creates the snapshot, so the snapshot is at least filesystem-consistent.
 
@@ -228,7 +304,7 @@ Install them with `sudo dnf install epel-release` followed by `sudo dnf install 
 
 ## Relax-and-Recover: bare-metal recovery
 
-File backups restore *files*. They don't recreate an empty disk's partition table, LVM layout, RAID arrays, LUKS containers and boot loader. That's what **Relax-and-Recover** (ReaR, package `rear` in AppStream; version 2.9 on Rocky 10, 2.6 on Rocky 9) is for. It's the bare-metal recovery tool Red Hat documents for RHEL, and it works the same on Rocky.
+This is **way 2**. File backups restore *files*. They don't recreate an empty disk's partition table, LVM layout, RAID arrays, LUKS containers and boot loader. That's what **Relax-and-Recover** (ReaR, package `rear` in AppStream; version 2.9 on Rocky 10, 2.6 on Rocky 9) is for. It's the bare-metal recovery tool Red Hat documents for RHEL, and it works the same on Rocky.
 
 The idea: ReaR builds a **rescue system** out of *your own running system*: your kernel, your drivers, your tools, plus a description of your disk layout. Boot that rescue image on a blank machine and one command recreates the disks, restores the backup, and reinstalls the boot loader.
 
@@ -454,7 +530,7 @@ A backup you haven't restored is a hope, not a backup. Make a restore drill part
 
 ## What changed in /etc?
 
-Before you can rebuild a server any other way than restoring its image, you need to know what's different about it. RPM can tell you, because it recorded the checksum, size, mode and owner of every file it installed.
+This is the core skill behind **way 3**, and it's worth having for ways 1 and 2 as well. Before you can rebuild a server any other way than restoring its image, you need to know what's different about it. RPM can tell you, because it recorded the checksum, size, mode and owner of every file it installed.
 
 `rpm -Va` verifies every installed file against the RPM database and prints only the ones that differ:
 
@@ -480,6 +556,41 @@ Each column is one test that failed:
 | `T` | Modification time differs (hidden here by `--nomtime`) |
 | `P` | Capabilities differ |
 | `c` | The file is marked as a config file (expected to be edited) |
+
+### Practice: read `rpm -Va` lines
+
+Read each line as a sentence: "this file's *flags* differ from what the package installed". Then decide whether it's a change you need to carry to the rebuilt server.
+
+**Line A:**
+
+```text
+S.5....T.  c /etc/httpd/conf/httpd.conf
+```
+
+??? success "Answer A"
+    Size, content digest and modification time differ, and `c` says it's a config file. Someone edited Apache's main config. This is real drift: diff it against the pristine copy and carry the change into your playbook.
+
+**Line B:**
+
+```text
+.M.......  c /etc/sudoers
+```
+
+??? success "Answer B"
+    Only the mode differs. The content is what the package shipped, but someone changed its permissions. Find out why before copying that across, because a wrong mode on `sudoers` is usually a mistake, not a requirement.
+
+**Line C:**
+
+```text
+missing   c /etc/sysconfig/kdump
+```
+
+??? success "Answer C"
+    The package installed this config file and it has since been deleted. Decide whether the deletion was deliberate. If it was, the rebuild must delete it too, or the new server will behave differently.
+
+Notice the pattern. A `5` means the **content** changed and needs a diff. Letters without `5` (`M`, `U`, `G`) mean the **metadata** changed. `missing` means the file was removed.
+
+### Files you added
 
 Modified files are half the story. The other half is files you **added** that no package owns:
 
@@ -576,9 +687,9 @@ fcontext -a -f a -t httpd_sys_content_t -r 's0' '/srv/www(/.*)?'
 
 ## Major version moves: Rocky 9 to Rocky 10
 
-Rocky Linux does **not** support in-place upgrades between major versions. The project's guidance is to install the new version fresh and migrate your workload onto it. There are good reasons: a major release changes thousands of packages, removes some entirely, and changes defaults, so an in-place upgrade is a complicated transformation that often leaves a system that is neither cleanly 9 nor cleanly 10.
+A major version move always uses **way 3**. Rocky Linux does **not** support in-place upgrades between major versions. The project's guidance is to install the new version fresh and migrate your workload onto it. There are good reasons: a major release changes thousands of packages, removes some entirely, and changes defaults, so an in-place upgrade is a complicated transformation that often leaves a system that is neither cleanly 9 nor cleanly 10.
 
-!!! warning "About ELevate"
+??? warning "History: what happened to ELevate"
     The **ELevate** project, run by AlmaLinux, built on Red Hat's **Leapp** upgrade framework to offer in-place upgrades between EL major versions, and for a while it included Rocky Linux targets. According to the ELevate project, upgrades to and between Rocky Linux releases are **no longer supported as of its 2025-11-03 update**, when it moved to a new data format; AlmaLinux and CentOS Stream remain supported paths. Treat any guide that uses ELevate to upgrade Rocky as out of date. (Red Hat's `leapp` itself is for RHEL only.)
 
 ### The hardware gate: x86-64-v3
@@ -627,7 +738,7 @@ The rebuild produces a system defined by code, which is also your DR plan, and t
 
 ## Moving onto Rocky: migrate2rocky
 
-Converting a system from *another* Enterprise Linux distribution to Rocky, **within the same major version**, is supported by the Rocky project's **migrate2rocky** scripts (in the `rocky-tools` repository):
+This is the narrow fourth path from the big picture. Converting a system from *another* Enterprise Linux distribution to Rocky, **within the same major version**, is supported by the Rocky project's **migrate2rocky** scripts (in the `rocky-tools` repository):
 
 - `migrate2rocky.sh` converts EL8 systems (RHEL 8, AlmaLinux 8, Oracle Linux 8, CentOS Linux 8 or Stream 8) to Rocky 8.
 - `migrate2rocky9.sh` converts EL9 systems (RHEL 9, AlmaLinux 9, Oracle Linux 9, CentOS Stream 9) to Rocky 9.
@@ -960,6 +1071,22 @@ The options are `-r` (convert to Rocky) and `-V` (verify all RPMs afterwards). P
 
 <div class="card" markdown>
 
+Explain disaster recovery in one sentence.
+
+A backup saves your data; recovery means you can rebuild the whole machine around it (disks, packages, config, labels, boot) in a time you have measured.
+
+</div>
+
+<div class="card" markdown>
+
+What are the three ways back?
+
+1: restore files with their metadata. 2: restore the whole machine with ReaR. 3: rebuild from a description (inventory, kickstart, Ansible).
+
+</div>
+
+<div class="card" markdown>
+
 RPO vs RTO?
 
 RPO: how much data (in time) you can lose. RTO: how long you can be down.
@@ -1035,6 +1162,7 @@ Converts an EL9 system (RHEL, Alma, Oracle, CentOS Stream) to Rocky 9. It never 
 ## Recap
 
 !!! recap "Key takeaways"
+    - **The one idea:** a backup saves data; recovery rebuilds the whole machine around it, on a clock you've measured. Pick one of three ways back: **restore files**, **restore the machine** (ReaR), or **rebuild from a description**.
     - **Backups** undo mistakes, **HA** survives component failure, **DR** rebuilds whole systems; state goals as **RPO** and **RTO**.
     - Capture every layer: data, configuration, package set, **security metadata** (SELinux labels, ACLs, `semanage export`), storage layout and boot setup.
     - Use application-aware dumps or **LVM snapshots** (`-o ro,nouuid` for XFS) for consistent backups.

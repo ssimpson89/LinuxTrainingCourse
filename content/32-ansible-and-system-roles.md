@@ -24,7 +24,15 @@ You hardened one server by hand last month: SSH settings, a login banner, chrony
 
 ## The big picture
 
-**Configuration management** means writing down how a system should be configured, in files you keep in version control, and letting a tool make reality match. You stop typing commands into servers and start editing a description of them.
+### Ansible in one sentence
+
+Here is the whole idea:
+
+> **You write down what each server should look like. Ansible logs in over SSH, compares each item with reality, fixes only what differs, and reports every item as `ok` (already right) or `changed` (it fixed it).**
+
+Everything else in this module is detail around that sentence. The written-down description is your **playbook**. The list of servers is your **inventory**. The "compare and fix" work is done by small programs called **modules**. And the `ok` / `changed` report is how you know what happened.
+
+**Configuration management** is the general name for this: writing down how a system should be configured, in files you keep in version control, and letting a tool make reality match. You stop typing commands into servers and start editing a description of them.
 
 **Ansible** is the configuration management tool that ships with Rocky Linux. One machine, the **control node**, holds your code (playbooks and inventory). It connects over plain SSH to the **managed nodes**, pushes small Python programs called **modules**, runs them, collects the results as JSON, and cleans up. Nothing is installed or left running on the managed nodes.
 
@@ -45,11 +53,109 @@ flowchart LR
     D1 -.-> AC
 ```
 
-Three ideas carry the whole module:
+!!! analogy "Think of it like a building inspector with a checklist"
+    The playbook is the inspector's checklist: "fire door closed", "exit sign lit", "extinguisher present". The inspector walks every floor (host), ticks each item that is already right (`ok`), fixes each item that isn't (`changed`), and hands you a report. Walk the building twice and the second report is all ticks. Ask the inspector to *only look* and you get a list of problems without anything being touched.
+
+    Where the analogy breaks: the inspector only checks what is on the checklist. Anything your playbook doesn't mention can still change unnoticed.
+
+Three ideas fall straight out of the sentence:
 
 1. **Desired state, not steps.** You say "nginx is installed and running", not "run `dnf install`". The module works out whether anything needs doing.
 2. **Idempotence.** Running the same playbook twice is safe. The second run reports `ok` everywhere and changes nothing. That property is what makes automation trustworthy.
 3. **Drift detection for free.** Because modules know how to compare "now" with "desired", you can ask them to *only report* differences (`--check --diff`). That turns your playbook into an audit.
+
+### The good news: four commands cover almost everything
+
+Day to day, you'll use Ansible in four ways. Learn these and you can manage a fleet.
+
+| What you want | In checklist terms | The command |
+|---|---|---|
+| **1. Ask the fleet a question, or make one quick change** | One item, many hosts, no checklist file | `ansible GROUP -m MODULE -a 'ARGS'` (an ad-hoc command) |
+| **2. Make servers match the description** | Walk the whole checklist and fix what's wrong | `ansible-playbook site.yml` |
+| **3. See what has drifted, without touching anything** | Walk the checklist, only look, show the differences | `ansible-playbook site.yml --check --diff` |
+| **4. Configure a core subsystem the supported way** | Use a ready-made checklist someone else maintains | A RHEL System Role, such as `redhat.rhel_system_roles.timesync` |
+
+Picking one is a short question:
+
+```mermaid
+flowchart TB
+    S["You need something<br/>on several servers"] --> Q1{"Is it a one-off question<br/>or a one-off fix?"}
+    Q1 -- "Yes" --> F1["1. Ad-hoc command<br/>ansible GROUP -m ..."]
+    Q1 -- "No, it should stay true" --> Q2{"Do you want to<br/>change anything yet?"}
+    Q2 -- "No, just look" --> F3["3. --check --diff"]
+    Q2 -- "Yes" --> Q3{"Is there a System Role<br/>for this subsystem?"}
+    Q3 -- "Yes (time, firewall,<br/>SELinux, network, storage...)" --> F4["4. Use the System Role<br/>in a playbook"]
+    Q3 -- "No" --> F2["2. Write tasks<br/>in a playbook"]
+```
+
+### Core skill: read the PLAY RECAP
+
+Every playbook run ends with a **PLAY RECAP**: one line per host that counts how each item went. Reading it correctly is the most useful Ansible skill you'll have, because it tells you whether the run worked, whether your playbook is idempotent, and whether anything drifted.
+
+```text
+web1    : ok=5    changed=4    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+Read it as a sentence: "On `web1`, `ok` items succeeded, of which `changed` had to be fixed; `unreachable` means Ansible couldn't log in; `failed` items broke." Note that `ok` counts *every* successful item, changed or not, so `changed` is always a part of `ok`. The other three counters are for tasks skipped by a condition and for error handling you'll rarely need at first.
+
+The template for interpreting it:
+
+| You see | It means |
+|---|---|
+| `failed=0 unreachable=0` | The run worked on this host |
+| `changed=0` on a second run | The playbook is idempotent, and this host matches the description |
+| `changed=N` on a second run with nothing edited | N tasks can't tell whether they did anything (usually `command` or `shell`) |
+| `changed=N` in a `--check` run | N items have drifted from the description (plus any handlers they'd trigger) |
+| `unreachable=1` | SSH, the user, or the key is wrong. No tasks ran |
+
+Try these. Each is the second run of a playbook against hosts it already configured.
+
+**Recap A:**
+
+```text
+web1    : ok=4    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+??? success "Answer A"
+    Everything succeeded, and nothing needed fixing. That's a well-written, idempotent playbook on a host that matches it. This is the result you want.
+
+**Recap B:**
+
+```text
+web1    : ok=6    changed=2    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+web2    : ok=6    changed=2    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+??? success "Answer B"
+    Both hosts report the same two changes on a run where nothing should have changed. That pattern (every host, every run, same count) points at two tasks that aren't idempotent, typically `command` or `shell` tasks without `creates:` or `changed_when:`. See "Idempotence: ok vs changed" below.
+
+**Recap C:** a `--check --diff` run.
+
+```text
+web2    : ok=11   changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+??? success "Answer C"
+    In check mode nothing was changed. `changed=1` means one item *would* change: web2 has drifted from the description in one place. Scroll up in the output to the task marked `changed` and read its diff. See "Check mode and diff mode" below.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **control node** | The machine where Ansible and your code live |
+| **managed node** | A server Ansible configures. Needs only SSH and `python3` |
+| **inventory** | The list of managed nodes, in groups |
+| **module** | A small program that compares one thing with the desired state and fixes it (`ansible.builtin.dnf`) |
+| **task** | One call to one module, with arguments |
+| **play** / **playbook** | A list of tasks for a group of hosts / a YAML file of plays |
+| **idempotent** | Safe to run again: a second run changes nothing |
+| **`ok`** / **`changed`** | Already right / Ansible fixed it |
+| **handler** | A task that runs only when another task reports `changed` (for example "reload nginx") |
+| **facts** | Details Ansible discovers about each host (OS version, IPs) |
+| **become** | Run a task as root through `sudo` |
+| **drift** | A server no longer matching its description |
+| **role** / **collection** | A reusable bundle of tasks / a versioned package of modules and roles |
+| **System Roles** | Red Hat maintained roles for core subsystems, packaged as `rhel-system-roles` |
 
 ## Why configuration management: snowflakes and drift
 
@@ -257,7 +363,7 @@ pipelining = True
 
 ## Ad-hoc commands: one task, many hosts
 
-An **ad-hoc command** runs a single module against a group without writing a playbook. It's perfect for questions ("what kernel is everyone on?") and one-off fixes.
+This is **command 1** from the big picture. An **ad-hoc command** runs a single module against a group without writing a playbook. It's perfect for questions ("what kernel is everyone on?") and one-off fixes.
 
 ```console
 $ ansible all -m ansible.builtin.ping
@@ -361,7 +467,7 @@ web2  : ok=7  changed=1  unreachable=0  failed=0  skipped=0
 
 ## Playbooks: desired state as code
 
-A **playbook** is a YAML file containing one or more **plays**. A play maps a group of hosts to a list of **tasks**. Each task calls one module with arguments. Here is a small but realistic one, annotated:
+This is **command 2**: the written-down description itself. A **playbook** is a YAML file containing one or more **plays**. A play maps a group of hosts to a list of **tasks**. Each task calls one module with arguments. Here is a small but realistic one, annotated:
 
 ```yaml title="web.yml"
 ---
@@ -447,6 +553,17 @@ stateDiagram-v2
 !!! pitfall "Non-idempotent shell tasks"
     `ansible.builtin.command: echo "vm.swappiness=10" >> /etc/sysctl.conf` appends a new line on *every* run and always reports `changed`. Use a module that manages state (`lineinfile`, `copy`, `template`, `ansible.posix.sysctl`). If you must use `command`, add `creates:`, `removes:`, or `changed_when:` so Ansible can tell whether it really did something.
 
+!!! example "Worked story: the playbook that never settles"
+    **Symptom.** Your nightly drift check emails you every night, for every host, even though nobody touched anything.
+
+    **Evidence.** The recap shows the same small `changed` count on every host, run after run. Scrolling up, the `changed` lines all belong to one task, a `command:` that appends a sysctl line.
+
+    **Reasoning.** In checklist terms, that item has no way to look before it acts. `command` runs a program and can't know whether the program changed anything, so Ansible reports `changed` every time. Worse, the task really does append a duplicate line each run.
+
+    **Fix.** Replace it with a module that compares first, such as `ansible.posix.sysctl` or `lineinfile`, and remove the duplicate lines it left behind.
+
+    **Check.** Run the playbook twice. The second recap shows `changed=0`, and the nightly check goes quiet until something real drifts.
+
 <div class="quiz" data-answer="2" markdown>
 
 You run a playbook for the second time on hosts it already configured. The recap shows `changed=2` on every host. What does that most likely mean?
@@ -511,7 +628,7 @@ To capture a task's result for later, use `register:`, and loop with `loop:`:
 
 ## Check mode and diff mode: drift detection
 
-**Check mode** (`--check` or `-C`) runs every task in "what would you do?" mode: modules compare, report `changed` if they *would* act, and change nothing. **Diff mode** (`--diff` or `-D`) shows the line-level difference for file-changing modules. Together, they turn any idempotent playbook into a drift report.
+This is **command 3**: the inspector who only looks. **Check mode** (`--check` or `-C`) runs every task in "what would you do?" mode: modules compare, report `changed` if they *would* act, and change nothing. **Diff mode** (`--diff` or `-D`) shows the line-level difference for file-changing modules. Together, they turn any idempotent playbook into a drift report.
 
 ```console
 $ ansible-playbook baseline.yml --check --diff --limit web2
@@ -532,7 +649,7 @@ PLAY RECAP *********************************************************************
 web2    : ok=11   changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
 ```
 
-Someone set `PermitRootLogin yes` on web2 and forgot. Check mode found it, showed exactly what differs, and touched nothing. Run without `--check` and Ansible puts it back.
+Read it as a worked story. **Symptom:** you want to know whether the fleet still matches the hardening baseline. **Evidence:** the recap says web2 has `changed=1`, and the diff above it shows the one line that differs. **Reasoning:** someone set `PermitRootLogin yes` on web2 and forgot; check mode found it, showed exactly what differs, and touched nothing. **Fix:** decide whether the change was wanted. If not, run without `--check` and Ansible puts it back. **Check:** a second `--check --diff` run reports `changed=0` for web2.
 
 ```mermaid
 flowchart TB
@@ -693,7 +810,7 @@ $ ansible-galaxy collection install -r collections/requirements.yml
 
 ## RHEL System Roles: supported building blocks
 
-Writing your own role for chrony is easy. Writing one that correctly handles NTS, PTP, `ntpd` fallback, Rocky 8 vs 9 vs 10 differences, and every edge case is not. The **System Roles** project does that for you: a set of roles, maintained by Red Hat engineers alongside the OS, that configure core subsystems through one consistent variable interface.
+This is **command 4**: a checklist someone else maintains for you. Writing your own role for chrony is easy. Writing one that correctly handles NTS, PTP, `ntpd` fallback, Rocky 8 vs 9 vs 10 differences, and every edge case is not. The **System Roles** project does that for you: a set of roles, maintained by Red Hat engineers alongside the OS, that configure core subsystems through one consistent variable interface.
 
 The upstream project is **linux-system-roles** (published on Galaxy as the `fedora.linux_system_roles` collection). Red Hat packages the same roles as the **`rhel-system-roles`** RPM, which installs the `redhat.rhel_system_roles` collection. Rocky rebuilds that RPM.
 
@@ -1147,6 +1264,22 @@ You need a control node and something to manage. Three small Rocky 10 VMs (one c
 
 <div class="card" markdown>
 
+Explain Ansible in one sentence.
+
+You write down what each server should look like; Ansible logs in over SSH, compares each item with reality, fixes only what differs, and reports each item as `ok` or `changed`.
+
+</div>
+
+<div class="card" markdown>
+
+Which four commands cover most Ansible work?
+
+Ad-hoc `ansible GROUP -m MODULE` for one-offs, `ansible-playbook` to apply, `ansible-playbook --check --diff` to find drift, and a RHEL System Role for core subsystems.
+
+</div>
+
+<div class="card" markdown>
+
 What does "agentless" mean for Ansible?
 
 No daemon on managed nodes. Ansible copies modules over SSH, runs them with the node's `python3`, reads the JSON result, and deletes them.
@@ -1214,6 +1347,7 @@ Encrypt the variable file with `ansible-vault`; supply the password with `--ask-
 ## Recap
 
 !!! recap "Key takeaways"
+    - **The one idea:** you describe what each server should look like; Ansible compares each item with reality over SSH, fixes only what differs, and reports `ok` or `changed`. Read the **PLAY RECAP** to know what happened.
     - **Configuration management** turns hand-built snowflakes into reproducible, auditable code.
     - Ansible is **agentless**: SSH plus `python3` on the managed node, modules shipped and run per task.
     - The **inventory** says what you manage; `group_vars` and `host_vars` hold per-group and per-host settings.

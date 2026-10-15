@@ -24,6 +24,19 @@ A developer hands you a tarball and says "just run `make install` on the 40 web 
 
 ## The big picture
 
+### Packaging in one sentence
+
+Here is the whole idea:
+
+> **A spec file is a recipe. `rpmbuild` follows it to cook the software inside a fake root (the buildroot), then boxes everything in that fake root into an RPM with a label on the lid: name, version, release, dependencies and scripts. dnf reads the label; the box holds the files.**
+
+Everything in this module hangs off that sentence. The recipe is the **spec**. The fake root is the **buildroot**. The box is the **RPM**. The label is the **header**. When a build fails, it fails at one step of the recipe, and the error tells you which.
+
+!!! analogy "Think of it like a meal-kit factory"
+    The spec is the recipe card. `%prep` unpacks the ingredients, `%build` cooks them, `%install` plates the food on a tray shaped exactly like the customer's kitchen (the buildroot), and `%files` is the packing list: anything on the tray but not on the list, or on the list but not on the tray, stops the line. The label on the box tells the delivery driver (dnf) what else the customer needs.
+
+    Where the analogy breaks: the "customer's kitchen" is a real filesystem layout (`/usr/bin`, `/etc`), and the box also carries small scripts that run as root on the customer's machine during install and upgrade.
+
 An **RPM package** is an archive of files plus a header of metadata: name, version, dependencies, scripts to run, and a signature. You never write that header by hand. You write a **spec file**, a recipe that says where the source is, how to build it, where the files go, and what the package needs. `rpmbuild` follows the recipe.
 
 ```mermaid
@@ -65,6 +78,41 @@ Two outputs come out of every build:
     ```
 
     `S` size, `M` mode, `5` digest, `D` device, `L` symlink target, `U` user, `G` group, `T` modification time, `P` capabilities; a dot means "matches". The `c` marks a config file, where changes are expected. A `5` on a binary in `/usr` is the one that should make you look harder: run `rpm -qf` on it and reinstall from a trusted repo (`sudo dnf reinstall PKG`). `rpm -Va` checks every package on the system.
+
+### Five jobs cover almost all packaging work
+
+| Job | In recipe-and-box terms | The tool |
+|---|---|---|
+| **1. Package your own software** | Write a recipe for a tarball | A spec file + `rpmbuild -ba` |
+| **2. Change one of Rocky's packages** | Take Rocky's recipe, add one step | `dnf download --source`, add a `Patch`, bump `Release` |
+| **3. Prove the recipe is complete** | Cook in an empty kitchen | `mock`, then `rpmlint` |
+| **4. Ship to many servers** | Seal the box and put it on a shelf | `rpmsign`, `createrepo_c`, a `.repo` file |
+| **5. Make upgrades go the right way** | Get the label's version right | `Version`, `Release`, `~`, `rpmdev-vercmp` |
+
+```mermaid
+flowchart TB
+    S["What do you need?"] --> Q{"Whose software?"}
+    Q -- "Ours / a vendor tarball" --> J1["Job 1: write a spec,<br/>rpmbuild -ba"]
+    Q -- "Rocky's, with one change" --> J2["Job 2: rebuild the SRPM<br/>with a Patch and .mycorp1"]
+    J1 --> J3["Job 3: mock + rpmlint"]
+    J2 --> J3
+    J3 --> J4["Job 4: sign, createrepo_c,<br/>serve over HTTP"]
+    J4 --> J5["Job 5: check every new build<br/>sorts newer (rpmdev-vercmp)"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **spec file** | The recipe: tags at the top, then sections like `%prep`, `%build`, `%install`, `%files` |
+| **buildroot** | A fake `/` under `~/rpmbuild/BUILDROOT/` where `%install` lays out files. Written as `%{buildroot}` |
+| **SRPM** | Source RPM: tarball + patches + spec in one file. Anyone can rebuild from it |
+| **binary RPM** | The installable box. One spec can make several |
+| **macro** | A `%{name}` variable that rpm expands, like `%{_bindir}` → `/usr/bin` |
+| **BuildRequires / Requires** | What the *build* needs / what the *installed package* needs |
+| **scriptlet** | A small shell script inside the package that runs as root during install, upgrade or removal |
+| **EVR** | Epoch, Version, Release: the three fields dnf compares to decide "newer" |
+| **mock** | A tool that builds in a fresh, minimal chroot |
 
 ## Setting up a build environment
 
@@ -284,6 +332,62 @@ Wrote: /home/alex/rpmbuild/RPMS/x86_64/rockyhello-debugsource-1.0-1.el10.x86_64.
 | `rpmbuild -ba` | Everything | Both |
 | `rpmbuild --rebuild X.src.rpm` | Everything, from an SRPM | `RPMS/` |
 
+## Reading a failed build
+
+This is the most useful skill in the module. Every rpmbuild failure happened at one step of the recipe, and the last lines of output tell you which. Fit the error into this sentence:
+
+> **"The build stopped at `<phase>` because `<thing>` was `<missing / extra / wrong>`."**
+
+Then the fix follows from the phase:
+
+| Last lines say | Phase | Usually means |
+|---|---|---|
+| `Failed build dependencies:` | Parse | A `BuildRequires` is not installed. `sudo dnf builddep SPEC` |
+| `Bad exit status from … (%prep)` | `%prep` | A source file is missing from `SOURCES/`, or a patch doesn't apply |
+| `Bad exit status from … (%build)` | `%build` | The compiler failed. Scroll up to the first `error:` from gcc or make |
+| `File not found: …/BUILDROOT/…` | `%files` | `%files` lists something `%install` didn't create |
+| `Installed (but unpackaged) file(s) found` | `%files` | `%install` created something `%files` doesn't list |
+
+The "Bad exit status" line names the phase in brackets, for example `error: Bad exit status from /var/tmp/rpm-tmp.XXXXXX (%build)`. The real cause is above it.
+
+### Practise: name the phase
+
+Read each failure, say the sentence, and decide the fix before opening the answer.
+
+**Failure A:**
+
+```text
+error: Installed (but unpackaged) file(s) found:
+   /usr/share/man/man1/rockyhello.1.gz
+```
+
+??? success "Answer A"
+    "The build stopped at `%files` because a man page was **extra**: `%install` put it in the buildroot but `%files` doesn't list it." Add `%{_mandir}/man1/rockyhello.1*` to `%files` (the `*` covers the compressed suffix that post-processing adds), or stop installing it.
+
+**Failure B:**
+
+```text
+error: Failed build dependencies:
+	openssl-devel is needed by rockyhello-1.0-1.el10.x86_64
+```
+
+??? success "Answer B"
+    "The build stopped while parsing because `openssl-devel` was **missing** from this machine." The spec is fine; your build host isn't. `sudo dnf builddep SPEC` installs every `BuildRequires` (many `-devel` packages need CRB enabled).
+
+**Failure C:** the build works with `rpmbuild` on your workstation, but in mock:
+
+```text
+fatal error: openssl/ssl.h: No such file or directory
+```
+
+??? success "Answer C"
+    "The build stopped at `%build` because a header was **missing** in the clean chroot." That's the opposite of B: the spec is wrong, not the machine. It never declared `BuildRequires: openssl-devel`, and your workstation happened to have it. Add the line. (This is Job 3 doing its job; see "Building cleanly with mock" below.)
+
+Notice the pattern. **Parse and `%prep` failures** are about inputs (packages, sources, patches). **`%build` failures** are the software's own compiler errors. **`%files` failures** are a mismatch between what you installed and what you listed.
+
+!!! tip "Rerun only up to the broken phase"
+    Use the "Stops after" table above: `rpmbuild -bp` to look at the unpacked, patched tree, `rpmbuild -bi` to look at the buildroot before packaging. `ls -R ~/rpmbuild/BUILDROOT/` then shows exactly what `%install` produced.
+
 ### Automatic dependencies
 
 You did not write `Requires: glibc`, yet the package depends on it. rpm's **dependency generators** inspect every ELF binary, script shebang, Python module and pkg-config file in the buildroot and add the right `Requires:` and `Provides:`.
@@ -389,17 +493,39 @@ Runs after everything else in the transaction completes.
 
 </div>
 
-```mermaid
-sequenceDiagram
-    participant N as New package (1.0-2)
-    participant O as Old package (1.0-1)
-    N->>N: %pre ($1=2)
-    N->>N: install files
-    N->>N: %post ($1=2)
-    O->>O: %preun ($1=1)
-    O->>O: remove old-only files
-    O->>O: %postun ($1=1)
+??? question "The same order as a sequence diagram"
+    ```mermaid
+    sequenceDiagram
+        participant N as New package (1.0-2)
+        participant O as Old package (1.0-1)
+        N->>N: %pre ($1=2)
+        N->>N: install files
+        N->>N: %post ($1=2)
+        O->>O: %preun ($1=1)
+        O->>O: remove old-only files
+        O->>O: %postun ($1=1)
+    ```
+
+### Example: the service that switches itself off
+
+**Symptom.** After every `dnf upgrade`, a vendor's agent is stopped and disabled. Fresh installs work fine.
+
+**Evidence.** Look at the scriptlets in the box before blaming systemd:
+
+```console
+$ rpm -qp --scripts vendor-agent-2.1-1.x86_64.rpm
+preinstall scriptlet (using /bin/sh):
+getent passwd vagent >/dev/null || useradd -r -s /sbin/nologin vagent
+postinstall scriptlet (using /bin/sh):
+systemctl enable --now vendor-agent.service
+…
 ```
+
+**Reasoning.** If its `%preun` runs `systemctl disable --now` with no `$1` check, then during an upgrade the **old** package's `%preun` runs with `$1=1` and switches the service off, after the new package was installed. The `%post` that enables it ran *earlier* in the same transaction, so the off switch wins.
+
+**Fix.** In your own specs, use `%systemd_post`, `%systemd_preun` and `%systemd_postun_with_restart` (next section). For a vendor package, report the bug and re-enable the service after upgrades until it's fixed.
+
+**Check.** `rpm --eval '%systemd_preun x.service'` shows the `$1 -eq 0` test the macro adds.
 
 !!! tip "See a package's scriptlets before you install it"
     `rpm -qp --scripts file.rpm` prints every scriptlet. Make it a habit for third-party RPMs: they run as root.
@@ -999,6 +1125,22 @@ libssl.so.3()(64bit)
 
 <div class="card" markdown>
 
+Explain RPM packaging in one sentence.
+
+A spec file is a recipe; rpmbuild cooks the software in a fake root (the buildroot) and boxes it as an RPM with a label (header) listing name, version, release, dependencies and scripts.
+
+</div>
+
+<div class="card" markdown>
+
+`Installed (but unpackaged) file(s) found` vs `File not found: …/BUILDROOT/…`?
+
+Both are `%files` mismatches. The first: `%install` made a file `%files` doesn't list. The second: `%files` lists a file `%install` never made.
+
+</div>
+
+<div class="card" markdown>
+
 Version vs Release?
 
 Version is the upstream software version. Release counts your packaging iterations of that version, plus `%{?dist}`.
@@ -1066,6 +1208,8 @@ Which three commands turn built RPMs into a signed repo?
 ## Recap
 
 !!! recap "Key takeaways"
+    - Packaging in one sentence: a spec file is a recipe; `rpmbuild` cooks the software in a fake root (the buildroot) and boxes it as an RPM whose header (the label) carries name, version, release, dependencies and scripts.
+    - Read every failed build as "stopped at `<phase>` because `<thing>` was missing, extra or wrong". Parse and `%prep` are inputs, `%build` is the compiler, `%files` is a list mismatch.
     - A package gives you versioning, file ownership, verification, clean removal, dependencies and signatures: everything `make install` doesn't.
     - The spec file is the recipe: preamble tags, then `%prep`, `%build`, `%install`, `%check`, `%files`, `%changelog`. Use macros, never hard-coded paths.
     - rpm finds library and interpreter dependencies automatically; write `Requires` only for what it cannot see.

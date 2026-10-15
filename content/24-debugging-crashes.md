@@ -42,6 +42,14 @@ it well enough to hand a developer or a vendor the exact line that failed.
 
 ## The big picture
 
+### Crash debugging in one sentence
+
+Here is the whole idea:
+
+> **Freeze the moment of failure into a file, then add the symbols that turn its raw addresses back into names.**
+
+For a crashed program the frozen moment is a **core dump**. For a crashed kernel it is a **vmcore**. For a hang, where nothing died, it is a **stack trace** taken while the system is still running. The names come from **debuginfo** packages, matched to the exact build by a **build ID**. Every tool in this module either freezes a moment (`systemd-coredump`, `gcore`, kdump, SysRq) or reads one (`coredumpctl`, `gdb`, `crash`).
+
 Every crash leaves evidence, but the evidence lives in different places
 depending on *what* died. The whole module fits on one map:
 
@@ -68,6 +76,31 @@ The other shared idea is **symbols**. A frozen moment is just numbers:
 addresses, registers, raw memory. Debug symbols turn `0x401136` back into
 `get_port()` at `crashme.c:8`. Without them you have a photo with no
 names on it.
+
+### Three kinds of incident, three kits
+
+| What happened | The frozen moment | Captured by | Read with |
+|---|---|---|---|
+| **1. A program died** (`status=11/SEGV`, `6/ABRT`) | A core dump | `systemd-coredump` (automatic) | `coredumpctl`, `gdb` + debuginfo |
+| **2. The kernel died** (the box rebooted itself) | A vmcore in `/var/crash/` | kdump (set up in advance) | `crash` + `kernel-debuginfo` |
+| **3. Nothing died, it's stuck** | Stack traces of live tasks | `gstack`, `eu-stack`, SysRq `t`/`w` | Reading the traces |
+
+The one question that picks the kit: **did a process die, did the machine reboot, or is everything still running but not making progress?** The decision tree near the end of the module walks through it.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **signal** | A numbered notification the kernel sends a process. Some kill it and dump core |
+| **core dump** | A file holding a dead process's memory and registers |
+| **`systemd-coredump`** | The service that receives and stores core dumps on Rocky |
+| **symbols / debuginfo** | The name-and-line-number map for a binary, shipped in separate `-debuginfo` packages |
+| **build ID** | A unique hash inside every binary, used to find its exact debuginfo |
+| **backtrace (`bt`)** | The chain of function calls that led to the crash, newest first |
+| **oops** | The kernel hit a bug, logged it, and tried to carry on |
+| **panic** | The kernel stopped completely |
+| **kdump / vmcore** | A standby kernel that saves the crashed kernel's memory / the saved file |
+| **taint** | Flags saying the kernel was modified (out-of-tree module, earlier oops…) |
 
 ## What a crash actually is
 
@@ -140,6 +173,37 @@ Oct 15 10:02:11 rocky-lab kernel: crashme[4321]: segfault at 20 ip 0000000000401
   binary, at `0x401136` in a mapping that starts at `0x401000`. If this names a library (`libc.so.6`), the
   crash happened inside that library, though the bug is usually in whoever
   called it with bad arguments.
+
+Fit every segfault line into one sentence:
+
+> **"`<program>` tried to `<read / write>` address `<addr>` (`<NULL or garbage>`) while running code in `<binary or library>`."**
+
+#### Practise: read three segfault lines
+
+Say the sentence for each line before opening the answer.
+
+**Line A:**
+
+```text
+kernel: worker[812]: segfault at 0 ip 00000000004011a2 sp 00007ffc1a2b3c40 error 6 in worker[4011a2,401000+2000]
+```
+
+??? success "Answer A"
+    "`worker` tried to **write** (`error 6`: user mode + write) address **0** (a NULL pointer) while running code in **its own binary**." The bug is in `worker`'s own code. A core dump plus `bt` will name the function.
+
+**Line B:**
+
+```text
+kernel: api[2207]: segfault at 7f3a9c000010 ip 00007f3a9e2c4d1e sp 00007ffe5b6a7e80 error 4 in libc.so.6[7f3a9e2c4d1e,7f3a9e228000+175000]
+```
+
+??? success "Answer B"
+    "`api` tried to **read** (`error 4`) a large, random-looking address while running code **in `libc.so.6`**." The crash is inside glibc, but glibc is almost never the bug. Something called it with a bad pointer. In the backtrace, the frames listed after the libc frame (its callers) show who.
+
+**Line C:** a service restarts 37 times overnight, but `journalctl -k -g segfault` shows only a handful of lines, followed by `callbacks suppressed`.
+
+??? success "Answer C"
+    The kernel rate-limits these lines (see the collapsible below), so a missing line does not mean a missing crash. Go to the core dumps instead: `coredumpctl list` shows every one that was kept.
 
 ??? question "Under the hood: why some segfaults leave no log line"
     These one-liners are controlled by the `debug.exception-trace` sysctl
@@ -1572,6 +1636,22 @@ reboot the VM: **snapshot it first**.
 
 <div class="card" markdown>
 
+Explain crash debugging in one sentence.
+
+Freeze the moment of failure into a file (core dump, vmcore, or a live stack trace), then add the symbols that turn its addresses back into names.
+
+</div>
+
+<div class="card" markdown>
+
+`segfault at 0 … error 6`: what happened?
+
+A user-mode write to address 0: the program wrote through a NULL pointer.
+
+</div>
+
+<div class="card" markdown>
+
 Which crash signals dump core, and which common killer never does?
 
 `SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGFPE`, `SIGILL`, `SIGQUIT` (and a few others) dump core. `SIGKILL` never does, so a `status=9/KILL` means "killed from outside".
@@ -1655,6 +1735,8 @@ Which sysrq key dumps the stacks of tasks stuck in D state?
 ## Recap
 
 !!! recap "Key takeaways"
+    - Crash debugging in one sentence: freeze the moment of failure into a file (core dump, vmcore, or live stack trace), then add the symbols (debuginfo, matched by build ID) that turn addresses back into names.
+    - Read every segfault line as "program tried to read or write address X while running code in Y". Address 0 or small means NULL; a library in Y usually means a bad caller.
     - A program crash is a fatal signal (`SEGV`, `ABRT`, `BUS`…) whose default
       action is to dump core. `SIGKILL` never dumps core: it means something
       killed the process.

@@ -24,6 +24,16 @@ You type `sudo dnf install nginx` and ten seconds later a web server is on disk,
 
 ## The big picture
 
+### Software in one sentence
+
+Here is the whole idea:
+
+> **A package is a signed box of files with a label saying what it needs. DNF shops the repositories for every box your request needs, and RPM unpacks them and remembers every file it put on disk.**
+
+Because RPM remembers every file, you can always ask the system three questions: *who put this file here?*, *has it changed since?*, and *what did DNF change, and when?* Most of this module is about asking those questions well.
+
+### How the two tools split the work
+
 There are two layers, and it helps to keep them apart.
 
 - **RPM** (the RPM Package Manager) is the low-level tool. It knows how to install, remove, and query one package file at a time, and it keeps a database of everything installed. It does **not** download anything, and it does not go looking for dependencies.
@@ -41,10 +51,91 @@ flowchart TB
     RPM --> DB["RPM database<br/>/usr/lib/sysimage/rpm"]
 ```
 
-The analogy: RPM is a warehouse worker who can shelve or remove one box and keeps the inventory book. DNF is the purchasing department: it reads supplier catalogues, works out everything needed to complete an order, checks the delivery seals, and gives the worker a complete list to shelve in one go.
+!!! analogy "Think of it like a warehouse"
+    RPM is a warehouse worker who can shelve or remove one box and keeps the inventory book. DNF is the purchasing department: it reads supplier catalogues, works out everything needed to complete an order, checks the delivery seals, and gives the worker a complete list to shelve in one go. Where the analogy breaks: the "boxes" can contain small scripts that run as root when they are shelved, which is one more reason the seal (the GPG signature) matters.
 
 !!! note "DNF 4 on Rocky 10"
     Rocky 9 and Rocky 10 both use DNF 4. Fedora has moved to DNF 5, so a Fedora blog post may show options or output that Rocky does not have. When in doubt, `man dnf` on your Rocky machine is the authority. `yum` still exists as a compatibility name; it runs the same DNF.
+
+### The few things that solve most problems
+
+A handful of commands answer most real questions about software on a Rocky server.
+
+| You want to know or do | In box terms | The command |
+|---|---|---|
+| **1. Which package owns this file?** | Which box did it come out of? | `rpm -qf /path` |
+| **2. Has anything changed since install?** | Does the shelf still match the inventory book? | `rpm -V name` (or `rpm -Va`) |
+| **3. What changed recently, and can I undo it?** | What orders went through? | `dnf history`, `dnf history info N`, `dnf history undo N` |
+| **4. Why won't this install?** | The shop can't find a box the label asks for | `dnf repolist --all`; often `crb` or `extras` is disabled |
+| **5. Is this CVE fixed here?** | Does the box's changelog mention it? | `rpm -q --changelog name \| grep CVE-…`, `dnf updateinfo info --cve CVE-…` |
+
+And a short way to pick:
+
+```mermaid
+flowchart TB
+    S["Something about software<br/>looks wrong"] --> A{"Is it about one file?"}
+    A -- "yes" --> F1["Fix 1: rpm -qf FILE<br/>then Fix 2: rpm -V PACKAGE"]
+    A -- "no" --> B{"Did it break after<br/>an update or install?"}
+    B -- "yes" --> F3["Fix 3: dnf history<br/>info, then undo"]
+    B -- "no" --> C{"Does dnf install fail?"}
+    C -- "yes" --> F4["Fix 4: dnf repolist --all<br/>enable crb or extras"]
+    C -- "no, a scanner<br/>reports a CVE" --> F5["Fix 5: changelog<br/>and updateinfo"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **package** / **RPM** | One `.rpm` file: payload of files, header, scriptlets, signature |
+| **NEVRA** | Name, epoch, version, release, architecture: the package's full identity |
+| **dist tag** | The `el10` in a release, naming the distribution it was built for |
+| **backport** | A security fix copied into the old version Rocky ships, without changing the version number |
+| **repository** (repo) | A collection of packages plus metadata DNF reads to make decisions |
+| **metadata** | The repo's catalogue: what each package provides, requires, and its checksums |
+| **dependency** | Something a package requires, which another package provides |
+| **transaction** | One DNF run, installed as a unit and numbered in `dnf history` |
+| **scriptlet** | A small script inside a package that runs at install or removal |
+| **GPG key** | The vendor's public key, used to check each package's signature |
+| **EPEL** / **CRB** | The community add-on repo / the developer repo many EPEL packages need |
+
+### Core skill: trace a file back to its package
+
+The thing you'll do most often is look at a file and ask where it came from and whether it is still as shipped. The template is two commands:
+
+1. `rpm -qf /path` names the owning package (or says "not owned by any package", meaning someone made it by hand).
+2. `rpm -V package` compares that package's files with the inventory book. Silence means nothing changed. Otherwise read the 9-character code: `S` size, `5` content, `M` mode, `T` time, and a `c` before the path means "config file, expected to be edited".
+
+Try these. Each output is from this module.
+
+**Practice 1.**
+
+```console
+$ sudo rpm -V openssh-server
+S.5....T.  c /etc/ssh/sshd_config
+```
+
+??? success "Answer"
+    `sshd_config`'s size, content and timestamp differ from what the package installed, and the `c` says it is a config file. An admin edited it, which is normal. Compare it with your configuration management if you didn't expect a change.
+
+**Practice 2.**
+
+```console
+$ rpm -V httpd
+S.5....T.    /usr/sbin/httpd
+```
+
+??? success "Answer"
+    Worry. There is no `c`, and this is a program binary whose size and content changed. Either someone replaced it or the disk is corrupt. Investigate first, then `dnf reinstall httpd` restores the shipped file.
+
+**Practice 3.** A scanner reports that `iputils-20240905` has CVE-2025-47268, fixed upstream in a later release.
+
+```console
+$ rpm -q --changelog iputils | grep CVE-2025-47268
+- Fix CVE-2025-47268 iputils: Signed Integer Overflow in Timestamp Multiplication in iputils ping (RHEL-94582)
+```
+
+??? success "Answer"
+    Already fixed. Rocky backports fixes into the shipped version, so the version number alone can't tell you. The changelog shows the fix is in the installed release. Cite the advisory and package release to the auditor.
 
 ## What is a package?
 
@@ -249,17 +340,18 @@ S.5....T.  c /etc/sudoers
 
 The `grep -v` drops lines where *only* the timestamp differs, which are rarely interesting. Each position in the 9-character code is one test. A `.` means it passed.
 
-| Char | Meaning |
-|---|---|
-| `S` | size differs |
-| `M` | mode (permissions or file type) differs |
-| `5` | content checksum differs |
-| `D` | device number differs |
-| `L` | symlink target differs |
-| `U` / `G` | user / group owner differs |
-| `T` | modification time differs |
-| `P` | file capabilities differ |
-| `missing` | the file is gone |
+??? question "Reference: every rpm -V code letter"
+    | Char | Meaning |
+    |---|---|
+    | `S` | size differs |
+    | `M` | mode (permissions or file type) differs |
+    | `5` | content checksum differs |
+    | `D` | device number differs |
+    | `L` | symlink target differs |
+    | `U` / `G` | user / group owner differs |
+    | `T` | modification time differs |
+    | `P` | file capabilities differ |
+    | `missing` | the file is gone |
 
 The `c` before the path marks a config file, which you are *expected* to edit. A `5` on a file in `/usr/bin` is a very different matter: either someone replaced a program, or the disk is corrupt. `rpm -Va` across the whole system is a fast first check after a suspected compromise (though a skilled attacker can tamper with the database too, so treat it as a clue, not proof).
 
@@ -616,6 +708,17 @@ Complete!
 ```
 
 `undo` reverses one transaction. `rollback N` reverses everything after transaction `N`. Both need the older package versions to still be available in a repo to downgrade, so they work best for recent installs and removals. Undoing a large upgrade is not always possible; that is what VM snapshots and backups are for.
+
+!!! example "Story: the package nobody remembers installing"
+    **Symptom:** a colleague spots `tree` on a production server that is supposed to carry only approved packages. Nobody remembers installing it.
+
+    **Evidence:** `sudo dnf history` lists transaction 6, `install tree`, at 13:02 yesterday. `sudo dnf history info 6` shows exactly one package altered: `Install tree-2.1.0-8.el10.x86_64 @baseos`.
+
+    **Reasoning:** every DNF run is a numbered order in the book, so you don't have to guess what changed. Here the transaction is small and recent, and the package came from a repo that still has it.
+
+    **Fix:** `sudo dnf history undo 6` removes it again.
+
+    **Check:** `rpm -q tree` reports it is not installed. For a big upgrade, undo may not be possible (older versions must still be in a repo), which is why you snapshot first.
 
 ### Package groups
 
@@ -1195,11 +1298,28 @@ Packages run scriptlets as root. Without signature checks, anyone who can tamper
 
 </div>
 
+<div class="card" markdown>
+
+State the software mental model in one sentence.
+
+A package is a signed box of files with a label saying what it needs. DNF shops the repositories for every box your request needs, and RPM unpacks them and remembers every file it put on disk.
+
+</div>
+
+<div class="card" markdown>
+
+Which two commands trace a file back to its package and check it is unchanged?
+
+`rpm -qf /path` names the owning package; `rpm -V package` reports any file that differs from what was installed.
+
+</div>
+
 </div>
 
 ## Recap
 
 !!! recap "Key takeaways"
+    - One sentence: a package is a signed box of files with a label of what it needs; DNF shops the repos for every box, and RPM unpacks them and remembers every file. So you can always ask who owns a file (`rpm -qf`), whether it changed (`rpm -V`), and what DNF did (`dnf history`).
     - An RPM is a signed bundle of files, metadata (provides/requires), and scriptlets. RPM installs and queries; DNF fetches, solves, verifies, and drives RPM.
     - `rpm -qf`, `-ql`, `-qi`, `--scripts`, and `-V` answer most "what is this, where did it come from, has it changed?" questions.
     - Rocky's repos are BaseOS, AppStream, extras, and (disabled) CRB. EPEL needs CRB plus `epel-release` from extras.

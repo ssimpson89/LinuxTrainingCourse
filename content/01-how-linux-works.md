@@ -23,6 +23,59 @@ You type `cat /etc/hostname`, press Enter, and a word appears. That takes a few 
 
 ## The big picture
 
+### Linux in one sentence
+
+Here is the whole idea:
+
+> **Programs can't touch anything themselves. They ask the kernel, one system call at a time; the kernel checks who is asking, and almost everything they can ask for looks like a file.**
+
+Everything else in this module is detail around that sentence.
+
+- **Programs can't touch anything themselves.** Your shell, `ls`, a web server: all run in a locked-down area called **user space**. No direct access to disks, memory of other programs, or network cards.
+- **They ask the kernel.** The **kernel** is the one program that controls the hardware. A request to it is a **system call**: "open this file", "read 10 bytes", "start this program".
+- **The kernel checks who is asking.** Every process runs as an **identity** (a user, groups, an SELinux label). On each request the kernel decides: may this identity do this?
+- **Almost everything looks like a file.** Disks, terminals, running processes and kernel settings all appear as paths under `/`, so the same few calls (`open`, `read`, `write`) work on all of them.
+
+!!! analogy "Think of it like a restaurant"
+    The **kitchen** is the kernel: knives, fire, the stock room. Only staff go in. The **dining room** is user space. The **waiter** is the system call: you order from a fixed menu, the kitchen decides whether to make it, and the result comes back out. Almost everything on the menu is written the same way ("a file"), so one way of ordering works for every dish. A customer who climbs over the counter gets thrown out (a segmentation fault).
+
+### Three questions that answer most "why did that fail?" problems
+
+Because every request goes through the kernel, almost any failure can be pinned down by asking three questions. Each has a tool you'll use in this module.
+
+| Question | In one-sentence terms | How to check |
+|---|---|---|
+| **1. Which process?** | Who is making the request | `echo $$`, `ps`, `/proc/<PID>/` |
+| **2. Running as which identity?** | Who the kernel thinks is asking | `id`, `grep Uid /proc/<PID>/status` |
+| **3. Asking for what, and what did the kernel answer?** | Which system call, on which file, and the result | `strace` shows the exact call and the error (`EACCES`, `ENOENT`, …) |
+
+```mermaid
+flowchart TB
+    S["A program fails with<br/>a vague error"] --> A["1. Which process?<br/>echo $$ / ps"]
+    A --> B["2. Which identity?<br/>id"]
+    B --> C["3. What did it ask for?<br/>strace -e trace=file cmd"]
+    C --> D{"What did the<br/>kernel answer?"}
+    D -- "EACCES" --> F1["Identity may not do that<br/>(permissions, module 04;<br/>SELinux, module 16)"]
+    D -- "ENOENT" --> F2["The file isn't where<br/>the program looked"]
+    D -- "success" --> F3["The kernel said yes;<br/>the problem is inside the program"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **kernel** | The one program with full control of the hardware |
+| **user space** | Where every other program runs, with no direct hardware access |
+| **system call** (syscall) | A request from a program to the kernel, like `openat` or `read` |
+| **process** | A running program, with a number called its **PID** |
+| **identity** | Who a process acts as: user ID, group IDs, SELinux label |
+| **file descriptor** (fd) | A small number the kernel hands back meaning "the thing you opened" |
+| **glibc** | The C library that turns friendly functions into system calls |
+| **`/proc`, `/sys`** | Virtual folders where the kernel shows its state as files |
+| **fork / exec / wait** | Copy a process / replace its program / wait for it to finish |
+
+### The layers
+
 A running Linux system is a stack of layers. Each layer only talks to the layers directly above and below it. Click through them from top to bottom:
 
 <div class="layers" data-open="0" markdown>
@@ -101,8 +154,7 @@ Linux prevents this by splitting the world in two:
 
 The CPU itself enforces the split. If a user-space program tries to execute a privileged instruction or touch memory it doesn't own, the CPU stops it and hands control to the kernel, which usually kills the program (that's the famous "Segmentation fault").
 
-!!! analogy "Think of it like a restaurant"
-    The **kitchen** is kernel space: knives, fire, the stock room. Only trained staff go in. The **dining room** is user space: customers can't wander into the kitchen, however hungry they are. The **waiter** is the system call: you place an order through a fixed menu, the kitchen decides whether to make it, and the result comes back out. A customer who tries to climb over the counter gets thrown out (a segmentation fault).
+This is the "programs can't touch anything themselves" half of the one-sentence model. In the restaurant picture, it's the counter between the dining room and the kitchen.
 
 So how does a program read a file, if it can't touch the disk? It asks.
 
@@ -182,6 +234,63 @@ Reading it line by line:
 4. `write(1, …)`: write them to descriptor **1**, which is standard output, your terminal.
 5. `read(3, "", …) = 0`: a read that returns 0 bytes means "end of file", so `cat` exits.
 
+### Read an strace line as a sentence
+
+This is the core skill of the module. Every strace line has the same shape:
+
+```text
+syscall(arguments...) = result
+```
+
+Read it as: **"The program asked the kernel to `<syscall>` on `<the thing in the arguments>`, and the kernel answered `<result>`."** A number of 0 or more is success (for `openat`, it's the new file descriptor; for `read`, the number of bytes). `-1` followed by a capital-letter code is a refusal, and the code says why:
+
+| Code | Plain meaning |
+|---|---|
+| `ENOENT` | No such file or directory |
+| `EACCES` | Permission denied (the identity isn't allowed) |
+| `EPERM` | Operation not permitted |
+
+#### Practise: translate three lines
+
+Try each one before you open the answer. All three come from real traces on this page.
+
+```text
+A:  openat(AT_FDCWD, "/etc/hostname", O_RDONLY) = 3
+B:  openat(AT_FDCWD, "/etc/shadow", O_RDONLY) = -1 EACCES (Permission denied)
+C:  read(3, "", 262144)                     = 0
+```
+
+??? success "Answer A"
+    "The program asked the kernel to open `/etc/hostname` read-only, and the kernel said yes and gave it file descriptor 3." From now on, the program uses `3` to mean that file.
+
+??? success "Answer B"
+    "The program asked to open `/etc/shadow` read-only, and the kernel refused: permission denied." The process's **identity** isn't allowed to read that file. Next step: run `id` and `ls -l /etc/shadow` to compare the identity with the file's owner and mode.
+
+??? success "Answer C"
+    "The program asked to read up to 262144 bytes from descriptor 3, and the kernel returned 0 bytes." A read that returns 0 means end of file, so the program knows it's done.
+
+#### Worked story: "cat says permission denied, but why?"
+
+**Symptom.** You run `cat /etc/shadow` and get `cat: /etc/shadow: Permission denied`.
+
+**Evidence.** Trace just the open calls:
+
+```console
+$ strace -e trace=openat cat /etc/shadow
+…
+openat(AT_FDCWD, "/etc/shadow", O_RDONLY) = -1 EACCES (Permission denied)
+cat: /etc/shadow: Permission denied
++++ exited with 1 +++
+```
+
+**Reasoning.** Use the three questions. The process is `cat`. The call that failed is `openat` on `/etc/shadow`, and the kernel answered `EACCES`. That points at question 2, the identity: `cat` runs as you, and `/etc/shadow` is readable only by root. `cat` didn't decide anything; it only repeated what the kernel said.
+
+**Fix.** Run it with a root identity: `sudo cat /etc/shadow`.
+
+**Check.** `sudo strace -e trace=openat cat /etc/shadow` shows the same `openat` call now returning a file descriptor instead of `-1 EACCES`. You'll do this yourself in Lab 1.
+
+### Seeing the big picture: strace -c
+
 For a summary instead of every call, use `-c`:
 
 ```console
@@ -216,7 +325,7 @@ The kernel decides. A program can't skip the check, because the only way to open
 
 ## Everything is a file
 
-Here's a design decision from the 1970s that still shapes everything: Unix (and Linux) expose as much as possible through **one interface: files**. If you can open, read, and write a file, you can talk to:
+This is the last part of the one-sentence model: almost everything a program can ask for looks like a file. It's a design decision from the 1970s that still shapes everything: Unix (and Linux) expose as much as possible through **one interface: files**. If you can open, read, and write a file, you can talk to:
 
 | What | Where it appears | Try |
 |---|---|---|
@@ -358,7 +467,7 @@ flowchart TB
 - A **file** is anything with a path: data on disk, a device, a socket, a kernel setting. ([Modules 02](02-shell-and-filesystem.md) and [09](09-disks-and-filesystems.md))
 - An **identity** is who a process is acting as: a user ID, group IDs, and an SELinux label. ([Modules 03](03-users-groups-and-sudo.md) and [16](16-selinux.md))
 
-"Permission denied" is the kernel saying: *this process, running as this identity, may not do that to this file.* When you troubleshoot it, you check exactly those three things.
+"Permission denied" is the kernel saying: *this process, running as this identity, may not do that to this file.* When you troubleshoot it, you check exactly those three things. These are the same three questions from the big picture: which process, which identity, asking for what.
 
 !!! example "Try it"
     See all three for your current shell:
@@ -727,6 +836,22 @@ Why do files in `/proc` show 0 bytes?
 
 <div class="card" markdown>
 
+Linux in one sentence?
+
+Programs can't touch anything themselves. They ask the kernel with system calls, the kernel checks who is asking, and almost everything looks like a file.
+
+</div>
+
+<div class="card" markdown>
+
+How do you read `openat(AT_FDCWD, "/etc/shadow", O_RDONLY) = -1 EACCES`?
+
+"The program asked to open `/etc/shadow` read-only, and the kernel refused: permission denied." `-1` plus a code is a refusal; a number of 0 or more is success.
+
+</div>
+
+<div class="card" markdown>
+
 Who is PID 1 on Rocky Linux?
 
 `systemd`. It starts and supervises every service, and every process descends from it.
@@ -746,6 +871,8 @@ Where do your config changes belong: `/usr` or `/etc`?
 ## Recap
 
 !!! recap "Key takeaways"
+    - **Linux in one sentence:** programs can't touch anything themselves; they ask the kernel with system calls, the kernel checks who is asking, and almost everything looks like a file.
+    - Read any strace line as "asked the kernel to `<call>` on `<thing>`, and the kernel answered `<result>`". `-1 EACCES` means the identity isn't allowed; `-1 ENOENT` means the file isn't there.
     - The **kernel** controls the hardware; every other program runs in restricted **user space**.
     - Programs get anything done by making **system calls**, and the kernel checks permissions on each one. `strace` shows you those calls.
     - Linux exposes devices, processes, and kernel settings **as files** under `/dev`, `/proc`, and `/sys`, so ordinary tools work on all of them.

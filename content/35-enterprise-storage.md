@@ -23,6 +23,12 @@ The database server's "local disk" is actually a slice of a storage array two ra
 
 ## The big picture
 
+### The whole module in one sentence
+
+> **A SAN disk is an ordinary disk at the far end of a cable. Your server (the initiator) logs in to the storage (the target) to reach it, multipath merges the copies that arrive over each cable back into one disk, and everything above that is the stack you already know.**
+
+Everything else in this module hangs off that sentence: **logging in** is iSCSI or NVMe/TCP, **the copies** are paths, **merging them** is dm-multipath or native NVMe multipath, and **the stack you know** is partitions, LVM and XFS.
+
 So far every disk you used was attached to the machine: a virtio disk, a SATA drive, an NVMe card. In a data centre, much of the storage lives in a **SAN** (storage area network): big shared arrays that hand out **block devices** to servers over a network. The server sees an ordinary disk (`/dev/sdb`, `/dev/nvme1n1`), partitions it, puts LVM and XFS on it, exactly as in [module 09](09-disks-and-filesystems.md). Only the bottom of the stack changes.
 
 <div class="layers" data-open="0" data-hint="Click a layer: the top half is the stack you already know." markdown>
@@ -80,12 +86,41 @@ flowchart LR
     end
 ```
 
-## SAN vocabulary
+### The few things that cause most problems
+
+Almost every SAN problem you'll meet on the host side is one of four things. Each maps onto one part of the sentence above:
+
+| What you see | In "disk at the end of a cable" terms | Where to look |
+|---|---|---|
+| **1. Logged in, but no disk appears** | The login worked, but the target shows you no disks | The target's ACL: does it list your exact IQN, with a mapped LUN? |
+| **2. The same disk appears twice, or I/O freezes when a cable fails** | The copies over each cable were never merged, or failover is slow | `multipath -ll`, and the iSCSI `replacement_timeout` |
+| **3. Boot hangs, then emergency mode** | systemd tried to mount the disk before the cable was "plugged in" | `_netdev,nofail` in `/etc/fstab`, and never `/dev/sdX` |
+| **4. Numbers that look too good (or too bad)** | You measured a cache or a single request, not the disk | fio with `--direct=1`, several queue depths, long runs |
+
+And the order to check them in, from the bottom of the stack up:
+
+```mermaid
+flowchart TB
+    S["SAN disk missing, frozen or slow"] --> A{"iscsiadm -m session<br/>shows a login?"}
+    A -- "no" --> N["Network, portal or CHAP:<br/>fix the login first"]
+    A -- "yes" --> B{"lsblk shows<br/>the disk(s)?"}
+    B -- "no" --> F1["1. Target ACL / LUN mapping"]
+    B -- "yes" --> C{"multipath -ll shows<br/>one device, paths active?"}
+    C -- "no" --> F2["2. Multipath and timeouts"]
+    C -- "yes" --> D{"Problem at boot<br/>or under load?"}
+    D -- "boot" --> F3["3. fstab: UUID, _netdev, nofail"]
+    D -- "load" --> F4["4. Queue depth and honest fio"]
+```
+
+### Words you'll see
 
 Storage people speak their own dialect. Here's the minimum you need to read any SAN document:
 
 | Term | Meaning |
 |---|---|
+| **SAN** | Storage area network: shared arrays handing out disks over a network |
+| **Path** | One route (one cable, one login) from your server to a disk. Each path shows up as its own `sdX` |
+| **Multipath device** | The single disk built from all paths to one LUN, such as `/dev/mapper/mpatha` |
 | **Initiator** | The client: the server that uses the storage |
 | **Target** | The server side that exports storage; one array can present many targets |
 | **IQN** | iSCSI Qualified Name, the unique name of an initiator or target: `iqn.YYYY-MM.reversed.domain:anything` |
@@ -97,6 +132,9 @@ Storage people speak their own dialect. Here's the minimum you need to read any 
 | **WWN / WWID** | World Wide Name / Identifier: the globally unique ID of a LUN, the same on every path |
 | **NQN** | NVMe Qualified Name, the NVMe-oF equivalent of an IQN |
 | **ALUA** | Asymmetric Logical Unit Access: the array tells the host which paths are optimal |
+| **`_netdev`** | The fstab option that tells systemd "this disk needs the network first" |
+
+### Your server's name: the initiator IQN
 
 Every initiator has a name. Installing `iscsi-initiator-utils` doesn't create it: a one-shot unit, `iscsi-init.service`, generates it the first time `iscsid` starts (it only runs while the file is missing):
 
@@ -107,6 +145,58 @@ InitiatorName=iqn.1994-05.com.redhat:3f9a1c2b7d4e
 ```
 
 The target's ACL must list exactly this name. If you clone a VM **after** the name was generated, every clone has the same IQN, which confuses targets badly (sessions from two hosts kick each other off). Regenerate it with `echo "InitiatorName=$(iscsi-iname)" | sudo tee /etc/iscsi/initiatorname.iscsi` and restart `iscsid`. Better: delete the file in your golden image, and each clone generates its own at first boot.
+
+## Core skill: read `multipath -ll`
+
+The output you'll read most often on a SAN-attached server is `multipath -ll`. It answers the question "how many cables reach this disk, and which ones work?" Here's a healthy one:
+
+```console
+$ sudo multipath -ll
+mpatha (36001405a7c3e2f0b1e84d4ca9f3b7e61) dm-3 LIO-ORG,disk1
+size=1.0G features='1 queue_if_no_path' hwhandler='1 alua' wp=rw
+`-+- policy='service-time 0' prio=50 status=active
+  |- 7:0:0:0 sdb 8:16 active ready running
+  `- 8:0:0:0 sdc 8:32 active ready running
+```
+
+Read it with this template:
+
+```text
+NAME (WWID)                      ← one merged disk, and the LUN's global ID
+size, features                   ← what happens if every path dies
+`-+- policy prio status          ← a group of paths, and whether it's in use
+  |- H:C:T:L sdX  DM CHECKER KERNEL   ← one path = one cable, three opinions
+```
+
+The three words at the end of each path line are three opinions about that cable: **multipath's** (`active`/`failed`), **the path checker's** (`ready`/`faulty`/`ghost`) and **the kernel's** (`running`/`offline`). When all three are happy, the cable works. So this disk, `mpatha`, has two cables (`sdb` and `sdc`), both working.
+
+Practise on three variations. (The full line-by-line meaning comes later in [Reading multipath -ll](#reading-multipath-ll).)
+
+**Output A:** one path line now reads
+
+```text
+  `- 8:0:0:0 sdc 8:32 failed faulty offline
+```
+
+??? success "Answer A"
+    All three opinions agree that the cable behind `sdc` is dead: multipath stopped using it, the checker sees it failing, and the kernel took the SCSI device offline. `sdb` still says `active ready running`, so the disk keeps working on one cable. Your filesystem never noticed. Find out why the path died (cable, switch port, target port) before the second one goes.
+
+**Output B:** instead of one group, you see two
+
+```text
+|-+- policy='service-time 0' prio=50 status=active
+| `- 7:0:0:0 sdb 8:16 active ready running
+`-+- policy='service-time 0' prio=10 status=enabled
+  `- 8:0:0:0 sdc 8:32 active ready running
+```
+
+??? success "Answer B"
+    Nothing is wrong. This is an active/passive array using **ALUA**: the array told the host that `sdb` goes to the controller that owns the LUN (`prio=50`, `status=active`, carrying I/O now) and `sdc` to the other one (`prio=10`, `status=enabled`, standing by). I/O moves to the second group only if the first fails.
+
+**Output C:** `lsblk` shows `sdb` and `sdc`, both `LIO-ORG disk1`, but `multipath -ll` prints nothing at all.
+
+??? success "Answer C"
+    The two copies were never merged. Either multipath isn't enabled (`mpathconf --enable --with_multipathd y`), or `multipathd` isn't running. Until it is, you have two disks that are secretly the same LUN, and mounting both would corrupt it. Don't touch either until `multipath -ll` shows one device.
 
 ## Building an iSCSI target with targetcli
 
@@ -487,6 +577,25 @@ remote-fs.target
 ● ├─srv-san.mount
 …
 ```
+
+!!! example "Worked story: the server that won't come back"
+    **Symptom.** After a planned reboot, a database server never comes back on the network. On the console, it's sitting in emergency mode.
+
+    **Evidence.** The mount for `/srv/san` failed during boot. Its fstab line is:
+
+    ```text
+    /dev/sdb  /srv/san  xfs  defaults  0 0
+    ```
+
+    **Reasoning.** Two problems on one line. With no `_netdev`, systemd treated the mount as local and tried it before the network was up and before `iscsi.service` had logged in, so the device didn't exist yet. With no `nofail`, that failure stopped the boot. And `/dev/sdb` is just "whichever disk appeared second", which on a multipathed LUN is one path, not the merged disk.
+
+    **Fix.** From emergency mode, edit the line to use the filesystem UUID and both options:
+
+    ```text
+    UUID=4b1f6c2e-8a0d-4c5e-9f2b-7d3e1a6c9b08  /srv/san  xfs  _netdev,nofail  0 0
+    ```
+
+    **Check.** `sudo systemctl daemon-reload`, `sudo mount -a`, then `systemctl list-dependencies remote-fs.target` should list `srv-san.mount`. Then reboot once more while you're watching.
 
 !!! danger "The boot that never ends"
     Without `_netdev`, systemd treats the mount as local and tries it before the network is up. The device doesn't exist, the mount waits 90 seconds, fails, and without `nofail` the boot stops in emergency mode. On a remote server with no console, that's an outage. Test every new SAN fstab line with `sudo mount -a` and `sudo systemctl daemon-reload`, then a reboot, before you walk away.
@@ -975,6 +1084,22 @@ $ sudo dnf install -y targetcli iscsi-initiator-utils device-mapper-multipath nv
 
 <div class="card" markdown>
 
+Explain SAN storage in one sentence.
+
+A SAN disk is an ordinary disk at the far end of a cable: the initiator logs in to the target to reach it, multipath merges the copies from each cable into one disk, and the stack above (LVM, XFS) is unchanged.
+
+</div>
+
+<div class="card" markdown>
+
+What are the three words at the end of a `multipath -ll` path line?
+
+Three opinions about that path: multipath's dm state (`active`/`failed`), the path checker's (`ready`/`faulty`/`ghost`) and the kernel's device state (`running`/`offline`).
+
+</div>
+
+<div class="card" markdown>
+
 Initiator vs target?
 
 The initiator is the client that uses the storage; the target is the server that exports it.
@@ -1042,6 +1167,7 @@ Outstanding I/Os = IOPS × latency. Use it to sanity-check benchmark results.
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: a SAN disk is an ordinary disk at the end of a cable. Log in to reach it, let multipath merge the copies from each cable, and use the stack you already know on top.
     - A SAN gives you ordinary block devices; only the bottom of the storage stack (initiator, network, target) is new.
     - LIO and `targetcli` build iSCSI targets from backstores, LUNs, ACLs and portals; `iscsiadm` discovers, saves node records and logs in.
     - Each path is a separate disk until dm-multipath groups them by WWID; `multipath -ll` shows groups, priorities and three-part path states. Lower `replacement_timeout` so failover is quick.

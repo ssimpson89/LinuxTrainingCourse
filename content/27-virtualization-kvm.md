@@ -14,6 +14,7 @@ description: How KVM, QEMU and libvirt turn a Rocky Linux machine into a hypervi
 Your team needs three test servers by lunch, the cloud budget is spent, and there is a beefy Rocky box under a desk. Within ten minutes you can have three fresh VMs booted from a cloud image, on their own private network, sharing one base disk. This module shows you how, and more importantly what is going on underneath: which parts are the kernel, which are QEMU, which are libvirt, and where to look when a VM is slow or won't boot. It's also the foundation for the multi-VM labs in [module 26](26-centralized-identity.md) and [module 28](28-high-availability.md).
 
 !!! abstract "What you'll learn"
+    - Explain a VM in one sentence, and read any VM's state, disk and network in three commands
     - How hardware virtualization works, and the jobs of KVM, QEMU and libvirt
     - Check a host for virtualization support and install the stack on Rocky 10
     - Create VMs in seconds from a cloud image with `virt-install` and cloud-init
@@ -25,6 +26,14 @@ Your team needs three test servers by lunch, the cloud budget is spent, and ther
 ## The big picture
 
 A **virtual machine** (VM) is a complete computer simulated in software: its own CPU, memory, disks and network cards, running its own kernel. The real machine is the **host**; the VM is the **guest**. The program that shares the host's hardware among guests is the **hypervisor**.
+
+### KVM in one sentence
+
+Here is the whole idea:
+
+> **A VM is an ordinary Linux process (QEMU) whose guest code KVM lets run straight on the real CPU, and libvirt keeps a recipe for each one (its XML), plus the disk files and virtual networks it plugs into.**
+
+Everything in this module hangs off that sentence. "The VM is slow" becomes "the process is starved or exiting too often". "The VM won't start" becomes "the recipe, the disk file or the network is wrong". And because a VM is a process, every tool you already know (`ps`, `top`, cgroups, SELinux, the OOM killer) works on it.
 
 On Rocky Linux the hypervisor is not one program but three cooperating parts. Click through the stack:
 
@@ -85,6 +94,121 @@ The key insight: **a VM is just a process**. `top` shows it, cgroups limit it, S
     ```
 
     `PSR` is the host CPU each thread last ran on. A guest that is "slow for no reason" often turns out to be a vCPU thread competing with something else on the host, which `top -H` shows at a glance. The guest's RAM is ordinary anonymous memory of this process, which is why the host's OOM killer can kill a VM ([module 25](25-memory-deep-dive.md)), and why `systemd-cgls` shows each VM in its own scope under `machine.slice`.
+
+### The four things you manage
+
+Every VM is four things. Learn which command shows each and you can answer most questions about any VM:
+
+| Thing | What it is | See it with | Change it with |
+|---|---|---|---|
+| **1. The process** | The running `qemu-kvm`, one per VM | `virsh list --all`, `virsh dominfo web1` | `virsh start`, `shutdown`, `destroy` |
+| **2. The recipe** | The domain XML: CPUs, memory, devices | `virsh dumpxml web1` | `virsh edit web1` (never the file directly) |
+| **3. The disk** | A file (usually qcow2), often on top of a shared base | `virsh domblklist web1`, `qemu-img info -U` | `qemu-img` with the VM off |
+| **4. The network** | A virtual switch the VM's NIC plugs into | `virsh domiflist web1`, `virsh net-list --all` | `virsh net-*`, a bridge |
+
+When something goes wrong, the same four tell you where to look:
+
+```mermaid
+flowchart TB
+    S["VM problem"] --> A{"virsh list --all<br/>shows the VM?"}
+    A -- "no" --> W["Wrong libvirt instance:<br/>qemu:///session vs qemu:///system"]
+    A -- "yes, paused" --> P["virsh domstate --reason:<br/>ioerror = host disk full"]
+    A -- "yes, won't start" --> D["The disk or recipe:<br/>QEMU log, SELinux label, XML"]
+    A -- "yes, running" --> N{"Reachable on the network?"}
+    N -- "no" --> NET["The network:<br/>virsh net-list --all, firewall"]
+    N -- "yes, but slow" --> PERF["The process:<br/>KVM acceleration, CPU model, virtio"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **host** / **guest** | The real machine / the VM running on it |
+| **hypervisor** | The software that shares the host's hardware among guests: here KVM + QEMU + libvirt |
+| **domain** | libvirt's word for a VM |
+| **domain XML** | The VM's recipe: everything libvirt knows about it |
+| **VM exit** | The CPU stopping guest code to let the hypervisor handle something sensitive. Fewer exits = faster VM |
+| **virtio** | Paravirtual devices designed for VMs, so the guest exits far less than with emulated hardware |
+| **qcow2** / **backing file** | The thin, copy-on-write disk format / a shared read-only base image under it |
+| **storage pool** | A place libvirt keeps disk images, such as `/var/lib/libvirt/images` |
+| **NAT** / **bridged** / **isolated** | Network types: share the host's address / sit on the real LAN / talk only to each other |
+| **sVirt** | libvirt's SELinux labels that keep each VM away from other VMs' disks |
+
+## The core skill: reading a VM in three commands
+
+Before you change a VM, read it. Three commands tell you what it is, what disk it really uses, and whether it's healthy. (You'll install the tools in "Installing the stack" below; come back to this once you have a VM.)
+
+```text
+1. virsh list --all              → does it exist here, and what state is it in?
+2. virsh dominfo NAME            → CPUs, memory, persistent or not, SELinux label
+3. qemu-img info -U DISK         → real size on the host, and what it's built on
+```
+
+Then say it as a sentence: **"VM NAME is STATE, uses DISK SIZE on the host on top of BASE, and is plugged into NETWORK."**
+
+### Story: the VMs that paused themselves
+
+**Symptom.** Overnight, three lab VMs stopped answering. Nobody shut them down.
+
+**Evidence.** `virsh list` shows them as `paused`, and asking why:
+
+```console
+$ virsh domstate web1 --reason
+paused (ioerror)
+```
+
+**Reasoning.** `ioerror` means QEMU hit an error writing the disk file, and the VM was paused rather than handed a failed write. The disks are thin-provisioned qcow2 files that grow as guests write. In the four-things model, it's the disk: the host filesystem under `/var/lib/libvirt/images` filled up.
+
+**Fix.** Free space on the host filesystem (`df -h /var/lib/libvirt/images` shows how full it is), then `virsh resume web1` for each VM.
+
+**Check.** `virsh list` shows `running` again. To stop it recurring, compare each disk's "virtual size" with the free space on the host.
+
+### Practise: read three snapshots
+
+Answers are hidden.
+
+**A.** You log in as yourself and run:
+
+```console
+$ virsh list --all
+ Id   Name   State
+--------------------
+```
+
+Your colleague swears `web1` is running. Who is right?
+
+??? success "Answer A"
+    Probably both. A plain `virsh` as a normal user connects to `qemu:///session`, your private libvirt instance, which has no VMs. Server VMs live in `qemu:///system`. Run `virsh -c qemu:///system list --all` (or `sudo virsh list --all`), and set `LIBVIRT_DEFAULT_URI` so it doesn't happen again.
+
+**B.**
+
+```console
+$ sudo qemu-img info -U /var/lib/libvirt/images/web1.qcow2
+image: /var/lib/libvirt/images/web1.qcow2
+file format: qcow2
+virtual size: 20 GiB (21474836480 bytes)
+disk size: 1.12 GiB
+…
+backing file: /var/lib/libvirt/images/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2
+```
+
+How much host disk does this VM use, and can you delete the Rocky cloud image to save space?
+
+??? success "Answer B"
+    About 1.12 GiB on the host ("disk size"); the guest sees 20 GiB ("virtual size"). And no: the cloud image is this VM's **backing file**. The overlay only stores what changed, so every unchanged block is read from the base. Delete or modify the base and the VM is broken. Flatten it first with `qemu-img convert` if you need it standalone.
+
+**C.** A VM's `virsh dominfo` ends with:
+
+```text
+Security model: selinux
+Security DOI:   0
+Security label: system_u:system_r:svirt_t:s0:c123,c456 (enforcing)
+```
+
+What does the `c123,c456` part buy you?
+
+??? success "Answer C"
+    Isolation between VMs. Each VM's QEMU process runs as `svirt_t` with its own pair of MCS categories, and its disk files get the same pair. If an attacker escapes one guest into its QEMU process, SELinux still stops it opening any other VM's disk. That's sVirt.
 
 ## How hardware virtualization works
 
@@ -1210,6 +1334,22 @@ Domain 'web1' is being shutdown
 
 <div class="card" markdown>
 
+Say the KVM mental model in one sentence.
+
+A VM is an ordinary Linux process (QEMU) whose guest code KVM runs straight on the real CPU; libvirt keeps its recipe (XML), its disk files and its virtual networks.
+
+</div>
+
+<div class="card" markdown>
+
+What are the four things every VM is made of, and one command to see each?
+
+The process (`virsh list --all`), the recipe (`virsh dumpxml`), the disk (`virsh domblklist`, `qemu-img info -U`) and the network (`virsh domiflist`, `virsh net-list --all`).
+
+</div>
+
+<div class="card" markdown>
+
 What are the jobs of KVM, QEMU and libvirt?
 
 KVM (kernel module): runs guest code on the CPU with hardware virtualization. QEMU (one process per VM): emulates devices and holds the VM. libvirt: manages VMs, networks and storage through one API.
@@ -1277,6 +1417,7 @@ RAM is copied while the guest runs, dirty pages are re-sent in rounds, then the 
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: a VM is a QEMU process accelerated by KVM, and libvirt manages its four parts: the process, the recipe (XML), the disk and the network. Diagnose by asking which of the four is wrong.
     - KVM runs guest code directly on the CPU; QEMU is one process per VM that emulates devices; libvirt (modular daemons such as `virtqemud` on Rocky 10) manages it all.
     - Check support with `lscpu`, `/dev/kvm` and `virt-host-validate`. Nested virtualization needs `vmx`/`svm` exposed to the lab VM.
     - Cloud images plus cloud-init plus `virt-install --import` create a VM in under a minute; qcow2 overlays on a read-only base make clones nearly free.

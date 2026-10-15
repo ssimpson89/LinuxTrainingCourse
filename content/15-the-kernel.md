@@ -14,6 +14,8 @@ description: What the Linux kernel does on Rocky Linux and how to work with it, 
 At 2 a.m. your database vanishes. No error in its own log, no crash message, it's just gone. The answer is in one line of the kernel log: `Out of memory: Killed process 4122 (postgres)`. The kernel is the program that decides who gets memory, CPU time, and hardware, and when it steps in, it usually doesn't ask. This module shows you what the kernel does, how Rocky packages and updates it, and how to inspect, tune, and debug it from the command line. No kernel source required.
 
 !!! abstract "What you'll learn"
+    - Explain the kernel in one sentence: programs ask, the kernel decides, and changes only stick if you write them down.
+    - Read a kernel log line as a plain sentence and tell what it points at.
     - Name the kernel's main jobs and explain the boundary between user space and kernel space.
     - Watch a program's system calls with `strace`.
     - Read Rocky kernel package names, see how updates install side by side, and pick the boot kernel.
@@ -24,7 +26,21 @@ At 2 a.m. your database vanishes. No error in its own log, no crash message, it'
 
 ## The big picture
 
-The **kernel** is the one program that runs with full control of the hardware. Everything else (your shell, systemd, databases) runs in a restricted mode and has to *ask* the kernel for anything involving hardware or other processes. Click each subsystem to see what it does and where you can watch it work.
+### The kernel in one sentence
+
+Here is the whole idea:
+
+> **Programs ask, the kernel decides. You can watch it work (system calls, `/proc`, `/sys` and the kernel log) and you can steer it (sysctls, module options, boot arguments), but a change only survives a reboot if you write it to the right file.**
+
+Everything in this module hangs off that sentence.
+
+- **Programs ask.** Your shell, systemd and your database run in a restricted mode. For anything involving hardware or other processes, they make a **system call**, a request to the kernel.
+- **The kernel decides.** It hands out CPU time, memory and devices, and it can say no. When memory runs out it doesn't even ask: it kills a process.
+- **You watch it** through four windows: `strace` (the requests), `/proc` and `/sys` (live state as files), and `journalctl -k` (the kernel's own log).
+- **You steer it** with three dials: **sysctls** (tunable settings), **module options** (driver settings), and **boot arguments** (the kernel command line).
+- **It forgets.** Anything you change on the live kernel is gone at reboot unless you also write it to that dial's config file.
+
+The **kernel** is the one program that runs with full control of the hardware. Click each subsystem to see what it does and where you can watch it work.
 
 <div class="layers" data-hint="Click a kernel subsystem to see what it does and how to observe it." data-open="0" markdown>
 
@@ -107,6 +123,99 @@ $ lsmod | head
 !!! analogy "Think of it like a hotel"
     Guests (processes) never walk into the kitchen, the boiler room, or other guests' rooms. They call the front desk (system calls), and staff (the kernel) do the work, check that the guest is allowed, and keep everyone apart. The hotel can fit in more guests than it has rooms by quietly moving luggage to storage (swap). When it truly overflows, the manager evicts someone (the OOM killer).
 
+### The few things that solve most kernel problems
+
+Most day-to-day kernel work is one of these five moves. Each has a "look now" command and a "make it stick" file.
+
+| You want to… | Look now | Make it stick |
+|---|---|---|
+| **1. See why a program fails** | `strace -f -e trace=openat CMD` | Nothing to keep; it's a diagnosis |
+| **2. Find out what the kernel did** (OOM kill, driver or disk error) | `journalctl -k`, `dmesg -T` | A persistent journal, so `journalctl -k -b -1` works after a reboot |
+| **3. Change a kernel setting** | `sysctl NAME`, `sysctl -w NAME=VALUE` | A file in `/etc/sysctl.d/` |
+| **4. Change or block a driver** | `modinfo`, `modprobe` | A file in `/etc/modprobe.d/`, plus `dracut -f` if it loads from the initramfs |
+| **5. Pick which kernel boots** | `uname -r`, `grubby --default-kernel` | `grubby --set-default` |
+
+And one question tells you which "make it stick" mechanism a setting needs:
+
+```mermaid
+flowchart TB
+    S["You changed something on the<br/>live kernel and it worked"] --> Q{"Where did you change it?"}
+    Q -- "/proc/sys/… or sysctl -w" --> A["/etc/sysctl.d/NN-name.conf"]
+    Q -- "A module parameter<br/>(modprobe NAME param=…)" --> B["options line in<br/>/etc/modprobe.d/*.conf"]
+    Q -- "Another /sys file<br/>(disk scheduler, THP)" --> C["udev rule or tuned profile"]
+    Q -- "Needed before userspace starts" --> D["Boot argument via<br/>grubby --args"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **kernel space** / **user space** | The privileged mode the kernel runs in / the restricted mode everything else runs in |
+| **system call** (syscall) | A program's request to the kernel: open a file, allocate memory, send a packet |
+| **module** | A piece of kernel code (usually a driver) in a `.ko` file, loaded and unloaded while the kernel runs |
+| **sysctl** | A tunable kernel setting under `/proc/sys/`, like `vm.swappiness` |
+| **`/proc`**, **`/sys`** | Pseudo-filesystems: live kernel state shown as files, never stored on disk |
+| **page** | The unit of memory the kernel manages: 4 KiB on x86_64 |
+| **RSS** | How much of a process's memory is really in RAM right now |
+| **OOM killer** | The kernel's last resort when memory runs out: it kills a process with `SIGKILL` |
+| **ring buffer** | The in-memory kernel log that `dmesg` reads |
+| **panic** / **vmcore** | The kernel stopping on an error it can't recover from / the memory dump kdump saves when it does |
+| **tainted** | A flag saying "unusual code or events happened in this kernel" |
+
+## Reading a kernel log line
+
+This is the most useful kernel skill for a working admin. When a process vanishes, a disk misbehaves or a driver fails, the program involved often can't tell you. The kernel log can. Every kernel message fits the same pattern:
+
+> **"At `<time>`, the kernel's `<subsystem>` (about `<device or process>`) says `<what happened>`."**
+
+```text
+Oct 15 08:12:44 rocky-lab kernel: XFS (vdb1): Metadata corruption detected at xfs_dinode_verify+0x…
+```
+
+| Piece | In this example | Meaning |
+|---|---|---|
+| Time | `Oct 15 08:12:44` | When it happened (`dmesg` without `-T` shows seconds since boot instead) |
+| Source | `kernel:` | It came from the kernel, not from a service |
+| Subsystem | `XFS` | Which part of the kernel is talking |
+| Device or process | `(vdb1)` | What it's about: a disk, an interface, or a process name and PID |
+| Message | `Metadata corruption detected…` | What happened |
+
+Read it as: "At 08:12, the XFS filesystem code, about the partition `vdb1`, says it found metadata corruption." Then ask: **which part of the system is it about, and is it the cause or a symptom?** A filesystem error on `vdb1` points at that disk; it's not a reason to suspect the network.
+
+Get the lines with `journalctl -k` (add `-b -1` for the previous boot, `-p err` for errors only) or `sudo dmesg -T`. The full tour of both commands is in "Kernel messages" below.
+
+### Practise: read three kernel lines
+
+Say each line as a sentence and decide what it tells you before opening the answer.
+
+**Line A:**
+
+```text
+Oct 15 02:03:11 db01 kernel: Out of memory: Killed process 4122 (postgres) total-vm:9218340kB, anon-rss:7340032kB, file-rss:0kB, shmem-rss:0kB, UID:26 pgtables:14520kB oom_score_adj:0
+```
+
+??? success "Answer A"
+    "At 02:03, the kernel's memory manager killed process 4122, `postgres`." `anon-rss:7340032kB` says it held about 7 GiB of its own memory in RAM. This is why the database vanished with nothing in its own log: `SIGKILL` gives the victim no chance to write anything. The matching `oom-kill:` line shows `constraint=CONSTRAINT_NONE`, so the **whole machine** ran out of memory, not just one service's limit. See "The OOM killer" below.
+
+**Line B:**
+
+```text
+Oct 15 08:12:44 rocky-lab kernel: XFS (vdb1): Unmount and run xfs_repair
+```
+
+??? success "Answer B"
+    "The XFS code, about `vdb1`, asks you to unmount the filesystem and repair it." This one even tells you the fix. It follows the "Metadata corruption detected" line above it, so the two together say: the filesystem on `vdb1` is damaged. Repair is covered in [09 · Disks and Filesystems](09-disks-and-filesystems.md).
+
+**Line C:**
+
+```text
+[Thu Oct 15 09:40:02 2026] python3[5120]: segfault at 0 ip 00007f3c… sp 00007ffe… error 4 in libfoo.so
+```
+
+??? success "Answer C"
+    "At 09:40, process 5120 (`python3`) crashed with a segfault, inside `libfoo.so`." The kernel didn't cause this; it's reporting that a program read memory it doesn't own (address `0`, a null pointer). The kernel is a witness here, not the culprit. The bug is in `libfoo.so` or in how Python called it.
+
+Notice the pattern. Lines about **memory** (`Out of memory`, `oom-kill`) mean the kernel acted. Lines about a **device or filesystem** (`XFS (vdb1)`, `I/O error`) point at hardware or storage. Lines naming a **process** (`python3[5120]: segfault`) usually mean the program crashed and the kernel is reporting it.
 ## User space, kernel space, and system calls
 
 The CPU itself enforces two privilege levels. Code in **kernel space** can touch any memory and any device. Code in **user space** can only touch its own memory and must use a **system call** (syscall) for everything else: opening files, allocating memory, creating processes, sending network packets.
@@ -188,16 +297,17 @@ Enterprise kernels don't chase new upstream versions. Instead, fixes, security p
 
 ### The kernel packages
 
-The kernel is split into several RPMs:
+The kernel is split into several RPMs. The one to remember is **`kernel-core`**: it holds the kernel itself, and `rpm -q kernel-core` lists the kernels you have installed.
 
-| Package | Contains |
-|---------|----------|
-| `kernel` | An empty "meta" package that pulls in the others |
-| `kernel-core` | The kernel image (`vmlinuz`) and boot files; requires `kernel-modules-core` |
-| `kernel-modules-core` | The modules most servers and VMs need: virtio, storage and RAID controllers, filesystems, common wired network cards, USB storage, and helpers such as `dummy` |
-| `kernel-modules` | Less common hardware drivers (Wi-Fi, sound, cameras and media, USB serial and network adapters, InfiniBand, …) |
-| `kernel-modules-extra` | Rarely used drivers and protocols, not installed by default |
-| `kernel-devel`, `kernel-headers` | Files for building out-of-tree modules and compiling programs |
+??? question "For the curious: all the kernel packages"
+    | Package | Contains |
+    |---------|----------|
+    | `kernel` | An empty "meta" package that pulls in the others |
+    | `kernel-core` | The kernel image (`vmlinuz`) and boot files; requires `kernel-modules-core` |
+    | `kernel-modules-core` | The modules most servers and VMs need: virtio, storage and RAID controllers, filesystems, common wired network cards, USB storage, and helpers such as `dummy` |
+    | `kernel-modules` | Less common hardware drivers (Wi-Fi, sound, cameras and media, USB serial and network adapters, InfiniBand, …) |
+    | `kernel-modules-extra` | Rarely used drivers and protocols, not installed by default |
+    | `kernel-devel`, `kernel-headers` | Files for building out-of-tree modules and compiling programs |
 
 The files land in predictable places:
 
@@ -344,21 +454,24 @@ $ cat /proc/sys/kernel/tainted
 0
 ```
 
-`0` means clean. Any other number is a sum of flags. The common ones:
+`0` means clean. Any other number is a sum of flags, and the letters also appear in oops and warning messages, as in `Tainted: P  O`.
 
-| Value | Letter | Meaning |
-|-------|--------|---------|
-| 1 | `P` | A proprietary (non-GPL) module was loaded |
-| 512 | `W` | The kernel has printed a warning (`WARNING:` in `dmesg`) |
-| 4096 | `O` | An out-of-tree module (not shipped with this kernel) was loaded |
-| 8192 | `E` | An unsigned module was loaded |
-| 32768 | `K` | The kernel has been live patched |
+??? question "Reference: decoding the taint number"
+    The common flags:
 
-The letters also appear in oops and warning messages, as in `Tainted: P  O`. This one-liner decodes the number:
+    | Value | Letter | Meaning |
+    |-------|--------|---------|
+    | 1 | `P` | A proprietary (non-GPL) module was loaded |
+    | 512 | `W` | The kernel has printed a warning (`WARNING:` in `dmesg`) |
+    | 4096 | `O` | An out-of-tree module (not shipped with this kernel) was loaded |
+    | 8192 | `E` | An unsigned module was loaded |
+    | 32768 | `K` | The kernel has been live patched |
 
-```console
-$ t=$(cat /proc/sys/kernel/tainted); for b in $(seq 0 18); do (( t >> b & 1 )) && echo "bit $b set"; done
-```
+    This one-liner decodes the number:
+
+    ```console
+    $ t=$(cat /proc/sys/kernel/tainted); for b in $(seq 0 18); do (( t >> b & 1 )) && echo "bit $b set"; done
+    ```
 
 Vendor support teams often ask whether the problem reproduces on an untainted kernel, so knowing *why* yours is tainted matters. The full list is in the kernel's "Tainted kernels" documentation (Go deeper).
 
@@ -470,6 +583,19 @@ A few knobs you'll actually meet:
 !!! warning "tuned may set these too"
     Rocky runs **tuned**, which applies a performance profile at boot (`tuned-adm active` shows it, often `virtual-guest` on VMs). Profiles set sysctls such as `vm.swappiness` and `vm.dirty_ratio`. If your value "doesn't stick", check whether tuned is overriding it, and consider a custom tuned profile instead. More in [19 · Performance and Observability](19-performance-and-observability.md).
 
+### Example: a router that forgot how to route
+
+- **Symptom:** a lab VM routes traffic between two networks. After a reboot for updates, hosts on one side can't reach the other.
+- **Evidence:**
+
+    ```console
+    $ sysctl net.ipv4.ip_forward
+    net.ipv4.ip_forward = 0
+    ```
+
+- **Reasoning:** forwarding was turned on with `sysctl -w`, which changes the live kernel only. The kernel forgets live changes at reboot (the last part of the one-sentence model). Nothing in `/etc/sysctl.d/` says otherwise, so the default `0` came back.
+- **Fix:** write the setting to its "make it stick" file and apply it: the `/etc/sysctl.d/90-router.conf` file above, then `sudo sysctl --system`.
+- **Check:** `sysctl net.ipv4.ip_forward` prints `1`, and still does after the next reboot.
 ??? question "Under the hood: sysctls that must be set before userspace starts"
     `systemd-sysctl.service` runs early, but not before the initramfs or before modules load. Two consequences bite people:
 
@@ -577,6 +703,23 @@ OOMScoreAdjust=-500
 ```
 
 There are two kinds of OOM event. A **system-wide OOM** means the whole machine ran out. A **cgroup OOM** means a service hit its own limit (`MemoryMax=` in its unit) and the kernel killed something *inside that service* only. The log line says `constraint=CONSTRAINT_MEMCG` for the second kind. Lab 4 shows a cgroup OOM safely.
+
+### Example: the database that vanished at 2 a.m.
+
+This is the story from the top of the module, start to finish.
+
+- **Symptom:** PostgreSQL is down. Its own log just stops, with no error.
+- **Evidence:** the kernel log has the answer.
+
+    ```console
+    $ journalctl -k | grep -iE 'out of memory|oom-kill'
+    Oct 15 02:03:11 db01 kernel: oom-kill:constraint=CONSTRAINT_NONE,…,task=postgres,pid=4122,uid=26
+    Oct 15 02:03:11 db01 kernel: Out of memory: Killed process 4122 (postgres) total-vm:9218340kB, anon-rss:7340032kB, file-rss:0kB, shmem-rss:0kB, UID:26 pgtables:14520kB oom_score_adj:0
+    ```
+
+- **Reasoning:** say it as a sentence. "The kernel's memory manager killed `postgres` because the *whole machine* ran out of memory" (`CONSTRAINT_NONE`, not `CONSTRAINT_MEMCG`). Postgres was chosen because it held the most memory (`anon-rss` of about 7 GiB) and nothing protected it (`oom_score_adj:0`). The real question is what else grew at 02:00, since Postgres was the victim, not necessarily the cause.
+- **Fix:** find and limit the real memory hog (give it a `MemoryMax=` so it hits its *own* limit instead of taking the machine down), add RAM, and protect the database with `OOMScoreAdjust=-500` in a drop-in, as shown above.
+- **Check:** `cat /proc/$(pgrep -o postgres)/oom_score_adj` now prints `-500`, and the next memory spike shows up as a `CONSTRAINT_MEMCG` kill inside the hog's own cgroup instead.
 
 ??? question "What about huge pages?"
     Normal pages are 4 KiB. Programs with very large memory (databases, JVMs, VMs) spend real CPU time on the page tables that track millions of small pages. **Huge pages** (2 MiB or 1 GiB on x86_64) reduce that overhead. There are two kinds:
@@ -988,6 +1131,22 @@ The kernel side is the same either way. A live patch is a special module; once l
 
 <div class="card" markdown>
 
+Explain the kernel in one sentence.
+
+Programs ask, the kernel decides. You watch it through system calls, `/proc`, `/sys` and the kernel log, and steer it with sysctls, module options and boot arguments, but a change only survives a reboot if you write it to the right file.
+
+</div>
+
+<div class="card" markdown>
+
+Read this as a sentence: `kernel: XFS (vdb1): Metadata corruption detected at xfs_dinode_verify+0x…`
+
+"The kernel's XFS code, about partition `vdb1`, found metadata corruption." Look at that disk and filesystem (unmount and `xfs_repair`), not at the program that happened to be using it.
+
+</div>
+
+<div class="card" markdown>
+
 What is a system call?
 
 The only way for a user-space program to ask the kernel to do something privileged: open a file, allocate memory, start a process, send a packet. `strace` shows them.
@@ -1071,6 +1230,8 @@ The kernel is clean: no proprietary, out-of-tree, or unsigned modules, no warnin
 ## Recap
 
 !!! recap "Key takeaways"
+    - The kernel in one sentence: programs ask, the kernel decides. Watch it with `strace`, `/proc`, `/sys` and `journalctl -k`; steer it with sysctls, module options and boot arguments; and write every change to its config file or it's gone at reboot.
+    - Read a kernel log line as "subsystem, about device or process, says what happened", then decide whether the kernel acted (OOM), is reporting hardware trouble, or is witnessing a program crash.
     - The kernel schedules CPUs, manages memory, runs filesystems and networking, enforces security, and drives hardware. Programs reach it only through system calls, which `strace` reveals.
     - Rocky 10 runs kernel 6.12 with backported fixes. Kernels install side by side (`installonly_limit=3`), and `grubby` picks the default.
     - Modules load automatically by alias. Configure them in `/etc/modprobe.d/`; `blacklist` stops autoloading, `install … /bin/false` stops everything. Rebuild the initramfs with `dracut -f` when needed.

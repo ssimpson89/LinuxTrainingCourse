@@ -24,6 +24,15 @@ A security bulletin lands on Tuesday. Your manager asks three questions: "Are we
 
 ## The big picture
 
+### Rocky Linux in one sentence
+
+Here is the whole idea:
+
+> **Rocky takes RHEL's source code, swaps the labels, builds it in a clean room, seals every package with its own key, and ships it through mirrors. Every one of those steps leaves a fingerprint on your server that you can check.**
+
+The rest of this module walks along that pipeline, one step at a time, and
+shows you the fingerprint each step leaves.
+
 **Rocky Linux** is a **rebuild**: a distribution compiled from the same source code as Red Hat Enterprise Linux (RHEL), with Red Hat's trademarks removed, so that software certified for RHEL runs on it unchanged. Rocky does not write most of the code. Its job is a pipeline: get the sources, remove the branding, build them reproducibly, sign them, and deliver them to millions of machines.
 
 ```mermaid
@@ -37,7 +46,11 @@ flowchart TB
     G --> H["dnf on<br/>your server"]
 ```
 
-Every arrow in that picture leaves evidence you can inspect on your own server:
+### The good news: a few commands read every fingerprint
+
+Every arrow in that picture leaves evidence you can inspect on your own server.
+Four commands (`rpm -qi`, `rpm -K`, `dnf info --installed`, `dnf updateinfo`)
+answer most "where did this come from, and can I trust it?" questions:
 
 | Pipeline stage | Evidence on your machine |
 |---|---|
@@ -51,24 +64,96 @@ Every arrow in that picture leaves evidence you can inspect on your own server:
 !!! analogy "Think of it like a bottling plant"
     Red Hat brews the recipe. Rocky runs an independent bottling plant: it receives the recipe, swaps the labels, bottles it in a clean room, seals every bottle with a tamper-evident cap (the GPG signature), and ships it through a network of distributors (mirrors). You, the customer, can check the seal on every bottle. Where the analogy breaks: Rocky can also add its own bottles (extras, SIGs) and cannot always get the recipe on the same day Red Hat uses it.
 
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **upstream** / **downstream** | Where code comes from / who rebuilds it. RHEL is upstream of Rocky |
+| **rebuild** | A distribution compiled from another's source, like Rocky from RHEL |
+| **SRPM** | Source RPM: the original source plus the spec file that says how to build it |
+| **debranding** | Replacing Red Hat trademarks while changing nothing functional |
+| **build system** | The service that turns sources into RPMs reproducibly (Koji, Peridot) |
+| **mock** | The tool that builds one package in a fresh, minimal chroot |
+| **dist tag** | The end of the `Release` field, like `.el10_2`, saying which release it was built for |
+| **GPG signature** | The tamper-evident seal on each RPM, made with Rocky's private key |
+| **fingerprint** | The long ID of a key, checked out of band to prove the key is genuine |
+| **repository** | A directory of RPMs plus metadata that DNF reads |
+| **mirror** | A server that copies Rocky's repos; it cannot forge signatures |
+| **vault** | Frozen trees of old minor releases, kept but not updated |
+| **erratum** / **RLSA** | A published update with a description; RLSA is a security one |
+| **SIG** | Special Interest Group: a community team shipping extra content |
+
+### The core skill: read a package's fingerprints
+
+The skill this module builds is tracing any package back through the pipeline.
+Put what you find into one sentence:
+
+> **"`<package>` was built by `<vendor>` for `<release>`, signed with key `<id>`, and came from repo `<repo>`."**
+
+If any part of that sentence surprises you (a vendor you don't know, a missing
+key, a repo you never enabled), you've found something worth a closer look.
+
+Try these three. Each uses output you'll meet again later in the module.
+
+**Output A:**
+
+```text
+Signature   : RSA/SHA256, Fri 14 Aug 2026 10:12:45 AM UTC, Key ID 5b106c736fedfc85
+Source RPM  : rocky-release-10.2-1.2.el10.src.rpm
+Vendor      : Rocky Enterprise Software Foundation
+```
+
+??? success "Answer A"
+    "`rocky-release` was built by the RESF for Rocky 10 (`.el10`), signed
+    with key `6fedfc85`." That short ID is the end of the Rocky Linux 10
+    release key. Nothing surprising: this is an official Rocky package.
+
+**Output B** (from `rpm -qa --qf '%{VENDOR}\t%{NAME}\n'`):
+
+```text
+Fedora Project	htop
+```
+
+??? success "Answer B"
+    "`htop` was built by the Fedora Project." That means EPEL, not Rocky. Not
+    wrong in itself, but it is outside the RHEL-compatible promise, and it
+    trusts a second key (EPEL's). `dnf info --installed htop` will show the
+    repo it came from.
+
+**Output C** (from `rpm -q kernel bash`):
+
+```text
+kernel-6.12.0-124.8.1.el10_1.x86_64
+bash-5.2.26-6.el10.x86_64
+```
+
+??? success "Answer C"
+    Read the dist tags. `bash` ends in `.el10`: built for Rocky 10 and
+    unchanged since. The kernel ends in `.el10_1`: updated during the 10.1
+    lifecycle. Neither tells you the repo or signature; for those, add
+    `rpm -qi` and `dnf info --installed`.
+
+Notice the pattern. **Vendor** says who built it, **dist tag** says for which
+release, **Key ID** says who sealed it, **From repo** says where you got it.
+Four fields, four questions.
+
 ## Where the source comes from
 
 ### A short history
 
 Rocky exists because of a change of plan. In December 2020, Red Hat announced that CentOS Linux, the free RHEL rebuild many people relied on, would end and be replaced by **CentOS Stream**, a rolling preview of the *next* RHEL minor release. Gregory Kurtzer, a co-founder of the original CentOS project, started Rocky Linux the same week. Rocky 8.4 was the first general release in June 2021.
 
-**How Rocky got its source**
-
-```mermaid
-flowchart TB
-    T0["<b>2020</b><br/>CentOS Linux 8 end announced<br/>Rocky Linux project starts"]
-    T1["<b>2021</b><br/>Rocky 8.4 GA, built with Koji<br/>Sources imported from git.centos.org"]
-    T2["<b>2022</b><br/>Rocky 9.0 GA, built with Peridot<br/>RESF charter adopted"]
-    T3["<b>2023</b><br/>Red Hat stops publishing RHEL sources to git.centos.org<br/>Rocky switches to multiple source routes"]
-    T4["<b>2025</b><br/>Rocky 10.0 GA, built with Koji again"]
-    T5["<b>2026</b><br/>Rocky 10.2 GA (May)"]
-    T0 --> T1 --> T2 --> T3 --> T4 --> T5
-```
+??? question "For the curious: how Rocky got its source, year by year"
+    ```mermaid
+    flowchart TB
+        T0["<b>2020</b><br/>CentOS Linux 8 end announced<br/>Rocky Linux project starts"]
+        T1["<b>2021</b><br/>Rocky 8.4 GA, built with Koji<br/>Sources imported from git.centos.org"]
+        T2["<b>2022</b><br/>Rocky 9.0 GA, built with Peridot<br/>RESF charter adopted"]
+        T3["<b>2023</b><br/>Red Hat stops publishing RHEL sources to git.centos.org<br/>Rocky switches to multiple source routes"]
+        T4["<b>2025</b><br/>Rocky 10.0 GA, built with Koji again"]
+        T5["<b>2026</b><br/>Rocky 10.2 GA (May)"]
+        T0 --> T1 --> T2 --> T3 --> T4 --> T5
+    ```
 
 ### The 2023 change and Rocky's response
 
@@ -1086,6 +1171,22 @@ SecureBoot enabled
 
 <div class="card" markdown>
 
+Explain how Rocky Linux is made in one sentence.
+
+Rocky takes RHEL's source, swaps the labels, builds it in a clean room, seals every package with its own key, and ships it through mirrors. Each step leaves a fingerprint you can check.
+
+</div>
+
+<div class="card" markdown>
+
+Which four fields trace a package back through the pipeline?
+
+`Vendor` (who built it), the dist tag in `Release` (for which release), the signature `Key ID` (who sealed it), and `From repo` (where you got it).
+
+</div>
+
+<div class="card" markdown>
+
 What does RLSA-2026:1234 correspond to?
 
 The Red Hat advisory RHSA-2026:1234. RLSA = security, RLBA = bug fix, RLEA = enhancement.
@@ -1153,6 +1254,9 @@ Before: git.centos.org. After: CentOS Stream, RHEL SRPMs via UBI images and clou
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: source in, labels swapped, clean build, sealed with
+      Rocky's key, shipped via mirrors. Read the fingerprints with `rpm -qi`,
+      `rpm -K`, `dnf info --installed` and `dnf updateinfo`.
     - Rocky is a rebuild: same sources as RHEL, debranded, rebuilt cleanly, and signed by the RESF.
     - Since 2023 Rocky gathers sources from CentOS Stream, UBI images, cloud RHEL instances and upstream. This affects timing, not content.
     - Debranding touches a small set of packages: release files, logos, installer branding, URLs, repo files and Secure Boot keys.

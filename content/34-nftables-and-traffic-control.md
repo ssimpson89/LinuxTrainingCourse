@@ -24,6 +24,12 @@ A developer swears their service works on their laptop, but in staging every ten
 
 ## The big picture
 
+### The whole module in one sentence
+
+> **Every packet walks past a fixed row of checkpoints. At each checkpoint, nftables rules decide whether it may pass, conntrack remembers the conversations already approved, and at the exit tc decides when it may leave.**
+
+Everything else in this module hangs off that sentence. The **checkpoints** are netfilter **hooks**. The **rules** live in nftables **chains** attached to those hooks. The **memory** is the conntrack table. The **exit queue** is a tc **qdisc**.
+
 When a packet arrives at a Rocky host, it does not go straight to an application. The kernel passes it through a series of checkpoints. Some checkpoints belong to **netfilter** (firewalling, NAT, connection tracking). Some belong to **traffic control** (queueing, shaping, delaying). The routing table sits between them and decides where the packet goes next.
 
 ```mermaid
@@ -51,8 +57,96 @@ Three tools cover everything in that picture:
 
 firewalld, which you met in [module 12](12-firewalld.md), is a manager that writes nftables rules for you. Everything in this module is the layer it sits on.
 
+### The few moves that solve most problems
+
+Most real questions at this layer come down to four moves. Each one answers a different "why":
+
+| You want to know | In checkpoint terms | The move |
+|---|---|---|
+| **1. What rules are loaded?** | Which rules stand at each checkpoint | `sudo nft list ruleset` (or `list table`, `list chain`). Reading never changes anything. |
+| **2. Which rule ate my packet?** | Which checkpoint said no | Mark the packet with `meta nftrace set 1` and watch `sudo nft monitor trace` |
+| **3. Did state tracking or NAT do its job?** | What the memory says about this conversation | `sudo conntrack -L` for flows, `conntrack -S` for drops and clashes |
+| **4. Is the exit queue slow or dropping?** | What the queue at the exit is doing | `tc -s qdisc show dev eth0` for drops and backlog |
+
+And a short flow for picking one:
+
+```mermaid
+flowchart TB
+    S["Traffic fails or is slow"] --> Q{"Is it refused,<br/>or late?"}
+    Q -- "refused / times out" --> M1["1. Read the rules<br/>nft list ruleset"]
+    M1 --> M2["2. Still unclear? Trace it<br/>meta nftrace set 1"]
+    M2 --> M3["3. Replies or NAT wrong?<br/>conntrack -L"]
+    Q -- "late / lossy" --> M4["4. Read the queue<br/>tc -s qdisc show"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **netfilter** | The kernel framework that provides the checkpoints |
+| **hook** | One checkpoint: `prerouting`, `input`, `forward`, `output`, `postrouting` (plus `ingress`/`egress` per interface) |
+| **table** | A named container for chains and sets, tied to one **family** (`inet`, `ip`, `netdev`…) |
+| **base chain** | A list of rules attached to a hook, with a priority and a default **policy** |
+| **regular chain** | A list of rules with no hook, reached only by `jump` or `goto` |
+| **verdict** | What a rule decides: `accept`, `drop`, `reject`, `jump`, `goto`, `return` |
+| **set** / **map** / **verdict map** | Fast lookup lists: values, key to value, key to verdict |
+| **conntrack** | The kernel's memory of every flow; makes `ct state established` and NAT work |
+| **NAT**: DNAT / SNAT / masquerade | Rewriting the destination (port forwarding) / the source / the source to the outgoing interface's address |
+| **qdisc** | The queueing algorithm on an interface; tc's main object |
+| **shaping** / **policing** | Delaying outgoing traffic to fit a rate / dropping incoming traffic over a rate |
+| **network namespace** | A private copy of the whole network stack: its own hooks, rules, conntrack and qdiscs |
+
 !!! analogy "Think of it like an airport"
     Netfilter hooks are the checkpoints (check-in, security, passport control, the gate). nftables is the rulebook the officers at each checkpoint follow. Conntrack is the boarding-pass system that remembers you already cleared security, so you don't get searched again. tc is the boarding queue at the gate: it decides the order people board, and how fast. The analogy breaks in one place: at an airport every passenger visits every checkpoint, but a packet visits only the hooks on its path (forwarded packets never see `input`).
+
+## Core skill: read a rule as a sentence
+
+Every nftables rule you will ever read is a sentence with the same shape. Learn the shape once and any ruleset, including the hundreds of lines firewalld writes, becomes readable.
+
+```text
+At HOOK (from the chain header), IF match AND match AND match, THEN do statements, THEN verdict.
+```
+
+Matches are read left to right, and if any one fails, the rest of the rule is skipped and the packet moves to the next rule. If no rule gives a final verdict, the chain's **policy** decides.
+
+Take the stateful firewall line you will see everywhere:
+
+```text
+ct state established,related accept
+```
+
+"At this checkpoint, if conntrack's memory says the packet belongs to a conversation we already allowed (or one related to it), accept it." That one line is why replies don't need their own rules.
+
+Now try three yourself. Each comes from a chain shown later in this module; the chain header tells you the hook.
+
+**Rule A**, in a chain with `type filter hook input priority filter; policy drop;`:
+
+```text
+tcp dport 2323 add @blocklist { ip saddr } drop
+```
+
+??? success "Answer A"
+    "At input, if the packet is TCP to port 2323, add its source address to the set `blocklist`, then drop it." It's a tripwire: anyone who probes port 2323 lands on a list that another rule (`ip saddr @blocklist counter drop`) drops. Because the set has `timeout 10m`, they are forgiven after ten minutes.
+
+**Rule B**, in a chain with `type nat hook postrouting priority srcnat; policy accept;`:
+
+```text
+oifname "veth-r-wan" masquerade
+```
+
+??? success "Answer B"
+    "At postrouting, if the packet is leaving through `veth-r-wan`, rewrite its source address to that interface's own address." No verdict is written, so the packet carries on (the policy is `accept`). This is the line that turns a Linux box into a NAT router. Conntrack remembers the rewrite so replies are translated back.
+
+**Rule C**, in firewalld's chain `filter_INPUT` (hook `input`), the very last line:
+
+```text
+reject with icmpx admin-prohibited
+```
+
+??? success "Answer C"
+    "At input, with no matches at all (so every packet that reaches this line), refuse it and send back an ICMP 'administratively prohibited' message." It catches everything the earlier rules didn't accept. It's why a closed port on Rocky answers at once instead of timing out: `reject` replies, `drop` stays silent.
+
+Notice the pattern. **Matches narrow down which packets; the verdict is the decision; a rule with no verdict lets the packet keep walking.** One more thing to hold onto: `accept` only ends processing in *that* chain. The packet then meets the next base chain on the same hook. `drop` is final everywhere.
 
 ## The packet path, hook by hook
 
@@ -223,16 +317,17 @@ A lookup in a set is one hash or tree lookup, however many elements it holds. Th
 
 ### Families: which packets a table can see
 
-| Family | Sees | Typical use |
-|---|---|---|
-| `ip` | IPv4 only | Legacy-style IPv4 rules |
-| `ip6` | IPv6 only | IPv6-only rules |
-| `inet` | IPv4 and IPv6 | **Almost everything**: one ruleset for both stacks |
-| `arp` | ARP packets | Rare: ARP filtering |
-| `bridge` | Frames crossing a Linux bridge | Filtering between bridged VMs |
-| `netdev` | One interface, before the IP stack (`ingress`, `egress`) | Early drops, DDoS filtering |
+Use **`inet`** unless you have a reason not to: it sees both IPv4 and IPv6, so one ruleset covers both stacks. firewalld does the same.
 
-Use `inet` unless you have a reason not to. firewalld does.
+??? question "For the curious: all six families"
+    | Family | Sees | Typical use |
+    |---|---|---|
+    | `ip` | IPv4 only | Legacy-style IPv4 rules |
+    | `ip6` | IPv6 only | IPv6-only rules |
+    | `inet` | IPv4 and IPv6 | **Almost everything**: one ruleset for both stacks |
+    | `arp` | ARP packets | Rare: ARP filtering |
+    | `bridge` | Frames crossing a Linux bridge | Filtering between bridged VMs |
+    | `netdev` | One interface, before the IP stack (`ingress`, `egress`) | Early drops, DDoS filtering |
 
 ### A small ruleset, annotated
 
@@ -520,6 +615,23 @@ Reading it: protocol, the seconds left before the entry expires (431999 is about
 
 ## Debugging: follow one packet with nftrace
 
+This is move 2 from the big picture: find out which checkpoint said no.
+
+!!! example "Worked story: the port that times out"
+    **Symptom.** In the lab router, a client in the `lan` namespace (10.10.0.2) can reach the server in `wan` for SSH, but `curl http://10.20.0.2:8080` just hangs and times out. A timeout, not "connection refused", hints that something is dropping silently.
+
+    **Evidence.** You add a trace rule for exactly that traffic (shown below) and run `sudo nft monitor trace` while you retry. The last trace line reads:
+
+    ```text
+    trace id 6e2b1f0a inet router forward rule tcp dport 8080 counter packets 1 bytes 60 drop (verdict drop)
+    ```
+
+    **Reasoning.** Read it as a sentence: "In table `inet router`, chain `forward`, the rule `tcp dport 8080 … drop` dropped this packet." The packet was forwarded (the router isn't its destination), so it was the forward checkpoint, not input.
+
+    **Fix.** Print the chain with handles, `sudo nft -a list chain inet router forward`, and remove that rule with `sudo nft delete rule inet router forward handle N`. If the rule came from a file, fix the file too, or it returns at the next load.
+
+    **Check.** Retry `curl`. Then delete the trace table: `sudo nft delete table inet trace`.
+
 When a packet disappears, guessing which rule ate it wastes hours. nftables can **trace** a packet: mark it with `meta nftrace set 1`, and every chain and rule it passes through reports what happened. `nft monitor trace` prints those reports.
 
 The trick is to set the mark as early as possible, and only on the packets you care about:
@@ -734,7 +846,7 @@ $ sudo tc filter add dev veth-c parent ffff: protocol ip u32 match u32 0 0 polic
 
 Policing is cruder than shaping (it drops instead of queueing), so throughput under a policer is jumpy. Where you control the sender, shape there instead.
 
-!!! note "XDP, briefly"
+??? question "For the curious: XDP, briefly"
     **XDP** runs an eBPF program inside the NIC driver, before the kernel even allocates its normal packet structure. It's how DDoS scrubbers and load balancers process millions of packets per second per core. Writing XDP programs is beyond this course; recognise the name, and know that `ip link show` lists an attached program as `xdp` or `xdpgeneric`.
 
 <div class="quiz" data-answer="2" markdown>
@@ -1092,6 +1204,22 @@ Install the tools once: `sudo dnf install -y nftables iproute-tc conntrack-tools
 
 <div class="card" markdown>
 
+Explain this module in one sentence.
+
+Every packet walks past a fixed row of checkpoints (netfilter hooks). nftables rules at each checkpoint decide whether it passes, conntrack remembers approved conversations, and tc decides when it leaves.
+
+</div>
+
+<div class="card" markdown>
+
+How do you read `tcp dport 2323 add @blocklist { ip saddr } drop` in an input chain?
+
+"At input, if the packet is TCP to port 2323, add its source address to the set blocklist, then drop it." Matches left to right, then statements, then the verdict.
+
+</div>
+
+<div class="card" markdown>
+
 Which netfilter hooks does a forwarded packet traverse?
 
 prerouting, then forward, then postrouting. It never sees input or output.
@@ -1159,6 +1287,7 @@ Shaping delays egress packets to fit a rate (tbf, htb). Policing drops packets o
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: a packet walks past fixed checkpoints (hooks); nftables rules at each decide, conntrack remembers approved flows, tc queues the exit. Read every rule as "at HOOK, if matches, then verdict".
     - Netfilter hooks (prerouting, input, forward, output, postrouting) are fixed checkpoints; the routing decision between prerouting and input/forward decides a packet's path.
     - nftables has no built-in tables: you create tables per family, attach base chains with type, hook, priority and policy, and organise with regular chains, sets, maps and verdict maps.
     - A packet must survive every base chain on a hook. firewalld's `inet firewalld` table is generated, owned and read-only for you: read it, don't edit it.

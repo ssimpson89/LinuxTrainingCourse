@@ -14,6 +14,7 @@ description: How Rocky Linux machines get users, passwords, sudo rules and acces
 You have 200 servers and a new engineer starts on Monday. Do you SSH into 200 machines and run `useradd`? And when she leaves in two years, will you remember every box she had an account on? This module shows how real fleets solve that: one central directory, and a small daemon on each Rocky machine that asks it "who is this person, is that really her, and may she log in here?" By the end you can build a FreeIPA domain, join clients to it, join a machine to Active Directory, and work out why a domain user can't log in.
 
 !!! abstract "What you'll learn"
+    - Name which of the three login questions failed from a single error line, and go straight to the right fix
     - Why central identity exists, and the three questions it answers (who, proof, permission)
     - How the client-side stack fits together: NSS, PAM, `sssd`, its providers and its cache
     - Read and write `sssd.conf`, pick an **authselect** profile, and debug with `sssctl` and `/var/log/sssd`
@@ -23,6 +24,18 @@ You have 200 servers and a new engineer starts on Monday. Do you SSH into 200 ma
     - Walk a "domain user can't log in" problem from symptom to cause
 
 ## The big picture
+
+### Central identity in one sentence
+
+Here is the whole idea:
+
+> **Every login asks three questions: who are you, can you prove it, and may you come in here? On a joined Rocky machine, one daemon (sssd) asks the central directory all three and remembers the answers in a cache.**
+
+Everything in this module hangs off that sentence. The three questions are
+**identity**, **authentication** and **authorization**. sssd is the one
+who asks, the directory (FreeIPA or Active Directory) is the one who knows,
+and the cache is why answers can be a few minutes old and why logins keep
+working when the directory is down.
 
 In the core track you met local accounts: `/etc/passwd`, `/etc/shadow`, PAM and `getent` ([module 03](03-users-groups-and-sudo.md#nss-and-getent-the-right-way-to-look-up-a-user)). Every machine kept its own list. **Centralized identity** moves that list to a **directory server** that every machine trusts. The machines keep almost nothing locally except a cache.
 
@@ -56,6 +69,48 @@ Any login on any machine asks three questions. Keep them apart, because each one
 | May alice log in *here*, and run sudo? | **Authorization** (PAM account, sudo) | `pam_access`, `/etc/sudoers` | HBAC rules, AD GPOs, central sudo rules |
 
 On the Rocky machine, one daemon does all three: **sssd**, the System Security Services Daemon. The rest of this module zooms in on sssd, then on the servers it talks to.
+
+### The good news: four failures cover almost everything
+
+When a domain user can't log in, the cause nearly always sits at one of the three questions, or in the cache that remembers the answers. Find which one and you're most of the way to the fix.
+
+| What's wrong | Which question failed | How you see it | The usual fix |
+|---|---|---|---|
+| **1. The user "doesn't exist"** | Who are you? (identity) | `id alice` reports "no such user" | sssd offline (DNS, network, keytab), wrong name format on AD, or the cache: `sss_cache` |
+| **2. The password or ticket is refused** | Can you prove it? (authentication) | `kinit alice` fails | Read the Kerberos error: clock skew (fix chrony), DNS (SRV records), wrong password, locked account |
+| **3. Correct password, still denied** | May you come in here? (authorization) | `sssctl user-checks alice -s sshd` ends in `Permission denied` | Fix the policy: HBAC rule on IPA, login policy or GPO on AD |
+| **4. A directory change doesn't show** | (the cache) | `id alice` shows old groups | Expire the cache: `sudo sss_cache -u alice` or `-E` |
+
+And one order to check them in, because each step needs the one before it:
+
+```mermaid
+flowchart TB
+    S["Domain user can't log in"] --> A{"1. id alice<br/>returns the user?"}
+    A -- "no" --> F1["Identity problem:<br/>sssctl domain-status, DNS, cache"]
+    A -- "yes" --> B{"2. sssctl user-checks alice -s sshd<br/>says Success?"}
+    B -- "no, Permission denied" --> F3["Authorization problem:<br/>HBAC / login policy"]
+    B -- "yes" --> C{"3. kinit alice works?"}
+    C -- "no" --> F2["Authentication problem:<br/>read the Kerberos error"]
+    C -- "yes" --> F4["After login:<br/>home directory, shell, SELinux"]
+```
+
+The full interactive version of this flow is in "Troubleshooting" near the end. First you'll see the pieces on the client, then the servers they talk to.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **directory** | The central server that knows every user, group and policy (FreeIPA or AD) |
+| **NSS** | The part of glibc that answers "who is this user?" from a list of sources |
+| **PAM** | The pluggable stack that answers "is it really them?" and "may they log in?" |
+| **sssd** | The daemon on each client that asks the directory and caches the answers |
+| **provider** | An sssd plug-in that answers one question (`id_provider`, `auth_provider`, `access_provider`) |
+| **authselect** | The tool that wires NSS and PAM to sssd, so you never edit those files by hand |
+| **Kerberos** / **KDC** | The protocol, and the server, that prove who you are with tickets instead of sending passwords |
+| **TGT** / **ticket** | Your all-day pass from the KDC, and the per-service passes it buys you |
+| **keytab** | A file holding a machine's or service's Kerberos key. Treat it like a password |
+| **realm** | The Kerberos domain, written in capitals: `LAB.TEST` |
+| **HBAC** | FreeIPA's host-based access control: rules for who may log in where |
 
 !!! analogy "Think of it like a hotel key card system"
     The front desk (the directory) keeps the guest list and issues key cards (Kerberos tickets). Each door (a server) has a reader (sssd) that never stores the guest list itself. It asks the desk, and it remembers recent guests so a door still works for a while if the network to the desk is down (the cache). The analogy breaks in one place: a Kerberos ticket proves *who you are*, not which doors you may open. That decision is a separate policy check.
@@ -220,6 +275,76 @@ Right. `getent` asks NSS, which walks every source in `nsswitch.conf`. `grep` on
 
 </div>
 
+## The core skill: which question failed?
+
+Every "can't log in" ticket starts the same way: work out which of the three questions got a "no". The logs and tools always tell you, once you know which words to look for. Read any error into this sentence:
+
+```text
+"alice was refused at the  WHO / PROOF / PERMISSION  step, because  REASON."
+```
+
+| You see | Step | Meaning |
+|---|---|---|
+| `id alice` reports "no such user" | WHO | NSS and sssd couldn't find her: offline, wrong name, or cache |
+| `kinit: …` error, or `krb5_child.log` lines | PROOF | Kerberos refused: time, DNS, password, lockout |
+| `pam_sss(sshd:account): Access denied` or `pam_acct_mgmt: Permission denied` | PERMISSION | She's real and proved it, but policy says not here |
+| A `session` error in `/var/log/secure` | after all three | Home directory, shell or SELinux |
+
+### Story: correct password, still denied
+
+**Symptom.** alice types the right password over SSH to `client1` and gets "Permission denied". She can log in to other hosts.
+
+**Evidence.** On `client1`, test her without needing her password:
+
+```console
+$ sudo sssctl user-checks alice -s sshd
+user: alice
+action: acct
+service: sshd
+
+SSSD nss user lookup result:
+ - user name: alice
+ - user id: 1234400003
+…
+testing pam_acct_mgmt
+
+pam_acct_mgmt: Permission denied
+```
+
+**Reasoning.** The NSS lookup worked, so WHO is fine. The failure is at `pam_acct_mgmt`, the PAM `account` step, which is PERMISSION. On FreeIPA that's an HBAC rule. Changing her password or restarting sssd won't help.
+
+**Fix.** On the IPA server, simulate the login with `ipa hbactest --user=alice --host=client1.lab.test --service=sshd` to see which rules match, then add her group (or the host) to the right HBAC rule. On the client, expire the cache so it re-reads the policy: `sudo sss_cache -E`.
+
+**Check.** `sudo sssctl user-checks alice -s sshd` now ends in `pam_acct_mgmt: Success`, and her SSH login works.
+
+### Practise: name the step
+
+For each piece of evidence, say which question failed and what you'd look at next. Answers are hidden.
+
+**A.**
+
+```console
+$ kinit alice
+kinit: Clock skew too great while getting initial credentials
+```
+
+??? success "Answer A"
+    PROOF (authentication). The KDC rejects requests whose timestamp is more than 5 minutes off. Fix time sync: `chronyc tracking` should show a small offset. Nothing is wrong with alice's account or the password.
+
+**B.** An admin creates `newhire` in the directory. A colleague had run `id newhire` on `client1` a few seconds *before* that, and runs it again now. `id` still reports "no such user".
+
+??? success "Answer B"
+    WHO (identity), but nothing is broken. sssd remembers misses in its **negative cache** for 15 seconds by default. Wait, or run `sudo sss_cache -u newhire`. See the "negative cache" box in the cache section below.
+
+**C.** `/var/log/secure` on `db01` shows:
+
+```text
+pam_sss(sshd:account): Access denied for user alice: 6 (Permission denied)
+```
+
+??? success "Answer C"
+    PERMISSION (authorization). `account` is the PAM step that asks "may she log in here?", and it said no. Identity and password were already fine. Check HBAC with `ipa hbactest` (FreeIPA), or `realm list` and `simple_allow_groups` (AD).
+
 ## authselect: wiring NSS and PAM
 
 You never hand-edit `/etc/nsswitch.conf` or `/etc/pam.d/system-auth` on Rocky. **authselect** generates them from a **profile** plus optional **features** ([module 03](03-users-groups-and-sudo.md#authselect-and-sssd-the-bigger-picture) introduced it). For central identity, you care about the `sssd` profile:
@@ -326,18 +451,17 @@ A few rules that bite people:
 - Comments must be on their own line in real files (the `# (1)!` markers above are page annotations only).
 - After editing, `sudo systemctl restart sssd`.
 
-### Useful knobs
-
-| Option (domain section) | What it controls |
-|---|---|
-| `entry_cache_timeout` | Seconds before a cached user or group is considered stale (default 5400) |
-| `cache_credentials` | Allow offline password logins |
-| `offline_credentials_expiration` | Days a cached password stays valid offline (in `[pam]`; 0 means forever) |
-| `use_fully_qualified_names` | Require `alice@ad.example.com` instead of `alice` |
-| `fallback_homedir` | Home path template when the directory has none, such as `/home/%u@%d` |
-| `ldap_id_mapping` | Generate UIDs from Windows SIDs (AD) instead of reading `uidNumber` |
-| `simple_allow_groups` | With `access_provider = simple`, only these groups may log in |
-| `debug_level` | Logging detail, 0 to 9 (see debugging below) |
+??? question "Useful knobs: the sssd.conf options you'll reach for"
+    | Option (domain section) | What it controls |
+    |---|---|
+    | `entry_cache_timeout` | Seconds before a cached user or group is considered stale (default 5400) |
+    | `cache_credentials` | Allow offline password logins |
+    | `offline_credentials_expiration` | Days a cached password stays valid offline (in `[pam]`; 0 means forever) |
+    | `use_fully_qualified_names` | Require `alice@ad.example.com` instead of `alice` |
+    | `fallback_homedir` | Home path template when the directory has none, such as `/home/%u@%d` |
+    | `ldap_id_mapping` | Generate UIDs from Windows SIDs (AD) instead of reading `uidNumber` |
+    | `simple_allow_groups` | With `access_provider = simple`, only these groups may log in |
+    | `debug_level` | Logging detail, 0 to 9 (see debugging below) |
 
 ## The cache, sss_cache and offline logins
 
@@ -1290,6 +1414,22 @@ Labs 1 to 3 need only one Rocky 10 VM. Lab 4 needs two VMs on an isolated networ
 
 <div class="card" markdown>
 
+Say the central identity mental model in one sentence.
+
+Every login asks who are you, can you prove it, and may you come in here; on a joined machine sssd asks the directory all three and caches the answers.
+
+</div>
+
+<div class="card" markdown>
+
+`sssctl user-checks alice -s sshd` ends in `pam_acct_mgmt: Permission denied`. Which question failed?
+
+May she come in here (authorization). She exists and the lookup worked; fix the access policy (HBAC on IPA, login policy on AD).
+
+</div>
+
+<div class="card" markdown>
+
 What three questions does every login answer, and which mechanism answers each?
 
 Who (NSS, identity), is it really them (PAM auth, Kerberos), and may they log in here (PAM account, HBAC or other access policy).
@@ -1357,6 +1497,7 @@ How do you test an HBAC rule without logging in?
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: every login asks who, proof and permission; sssd asks the directory and caches the answers. Debug by finding which question said no, in that order: `id`, `sssctl user-checks`, `kinit`.
     - Central identity answers three separate questions: who (NSS), proof (PAM auth, Kerberos), and permission (PAM account, HBAC, sudo). Each fails differently.
     - On Rocky, `sssd` is the single client: responders for NSS, PAM, sudo and SSH; one backend per domain with id, auth and access providers; and a cache that enables offline logins.
     - authselect owns `nsswitch.conf` and the PAM stacks. Use profiles and features, never hand edits.

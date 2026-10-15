@@ -31,8 +31,36 @@ break your own VM on purpose and fix it.
 
 ## The big picture
 
-Every scenario in this module follows the same loop. The loop is the skill;
-the scenarios are practice.
+### Troubleshooting in one sentence
+
+Here is the whole idea:
+
+> **Something changed, the system wrote it down, and the error message usually names the cause. So read the whole message and find the change before you touch anything.**
+
+Every scenario in this module is that sentence applied to a different part of
+the system. The commands change; the habit does not.
+
+### The good news: a few symptoms cover most incidents
+
+Most tickets you'll get start with one of these symptoms. Each has one first
+command that tells you which branch you're on, and a scenario below that walks
+it through.
+
+| Symptom | First command | Scenario |
+|---|---|---|
+| A service won't start | `journalctl -xeu UNIT` | 1 |
+| "No space left on device" | `df -h; df -i` | 2 |
+| SSH refused, hangs, or "Permission denied" | `ssh -v`, then `journalctl -u sshd` on the server | 3 |
+| IP works, names don't | `getent hosts NAME`, then `dig NAME` | 4 |
+| Boots to emergency mode | `journalctl -xb -p err` | 5 |
+| Nobody can get root | Boot menu, `rd.break` | 6 |
+| High load, idle CPU | `vmstat 1`: high `b`, idle CPU | 7 |
+| A process vanishes without a log | `journalctl -k --grep 'Out of memory\|oom-kill'` | 8 |
+| `dnf` fails before doing anything | Read the repo name in the error | 9 |
+| Web server returns 403 | The web server's `error_log`, then `ausearch -m AVC` | 10 |
+
+And one loop to work any of them. The loop is the skill; the scenarios are
+practice.
 
 ```mermaid
 flowchart LR
@@ -64,6 +92,72 @@ flowchart LR
     take your temperature, order one test, and read the result before deciding.
     "Restart it and see" is the equivalent of surgery without a diagnosis:
     sometimes it works, and you learn nothing.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **symptom** | What someone noticed ("the page is slow", "403") |
+| **root cause** | The thing that, once fixed, makes the symptom go away for good |
+| **hypothesis** | One specific, testable guess at the root cause |
+| **the journal** | systemd's log store, read with `journalctl` |
+| **unit** | Anything systemd manages: a service, a mount, a timer |
+| **AVC denial** | SELinux's log line when it refuses an action |
+| **`D` state** | A process blocked inside the kernel waiting for I/O; it ignores signals |
+| **OOM killer** | The kernel's last resort when memory runs out: it kills a process |
+| **emergency mode** | A minimal root shell systemd drops to when boot cannot finish |
+| **runbook** | Written steps for a known problem, so the next person is faster |
+
+### Reading an error message
+
+The core skill in this module is reading an error message all the way to the
+end. Most Linux error lines fit one sentence:
+
+> **"`<program>` could not `<action>` `<thing>` because `<reason>`."**
+
+The reason is often at the very end of the line, after a colon. Once you have
+the sentence, the scenario table above tells you where to go next.
+
+Try these three. Say the sentence, then decide which scenario it belongs to.
+
+**Error A** (from `journalctl -u sshd`):
+
+```text
+Oct 15 11:40:02 web1 sshd-session[7120]: Authentication refused: bad ownership or modes for directory /home/alice/.ssh
+```
+
+??? success "Answer A"
+    "sshd could not accept Alice's key because `/home/alice/.ssh` has bad
+    ownership or permissions." Scenario 3. Fix:
+    `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys`, owned by Alice.
+
+**Error B** (from `sudo dnf update`):
+
+```text
+  - Curl error (6): Couldn't resolve host name for https://repo.internal.example/el10/repodata/repomd.xml [Could not resolve host: repo.internal.example]
+```
+
+??? success "Answer B"
+    "dnf could not download metadata for one repo because the host name
+    `repo.internal.example` does not resolve." It looks like Scenario 9 (dnf),
+    but the reason is DNS, so the real work is Scenario 4. To get unstuck now,
+    `sudo dnf update --disablerepo=internal-tools`.
+
+**Error C** (from `journalctl -xb -p err` in emergency mode):
+
+```text
+Oct 15 12:01:44 web1 systemd[1]: Timed out waiting for device dev-disk-by\x2duuid-0d1c….device - /dev/disk/by-uuid/0d1c…
+Oct 15 12:01:44 web1 systemd[1]: Dependency failed for data.mount - /data.
+```
+
+??? success "Answer C"
+    "systemd could not mount `/data` because the disk with that UUID never
+    appeared." Scenario 5. Compare the UUID in `/etc/fstab` with `blkid`,
+    fix or comment out the line, then `findmnt --verify`.
+
+Notice the pattern. The **first** words of an error say *what* failed. The
+**last** words say *why*. Beginners stop reading at the first; the fix is
+almost always in the last.
 
 ### The first five minutes
 
@@ -1307,6 +1401,22 @@ with the method before you open the hints.
 
 <div class="card" markdown>
 
+Explain troubleshooting in one sentence.
+
+Something changed, the system wrote it down, and the error message usually names the cause. Read the whole message and find the change before you touch anything.
+
+</div>
+
+<div class="card" markdown>
+
+Where in an error line is the fix usually hiding?
+
+At the end. The first words say what failed; the last words (often after a colon) say why.
+
+</div>
+
+<div class="card" markdown>
+
 What are the five steps of the troubleshooting loop?
 
 Define the problem, gather evidence, form one hypothesis, test one change at a time, write it down.
@@ -1382,6 +1492,9 @@ The file kept its `user_home_t` SELinux label. `restorecon -Rv /var/www/html`.
 ## Recap
 
 !!! recap "Key takeaways"
+    - The mental model: something changed, the system logged it, and the
+      error names the cause. Read errors to the last word, as "program could
+      not do action on thing because reason".
     - Follow the loop: define, gather evidence, hypothesize, change one thing,
       write it down. Ask "what changed?" early.
     - The status and the journal almost always contain the answer. Read the

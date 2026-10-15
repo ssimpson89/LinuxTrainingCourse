@@ -71,6 +71,54 @@ variation on: write a unit file, tell systemd about it, and ask it to start
     right order (and in parallel where possible), and replaces an actor who
     collapses mid-show. Targets are the "Act 1 ready" checkpoints.
 
+### systemd in one sentence
+
+Here is the whole module in one line:
+
+> **Every service is a unit file that says what to run, what it needs, and when. systemd reads those files, starts each service in its own box (a cgroup), watches it, and restarts or stops the whole box when told.**
+
+"Unit file" is the recipe. "What it needs" is dependencies and ordering.
+"When" is boot, a timer, or a socket. "Its own box" is why systemd never
+loses track of a process. Everything below is detail on one of those words.
+
+### The few things that solve most service problems
+
+| Situation | What's going on | The move |
+|---|---|---|
+| **"It runs now but not after reboot"** | Started, never enabled | `systemctl enable --now <unit>` |
+| **"Why did it fail?"** | The answer is in its status and log | `systemctl status <unit>`, then `journalctl -u <unit> -b -e` |
+| **"I changed a setting, nothing happened"** | systemd hasn't re-read the file, or the service wasn't restarted | `systemctl daemon-reload`, then restart (`systemctl edit` does the reload for you) |
+| **"I need to change a packaged service"** | Editing `/usr/lib` gets overwritten by updates | A drop-in: `systemctl edit <unit>` |
+| **"It starts before the thing it needs"** | A requirement without ordering | Add both `Wants=` and `After=` |
+| **"It should come back when it crashes"** | No `Restart=` set | `Restart=on-failure` in a drop-in |
+
+And one flow for any service problem:
+
+```mermaid
+flowchart TB
+    S["A service misbehaves"] --> A["1. systemctl status UNIT"]
+    A --> B["2. Read Loaded: (file and boot)<br/>and Active: (right now)"]
+    B --> C{"3. What's wrong?"}
+    C -- "disabled / not-found / masked" --> F1["Fix the unit:<br/>enable, daemon-reload, unmask"]
+    C -- "failed" --> F2["Read why:<br/>journalctl -u UNIT -b -e"]
+    C -- "active, but misbehaving" --> F3["Change settings:<br/>systemctl edit UNIT, then restart"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **unit** | Anything systemd manages, described by one small text file |
+| **unit file** | That text file, like `sshd.service`, in INI format |
+| **service** | A unit that runs and supervises a program |
+| **enable** / **start** | Start at next boot / start right now. Two different things |
+| **drop-in** | A small `.conf` file that overrides part of a unit without editing it |
+| **daemon-reload** | Tell systemd to re-read unit files from disk |
+| **cgroup** | The kernel "box" holding every process of one service |
+| **target** | A named checkpoint that groups units, like `multi-user.target` |
+| **timer** | A unit that starts another unit on a schedule |
+| **masked** | Blocked completely: linked to `/dev/null`, can't be started |
+
 ## Units and unit types
 
 A **unit** is anything systemd manages, described by a small text file in INI
@@ -161,6 +209,68 @@ Oct 13 09:12:50 rocky10 chronyd[806]: Selected source 162.159.200.1 (2.rocky.poo
     `systemctl show <unit>` with no `-p` dumps every property systemd knows,
     hundreds of them; it's the authoritative "what is systemd actually using"
     view, after all files and drop-ins have been merged.
+
+### Reading status as a sentence
+
+This is the most useful skill in the module. Two lines of
+`systemctl status` answer two different questions, and you can say them as
+one sentence:
+
+> **"`<unit>` is loaded from `<file>`, is `<enabled or disabled>` for boot, and right now is `<Active state>`."**
+
+`Loaded:` is about the **file and the next boot**. `Active:` is about
+**right now**. Most confusion comes from mixing them up. Then ask: does the
+"now" part match what you expect? If it says `failed`, the newest log lines
+at the bottom (or `journalctl -u <unit> -b -e`) say why.
+
+#### Practise: read three status snippets
+
+Say the sentence and decide what to do before opening the answer.
+
+**Snippet A** (from the `chronyd` example above):
+
+```text
+     Loaded: loaded (/usr/lib/systemd/system/chronyd.service; enabled; preset: enabled)
+     Active: active (running) since Tue 2026-10-13 09:12:44 UTC; 2 days ago
+```
+
+??? success "Answer A"
+    "`chronyd` is loaded from the vendor file in `/usr/lib`, is enabled for
+    boot, and is running right now." Everything matches. **Nothing to do.**
+
+**Snippet B:**
+
+```text
+× hello.service - Hello demo service
+     Loaded: loaded (/etc/systemd/system/hello.service; enabled; preset: disabled)
+    Drop-In: /etc/systemd/system/hello.service.d
+             └─override.conf
+     Active: failed (Result: start-limit-hit) since …
+```
+
+??? success "Answer B"
+    "`hello` is loaded from an admin file in `/etc` plus one drop-in, is
+    enabled for boot, and has **failed because it restarted too often**."
+    `preset: disabled` only says the distribution wouldn't enable it by
+    default; you did. The real problem is whatever made it crash. Read
+    `journalctl -u hello -b -e`, fix that, then
+    `sudo systemctl reset-failed hello` and start it.
+
+**Snippet C:** you try to start a service and get this:
+
+```text
+Failed to start cups.service: Unit cups.service is masked.
+```
+
+??? success "Answer C"
+    "`cups` is **masked**: linked to `/dev/null` so nothing can start it."
+    Someone did that on purpose, often because it conflicts with another
+    service. Find out why before `sudo systemctl unmask cups`.
+
+Notice the pattern. **Problems in `Loaded:`** (not-found, masked, bad
+setting, disabled) are about the unit file or boot, and you fix them with
+`daemon-reload`, `enable` or `unmask`. **Problems in `Active:`** are about
+the program itself, and the journal tells you why.
 
 ### The everyday verbs
 
@@ -591,6 +701,38 @@ After=network-online.target
 
 On Rocky, `NetworkManager-wait-online.service` makes that target wait until
 NetworkManager reports the network is up.
+
+!!! example "Story: the app that loses a race at every boot"
+    **Symptom.** `myapp` works when you start it by hand, but after every
+    reboot it is `failed`, and its log complains it can't reach the
+    database.
+
+    **Evidence.** Look at what the unit actually says:
+
+    ```console
+    $ systemctl cat myapp
+    # /etc/systemd/system/myapp.service
+    [Unit]
+    Description=My app
+    Requires=postgresql.service
+    …
+    ```
+
+    **Reasoning.** `Requires=` answers "should PostgreSQL be started too?"
+    (yes). Nothing answers "which goes first?", so systemd starts both in
+    parallel. By the time you start it by hand, PostgreSQL is long up,
+    which is why the manual start works.
+
+    **Fix.** Add ordering with a drop-in (`sudo systemctl edit myapp`):
+
+    ```ini
+    [Unit]
+    After=postgresql.service
+    ```
+
+    **Check.** `systemctl cat myapp` now shows your drop-in under the
+    original file. Reboot, and `systemctl status myapp` says
+    `active (running)`.
 
 <div class="quiz" data-answer="2" markdown>
 
@@ -1390,6 +1532,22 @@ execution from that location (scripts in a home directory often hit this).
 
 <div class="card" markdown>
 
+Say systemd in one sentence.
+
+Every service is a unit file that says what to run, what it needs, and when. systemd starts each service in its own cgroup box, watches it, and restarts or stops the whole box when told.
+
+</div>
+
+<div class="card" markdown>
+
+In `systemctl status`, what do `Loaded:` and `Active:` each tell you?
+
+`Loaded:` is about the unit file and the next boot (path, enabled or disabled, masked). `Active:` is about right now (running, exited, failed). A failure in `Active:` means read the journal.
+
+</div>
+
+<div class="card" markdown>
+
 What's the difference between `start` and `enable`?
 
 `start` runs the unit now. `enable` creates symlinks (from `[Install]`) so it starts at boot. `enable --now` does both.
@@ -1465,6 +1623,11 @@ It restarts all of user space (every service) but keeps the running kernel. A ke
 ## Recap
 
 !!! recap "Key takeaways"
+    - The one sentence: every service is a unit file saying what to run, what
+      it needs and when; systemd runs each in its own cgroup box and
+      supervises it.
+    - Read `systemctl status` as a sentence: `Loaded:` is the file and the
+      next boot, `Active:` is right now.
     - systemd is PID 1 and manages typed **units**: services, sockets, timers,
       targets, mounts, slices.
     - Start/stop act now; enable/disable act at boot (symlinks); mask blocks

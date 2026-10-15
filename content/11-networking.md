@@ -24,6 +24,14 @@ A developer pings you: "The new server can't reach the database. Is the network 
 
 ## The big picture
 
+### Networking in one sentence
+
+Here is the whole idea:
+
+> **To talk to another program, your machine needs four answers, in order: what IP is that name (DNS), which way out do I send it (route), what is the MAC of the next box on my wire (ARP), and is anything listening on that port (socket). When the network "doesn't work", one of those four answers is missing or wrong.**
+
+Everything else in this module is detail around that sentence. One more rule sits beside it: **`ip` is for looking, `nmcli` is for changing.**
+
 Networking is a stack of layers. Each layer solves one problem and trusts the layer below it to solve the rest. Your browser does not care about cables, and the network card does not care about web pages.
 
 On Linux, the bottom layers (the network card driver, Ethernet, IP, TCP and UDP) live in the **kernel**. Programs like `curl` and `sshd` live in user space and talk to the kernel through **sockets**, which are like phone handsets the kernel hands out. Configuration (which IP address, which gateway, which DNS server) is managed by one service: **NetworkManager**.
@@ -116,6 +124,51 @@ flowchart LR
 
 The `ip` command talks to the kernel directly. That makes it perfect for *looking*, but anything you change with `ip` is temporary and NetworkManager does not know about it. For anything you want to keep, use `nmcli`.
 
+### The four questions, and the command that answers each
+
+| Question | Layer | The command that answers it | A bad answer looks like |
+|---|---|---|---|
+| **Do I have a working link and address?** | Link / IP | `ip -br addr` | `DOWN`, no address, or a `169.254.x.x` address |
+| **1. What IP is that name?** | DNS | `getent hosts <name>` | No output, or the wrong IP |
+| **2. Which way out?** | IP routing | `ip route get <ip>` | `Network is unreachable`, or the wrong interface |
+| **3. Who is next on my wire?** | Link (ARP) | `ip neigh` | The gateway shows `FAILED` or `INCOMPLETE` |
+| **4. Is anything listening?** | Transport | `ss -tlnp` on the server, `curl -v` from the client | Not listed, listening on `127.0.0.1` only, or "Connection refused" |
+
+The first row isn't one of the four questions. It's the precondition: with no link or no address, none of the four can be answered. When you're stuck, walk the table from the top:
+
+```mermaid
+flowchart TB
+    S["'I can't reach the server'"] --> A{"ip -br addr:<br/>UP with a real address?"}
+    A -- "No" --> FA["Fix the link or address<br/>(cable, DHCP, nmcli)"]
+    A -- "Yes" --> B{"getent hosts name:<br/>right IP?"}
+    B -- "No" --> FB["Fix DNS<br/>(ipv4.dns, /etc/hosts)"]
+    B -- "Yes" --> C{"ip route get IP:<br/>sensible way out?"}
+    C -- "No" --> FC["Fix the route or gateway<br/>(ipv4.gateway, ipv4.routes)"]
+    C -- "Yes" --> D{"ip neigh: gateway<br/>REACHABLE?"}
+    D -- "No" --> FD["Local network problem<br/>(VLAN, cable, wrong gateway IP)"]
+    D -- "Yes" --> E{"Port answers?<br/>curl -v, ss -tlnp"}
+    E -- "Refused" --> FE["Nothing listening there:<br/>check the service and its address"]
+    E -- "Timeout" --> FF["Something drops it:<br/>firewall, path, MTU"]
+```
+
+The [troubleshooting section](#troubleshooting-i-cant-reach-the-server) at the end walks the same path in more depth.
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **interface** / **device** | Something the kernel sends packets through: `enp1s0`, `lo`, `br0` |
+| **IP address** + **prefix** | The machine's address, and how many leading bits are "my network": `192.168.122.50/24` |
+| **subnet** | All the addresses that share the network part. Reachable without a router |
+| **route** / **default gateway** | A rule for where to send packets / the router that gets everything not local |
+| **MAC address** | The hardware address of a network card, used only on the local wire |
+| **ARP** / **neighbour table** | How the kernel finds the MAC for a local IP / its cache of answers |
+| **DNS** / **resolver** | The system that turns names into IPs / the code on your machine that asks it |
+| **port** | A number (0 to 65535) that picks a program on a machine |
+| **socket** | The kernel object a program uses to send or receive. A **listening** socket waits for connections |
+| **connection profile** | A saved NetworkManager settings set ("static 10.0.0.5/24"), applied to a device |
+| **DHCP** | A server that hands out address, gateway and DNS automatically |
+
 ## Interfaces and their names
 
 A **network interface** is anything the kernel can send packets through: a real card, a virtual card in a VM, the **loopback** interface `lo` (the machine talking to itself at `127.0.0.1`), or software devices like bridges and VLANs.
@@ -150,6 +203,49 @@ The flags matter. `UP` means the interface is administratively enabled. `LOWER_U
 
 !!! tip "Use `-br` for brief output"
     `ip -br addr` and `ip -br link` give one line per interface. Add `-c` for color. You will type `ip -br a` hundreds of times.
+
+### Practise: read `ip -br addr` and `ip route`
+
+These two commands answer the precondition and question 2 in one glance. This is the skill you'll use most. Read each line with this template:
+
+> **"`<interface>` is `<state>` with address `<IP/prefix>`" and "to reach `<destination>`, go `<via router>` out of `<interface>`".**
+
+Then ask: is the state `UP`, is the address a real one from my network, and is there a `default` line?
+
+**Machine A:** a new VM can't reach anything.
+
+```console
+$ ip -br addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128
+enp1s0           UP             169.254.12.7/16 fe80::5054:ff:fe3a:91c2/64
+```
+
+??? success "Answer A"
+    "`enp1s0` is `UP` with address `169.254.12.7/16`." The link is fine, but `169.254.x.x` is **link-local**: the address a machine gives itself when DHCP doesn't answer. The problem is below DNS and routing. Check that the VM is attached to the right network and that a DHCP server is there, or set a static address with `nmcli` (see [Static vs DHCP](#static-vs-dhcp)).
+
+**Machine B:** it can ping `192.168.122.10` but not `1.1.1.1`.
+
+```console
+$ ip -br addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128
+enp1s0           UP             192.168.122.50/24 fe80::5054:ff:fe3a:91c2/64
+$ ip route
+192.168.122.0/24 dev enp1s0 proto kernel scope link src 192.168.122.50 metric 100
+```
+
+??? success "Answer B"
+    The address is good. The routing table has only one line: "to reach `192.168.122.0/24`, go straight out of `enp1s0`". There's **no `default` line**, so there's no way out to anything beyond the local subnet. That's question 2 failing. Set a gateway on the profile and apply it: `sudo nmcli connection modify enp1s0 ipv4.gateway 192.168.122.1`, then `sudo nmcli connection up enp1s0`.
+
+**Machine C:** a server was fine yesterday.
+
+```console
+$ ip -br link
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP>
+enp1s0           DOWN           52:54:00:3a:91:c2 <NO-CARRIER,BROADCAST,MULTICAST,UP>
+```
+
+??? success "Answer C"
+    The flags include `UP` (enabled) but not `LOWER_UP`, and you see `NO-CARRIER`. The interface is switched on, but the cable (or the VM's virtual cable) isn't connected. Nothing above this layer can work, so don't touch DNS or routes. Check the cable, switch port, or the hypervisor's NIC settings.
 
 ## IP addresses and subnets
 
@@ -187,7 +283,7 @@ Right. A `/22` covers four consecutive `/24` blocks that start on a multiple of 
 
 ## Routing: how a packet picks a way out
 
-When the kernel sends a packet, it asks one question: **"Where do I hand this next?"** The answer comes from the **routing table**, a list of destinations and the interface (and maybe the next router) to use for each.
+This is **question 2, which way out**. When the kernel sends a packet, it asks one question: **"Where do I hand this next?"** The answer comes from the **routing table**, a list of destinations and the interface (and maybe the next router) to use for each.
 
 ```console
 $ ip route
@@ -271,7 +367,7 @@ Right. Both `default` and `172.16.0.0/16` contain the address, and the longest p
 
 ## Neighbours: ARP and the MAC address
 
-Routing decides the next hop's **IP**. But Ethernet delivers frames by **MAC**. So before the first packet leaves, the kernel must learn the MAC of the next hop (the gateway, or the local target). It shouts on the subnet: "Who has 192.168.122.1? Tell 192.168.122.50." The owner answers with its MAC. This is **ARP** (Address Resolution Protocol). IPv6 does the same job with **NDP** (Neighbor Discovery).
+This is **question 3, who is next on my wire**. Routing decides the next hop's **IP**. But Ethernet delivers frames by **MAC**. So before the first packet leaves, the kernel must learn the MAC of the next hop (the gateway, or the local target). It shouts on the subnet: "Who has 192.168.122.1? Tell 192.168.122.50." The owner answers with its MAC. This is **ARP** (Address Resolution Protocol). IPv6 does the same job with **NDP** (Neighbor Discovery).
 
 Answers are cached in the **neighbour table**:
 
@@ -299,7 +395,7 @@ fe80::5054:ff:fe9c:1e7a dev enp1s0 lladdr 52:54:00:9c:1e:7a router STALE
 
 ## NetworkManager: the one way to configure networking
 
-On Rocky Linux 10, **NetworkManager** (`NetworkManager.service`) is the only supported way to configure networking. It reads connection profiles, applies them to devices, runs DHCP, writes DNS settings, and reacts to cables being plugged in.
+This is the "`nmcli` is for changing" half of the rule. On Rocky Linux 10, **NetworkManager** (`NetworkManager.service`) is the only supported way to configure networking. It reads connection profiles, applies them to devices, runs DHCP, writes DNS settings, and reacts to cables being plugged in.
 
 Two words you must keep straight:
 
@@ -455,7 +551,7 @@ Setting the hostname does **not** create a DNS record. Other machines only find 
 
 ## Names: how `rockylinux.org` becomes an IP
 
-Programs almost never use DNS directly. They call a C library function (`getaddrinfo`), and glibc decides where to look based on **`/etc/nsswitch.conf`** (the Name Service Switch). The `hosts:` line lists the sources in order:
+This is **question 1, what IP is that name**. Programs almost never use DNS directly. They call a C library function (`getaddrinfo`), and glibc decides where to look based on **`/etc/nsswitch.conf`** (the Name Service Switch). The `hosts:` line lists the sources in order:
 
 ```console
 $ grep ^hosts: /etc/nsswitch.conf
@@ -523,7 +619,7 @@ Right. `curl` resolves through glibc and `nsswitch.conf`, where `files` comes fi
 
 ## Sockets and ports with `ss`
 
-A **socket** is the kernel object a program uses to send and receive data. A **listening** socket waits for new connections on a port; an **established** socket is one live conversation. `ss` (socket statistics) lists them. It replaced the old `netstat`.
+This is **question 4, is anything listening**. A **socket** is the kernel object a program uses to send and receive data. A **listening** socket waits for new connections on a port; an **established** socket is one live conversation. `ss` (socket statistics) lists them. It replaced the old `netstat`.
 
 ```console
 $ sudo ss -tulpn
@@ -539,7 +635,7 @@ The flags spell **t**cp, **u**dp, **l**istening, **p**rocess, **n**umeric. The l
 - `0.0.0.0:22` or `*:80` or `[::]:22`: listening on all addresses, so reachable from the network (if the firewall allows).
 - `127.0.0.1:323`: loopback only. Nobody outside this machine can connect, no matter what the firewall says.
 
-That distinction is the answer to many "the service is running but I can't connect" tickets. Filters make `ss` precise:
+That distinction is the answer to many "the service is running but I can't connect" tickets. The story usually goes: `systemctl status` says the service is active and `curl http://localhost:8080` on the server itself works, but other machines get "Connection refused" (or a timeout, if a firewall drops the packet first). `sudo ss -tlnp` shows the service listening on `127.0.0.1:8080`, not `0.0.0.0:8080`. So question 4 fails for everyone except the machine itself. The fix is in the *service's* config (its listen or bind address), not the network. Filters make `ss` precise:
 
 ```console
 $ ss -tn state established '( dport = :443 or sport = :443 )'
@@ -723,7 +819,7 @@ These `ip` commands are fine here because a lab namespace is meant to be tempora
 
 ## Troubleshooting: "I can't reach the server"
 
-Work from the bottom of the stack up. Each layer depends on the one below, so the lowest broken layer is the real problem. Your toolkit:
+This is the four-question table from the big picture, with more tools. Work from the bottom of the stack up. Each layer depends on the one below, so the lowest broken layer is the real problem. Your toolkit:
 
 | Tool | Layer | What it tells you |
 |---|---|---|
@@ -1205,6 +1301,22 @@ LISTEN 0      128             [::]:22           [::]:*     users:(("sshd",pid=10
 
 <div class="card" markdown>
 
+The four questions a connection needs answered, in order?
+
+1. What IP is that name? (DNS, `getent hosts`) 2. Which way out? (route, `ip route get`) 3. What is the next box's MAC? (ARP, `ip neigh`) 4. Is anything listening on the port? (`ss -tlnp`, `curl -v`)
+
+</div>
+
+<div class="card" markdown>
+
+`ip -br addr` shows `enp1s0 UP 169.254.12.7/16`. What does that tell you?
+
+The link is up but DHCP didn't answer, so the machine gave itself a link-local address.
+
+</div>
+
+<div class="card" markdown>
+
 What does the `/24` in `192.168.122.50/24` mean?
 
 The first 24 bits are the network part. Every address sharing them (`192.168.122.0` to `.255`) is on the same subnet and reachable without a router.
@@ -1280,6 +1392,7 @@ Bonding. `teamd` and `libteam` were removed; create `type bond` connections with
 ## Recap
 
 !!! recap "Key takeaways"
+    - Networking in one sentence: a connection needs four answers (name to IP, which way out, next hop's MAC, something listening). When it fails, find the missing answer. `ip` is for looking, `nmcli` is for changing.
     - A packet passes through layers: application, TCP/UDP ports, IP routing, Ethernet/MAC, and the NIC. Diagnose from the bottom up.
     - The prefix (`/24`) decides who is local. Everything else goes to a router, chosen by longest prefix match; `ip route get` shows the decision.
     - ARP maps the next hop's IP to its MAC; `FAILED` neighbours point to a local network problem.

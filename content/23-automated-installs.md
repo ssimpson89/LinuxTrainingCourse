@@ -24,6 +24,19 @@ Installing one server by clicking through the installer takes twenty minutes. In
 
 ## The big picture
 
+### Automated installs in one sentence
+
+Here is the whole idea:
+
+> **Either an installer follows an answer sheet to build the machine from packages, or a finished disk is copied onto the machine and filled in with its name and keys at first boot.**
+
+The answer sheet is the **kickstart**. The installer is **Anaconda**. The finished disk is an **image**, made by **Image Builder**. The "fill in the name and keys" step is **cloud-init**. Everything else in this module (PXE, `mkksiso`, `OEMDRV`) is just a way of getting the installer and its answer sheet to the machine.
+
+!!! analogy "Think of it like furnishing houses"
+    The install path is a builder with a checklist: same checklist, same house, every time, but the builder works on site and it takes a while. The image path is a prefab house trucked in whole; on arrival someone puts the family's name on the mailbox and hands over the keys.
+
+    Where the analogy breaks: both paths are fully automatic. The difference is *when* the work happens (on every machine vs once, ahead of time) and what you need on site (an installer and package repo vs only the image).
+
 There are two fundamentally different ways to get Rocky onto a machine:
 
 1. **Install**: boot an installer, which partitions the disk and installs packages one by one. **Kickstart** automates the installer's answers. **PXE** delivers the installer over the network.
@@ -52,6 +65,38 @@ flowchart TB
 | PXE / HTTP boot + kickstart | Racks of bare metal | Minutes, fully hands-off | Kickstart, per-MAC configs |
 | Image Builder images | VM templates, cloud images, edge | Seconds (copy a disk) | cloud-init or blueprint |
 | Vendor cloud images + cloud-init | AWS, Azure, GCP, OpenStack | Seconds | cloud-init user-data |
+
+### Three questions decide every automated install
+
+| Question | Install path answer | Image path answer |
+|---|---|---|
+| **1. How does the machine start the process?** | Boot media (ISO, USB) or the network (PXE, UEFI HTTP boot) | Copy the image to a disk or upload it to the cloud |
+| **2. Where do the answers come from?** | A kickstart, found through `inst.ks=`, an `OEMDRV` volume, or embedded with `mkksiso` | The blueprint (baked in) plus cloud-init user-data (per instance) |
+| **3. What makes this machine different from its siblings?** | Per-host kickstarts, or `%pre` + `%include` | cloud-init: hostname, users, SSH keys |
+
+```mermaid
+flowchart TB
+    S["New machine to set up"] --> Q{"Can you copy a<br/>ready-made disk to it?"}
+    Q -- "Yes: VM, cloud, edge" --> I["Image path:<br/>Image Builder + cloud-init"]
+    Q -- "No: bare metal" --> N{"How many, and<br/>is there a network?"}
+    N -- "A few, or air-gapped" --> K1["Kickstart on an ISO or USB<br/>(mkksiso)"]
+    N -- "Racks, provisioning network" --> K2["PXE / HTTP boot<br/>+ inst.ks=http://…"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **Anaconda** | The Rocky installer program |
+| **kickstart** | A text file of answers for Anaconda, so nobody has to click |
+| **`inst.*` options** | Boot options that tell the installer what to do (`inst.ks=`, `inst.repo=`) |
+| **stage 2** | The installer's own root filesystem, loaded into RAM |
+| **`%pre` / `%post`** | Shell scripts in a kickstart, run before installing / after installing |
+| **PXE** | Firmware feature that boots a machine from the network |
+| **TFTP** | The tiny, slow file transfer PXE uses to fetch the first boot files |
+| **blueprint** | The TOML recipe Image Builder turns into a disk image |
+| **cloud-init** | A service in the image that applies per-machine settings at first boot |
+| **user-data** | The per-machine settings cloud-init reads |
 
 ## How Anaconda works
 
@@ -102,6 +147,31 @@ During an install, Anaconda runs inside **tmux** on the first console. Press ++c
 | `/tmp/packaging.log` and `/tmp/dnf.librepo.log` | Repo setup and package downloads |
 | `/tmp/program.log` | Every external command run (mkfs, lvcreate, …) |
 | `/tmp/ks-script-*.log` | Output of `%pre`/`%post` scripts (if you don't set `--log`) |
+
+### Reading a failed install: which log?
+
+This is the most useful skill for kickstart work. When an unattended install stops or goes wrong, fit the problem into one sentence, then open the one log that covers it:
+
+> **"The install went wrong while `<storage / packages / a script / fetching the kickstart>`, so I read `<that log>`."**
+
+The table above is the map: disks go to `storage.log`, packages to `packaging.log`, commands like `mkfs` to `program.log`, scripts to their `--log` file or `ks-script-*.log`, and the overall story to `anaconda.log`.
+
+**Practise.** Pick the log before opening the answer.
+
+**Problem A:** the installer stops before any packages are installed, complaining about the partitioning you asked for.
+
+??? success "Answer A"
+    "It went wrong while partitioning, so I read `/tmp/storage.log`." It shows which disks Anaconda saw and their sizes. Usually the `logvol --size=` values add up to more than the disk, or `ignoredisk --only-use=` points at a smaller disk than you expected.
+
+**Problem B:** the install finishes, but `nginx` isn't installed.
+
+??? success "Answer B"
+    "It went wrong while installing packages, so I read `/tmp/packaging.log` (or `/var/log/anaconda/packaging.log` on the installed system)." Look for the repo setup and whether `nginx` was found. A missing `repo --name=AppStream` line is the classic cause when `url` points at BaseOS only.
+
+**Problem C:** the install finishes, but a file your `%post` should have written is missing.
+
+??? success "Answer C"
+    "It went wrong in a script, so I read the `%post` log." If you set `%post --log=/root/ks-post.log`, read that on the new system. Otherwise look for `ks-script-*.log` in `/var/log/anaconda/`. See the quiz under "%pre, %post and %include" for the usual causes.
 
 ??? question "Under the hood: where the kickstart lives during an install"
     The kickstart is fetched twice over. Dracut's Anaconda module in the initrd reads `inst.ks=`, brings up the network if needed, downloads the file and saves it as `/run/install/ks.cfg`. Anaconda then parses that copy, and `%include` files are read *after* `%pre` has run, which is what makes the "generate a snippet in `%pre`" trick work. From the tmux shell (++ctrl+b++ then ++2++) you can `cat /run/install/ks.cfg` to see exactly what the installer received, which settles any "did it fetch the old version from the cache?" argument.
@@ -210,6 +280,22 @@ clearpart --all --initlabel --drives=${DISK}
 EOF
 %end
 ```
+
+### Example: the agent that never arrived
+
+**Symptom.** Twenty servers installed from the same kickstart. Every one is missing `my-agent`, which `%post` installs with `dnf install -y my-agent`. No error appeared on screen.
+
+**Evidence.** Add `--log` to `%post`, reinstall one test VM, and read the log on the new system:
+
+```console
+$ sudo cat /root/ks-post.log
+```
+
+**Reasoning.** `%post` runs chrooted in the new system, after `%packages`. Whatever the log says, the agent's repo or the network it needs inside that chroot is the likely gap: a kickstart `repo` line is used by the installer, and is only copied into the new system if you add `--install` ("Install this repository to the target system so that it can be used after reboot", in the pykickstart docs). So `dnf` inside `%post` may not know where `my-agent` lives.
+
+**Fix.** Install the agent where Anaconda already knows the repos: add a `repo` line for the agent's repository and list `my-agent` in `%packages`.
+
+**Check.** After the next test install, `rpm -q my-agent` shows the package and `/root/ks-post.log` no longer needs to do the work.
 
 ### Validate before you install
 
@@ -1015,6 +1101,22 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
 
 <div class="card" markdown>
 
+Explain automated installs in one sentence.
+
+Either Anaconda follows a kickstart (an answer sheet) to build the machine from packages, or a finished image is copied on and cloud-init fills in its name, users and keys at first boot.
+
+</div>
+
+<div class="card" markdown>
+
+An unattended install fails while partitioning. Which log do you read?
+
+`/tmp/storage.log` during the install (copied to `/var/log/anaconda/` afterwards).
+
+</div>
+
+<div class="card" markdown>
+
 Where does Anaconda leave a kickstart of the install it just did?
 
 `/root/anaconda-ks.cfg` on the installed system. Install logs are in `/var/log/anaconda/`.
@@ -1082,6 +1184,8 @@ Which command validates kickstart syntax, and from which package?
 ## Recap
 
 !!! recap "Key takeaways"
+    - Automated installs in one sentence: either an installer (Anaconda) follows an answer sheet (kickstart) to build the machine from packages, or a finished image is copied on and personalised at first boot (cloud-init).
+    - When an install goes wrong, name the stage (storage, packages, script, fetching the kickstart) and read that one log.
     - Two paths: install with Anaconda (kickstart automates it) or deploy a pre-built image (Image Builder, cloud images) personalised by cloud-init.
     - Start kickstarts from `/root/anaconda-ks.cfg`, always restrict disks with `ignoredisk`, end with `reboot`, and log `%post`.
     - Validate with `ksvalidator -v RHEL10`; Rocky 10 removed `auth`, `pwpolicy` and `timezone --ntpservers`, and deprecated `vnc` in favour of RDP.

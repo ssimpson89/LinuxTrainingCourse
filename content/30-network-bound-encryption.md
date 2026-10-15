@@ -24,7 +24,13 @@ Your security team wants every disk in the data center encrypted, so a failed dr
 
 ## The big picture
 
-The idea is simple: keep your normal LUKS passphrase, and **add a second keyslot** whose key is locked by a policy that a machine can satisfy on its own. **Clevis** is the framework that does the adding and the automatic unlocking. A **pin** is a Clevis plug-in for one kind of policy.
+### Unattended unlock in one sentence
+
+Here is the whole idea:
+
+> **Keep your passphrase, and add a second key locked in a box that only the right place can open: your network (Tang), this machine's chip in its expected boot state (TPM2), or a combination of both (sss). If the box won't open, a human types the passphrase as before.**
+
+Everything else in this module is detail around that sentence. In LUKS terms: keep your normal LUKS passphrase, and **add a second keyslot** whose key is locked by a policy that a machine can satisfy on its own. **Clevis** is the framework that does the adding and the automatic unlocking. A **pin** is a Clevis plug-in for one kind of policy.
 
 ```mermaid
 flowchart LR
@@ -49,6 +55,92 @@ flowchart LR
 | `sss` | A threshold of sub-pins succeed | Whatever its combination covers | Depends on the combination |
 
 This approach as a whole is called **Network-Bound Disk Encryption** (NBDE) when Tang is involved. The passphrase never goes away: if every automatic method fails, the boot simply falls back to asking a human.
+
+### The good news: a few causes explain most passphrase prompts
+
+The pins table above covers the choice. When an automatic unlock *stops* working, the reason is almost always one of these, and each has one fix:
+
+| Symptom at boot | In box-and-key terms | The fix |
+|---|---|---|
+| **Tang-bound root asks for a passphrase** | The box needs your network, and the initramfs never reached Tang | Network in early boot: `rd.neednet=1`, `ip=` for static addresses, the right NIC |
+| **TPM2-bound volume asks after an update** | The machine's boot state changed (a PCR value moved), so the chip won't open the box | Type the passphrase once, then `clevis luks regen` |
+| **Tang-bound clients ask after key rotation** | The old Tang keys were deleted before clients rebound | Passphrase, then `clevis luks regen`. Next time, regen *before* deleting hidden keys |
+
+And one short process for finding which one you have:
+
+```mermaid
+flowchart TB
+    S["Boot stops at a<br/>passphrase prompt"] --> A["1. Type the passphrase<br/>(the fallback always works)"]
+    A --> B["2. sudo clevis luks list -d DEV<br/>Which pin is bound?"]
+    B --> C{"3. Which pin?"}
+    C -- "tang" --> F1["Did the initramfs reach Tang?<br/>rd.neednet=1, ip=, NIC<br/>clevis luks report"]
+    C -- "tpm2" --> F2["What changed the PCRs?<br/>firmware, dbx, Secure Boot<br/>then clevis luks regen"]
+    C -- "sss" --> F3["Check each sub-pin<br/>against the threshold t"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **LUKS2** | The on-disk encryption format: a header with keyslots and tokens, then encrypted data |
+| **volume key** | The one random key that actually encrypts the data. It never changes when you add unlock methods |
+| **keyslot** | A copy of the volume key locked with one passphrase. Clevis adds one |
+| **token** | JSON metadata in the LUKS2 header. Clevis stores its locked box there |
+| **Clevis** | The framework that binds a keyslot to a pin and unlocks it automatically |
+| **pin** | A Clevis plug-in for one kind of box: `tang`, `tpm2` or `sss` |
+| **JWE** | JSON Web Encryption: the format of Clevis's locked box |
+| **Tang** | A small network server that helps clients rebuild their key without ever learning it |
+| **TPM2** / **PCR** | The security chip / its registers that record a fingerprint of the boot |
+| **sss** / **threshold** | Shamir's Secret Sharing pin / how many sub-pins must succeed |
+| **NBDE** | Network-Bound Disk Encryption: unlocking tied to your network via Tang |
+
+## Reading a pin config as a sentence
+
+This is the core skill of the module. Every Clevis binding is a small JSON config, and every config reads as one sentence:
+
+> **"Unlock when at least `t` of these succeed: `<pin>` with `<settings>`, …"**
+
+A single pin is the simple case: `tang '{"url":"http://tang1.lab:7500"}'` says "unlock when Tang at `tang1.lab:7500` helps". `clevis luks list -d DEV` prints exactly these configs, one per bound slot:
+
+```console
+$ sudo clevis luks list -d /dev/vda3
+1: tang '{"url":"http://tang1.lab:7500"}'
+```
+
+For `sss`, `t` is the threshold and `pins` maps each pin name to one config, or to a list of configs.
+
+### Practise: read three configs
+
+Say the sentence and decide what it protects against before opening the answer.
+
+**Config A:**
+
+```json
+{"t":1,"pins":{"tang":[{"url":"http://tang1.lab:7500"},{"url":"http://tang2.lab:7500"}]}}
+```
+
+??? success "Answer A"
+    "Unlock when at least 1 of these succeeds: Tang at `tang1`, Tang at `tang2`." Either Tang server is enough, so maintenance on one doesn't block reboots. It protects against a disk or server leaving your network, not against someone who steals the server *and* gets onto your network.
+
+**Config B:**
+
+```json
+{"t":2,"pins":{"tang":[{"url":"http://tang1.lab:7500"}],"tpm2":{"pcr_ids":"7"}}}
+```
+
+??? success "Answer B"
+    "Unlock when 2 of these succeed: Tang at `tang1`, and this machine's TPM with PCR 7 as expected." Both are required. A stolen whole server can't reach Tang, and a disk moved to another machine lacks the TPM. The cost: if `tang1` is down, this machine needs the passphrase.
+
+**Config C:**
+
+```json
+{"t":2,"pins":{"tpm2":{"pcr_ids":"7"},"sss":{"t":1,"pins":{"tang":[{"url":"http://tang1.lab:7500"},{"url":"http://tang2.lab:7500"}]}}}}
+```
+
+??? success "Answer C"
+    "Unlock when 2 of these succeed: the TPM (PCR 7), and (at least 1 of Tang `tang1`, Tang `tang2`)." That's config B with the Tang half made highly available by nesting a second `sss` inside. Read nested configs from the inside out.
+
+Notice the pattern. **`t=1` means "any of"**, for availability. **`t` equal to the number of pins means "all of"**, for stricter protection. Two *separate* bindings on two keyslots behave like "any of", too.
 
 ## LUKS2 keyslots and tokens, revisited
 
@@ -104,6 +196,8 @@ So "binding" a volume with Clevis means: make a random passphrase, add it to a n
     Binding adds a keyslot; it doesn't re-encrypt anything. If you clone one encrypted disk image to many VMs, they all share one volume key, and anyone who unlocks one can decrypt them all. Install each encrypted machine separately (for example with a kickstart, see [module 23](23-automated-installs.md)) instead of cloning.
 
 ## Tang: unlock while you're on the network
+
+This is the "your network" box from the one-sentence model.
 
 A **Tang** server is a tiny HTTP service that helps clients recover keys without ever learning them. It has no database of clients, no accounts, and stores nothing per client. It holds only its own key pairs in `/var/db/tang`.
 
@@ -191,6 +285,8 @@ The JWE is useless without Tang's private key taking part. Tang doesn't keep a c
 </div>
 
 ## TPM2: unlock only on this machine, in this state
+
+This is the "this machine's chip in its expected boot state" box.
 
 A **TPM** (Trusted Platform Module) is a small security chip (or firmware equivalent, or a virtual TPM in a VM) with two features Clevis uses:
 
@@ -298,10 +394,10 @@ Be clear about what PCR 7 does *not* prove, though. It records *who signed* the 
 !!! danger "PCR 7 does change sometimes"
     A `dbx` revocation update (shipped through firmware updates or `fwupd`), the 2023 Microsoft CA rollout, enrolling a new key, or toggling Secure Boot all change PCR 7. Before applying one, make sure someone knows the passphrase or that a second pin (Tang) can unlock the machine. After it, rebind with `clevis luks regen`.
 
-!!! note "Without a policy"
+??? question "For the curious: a tpm2 pin without a policy"
     `clevis encrypt tpm2 '{}'` (no `pcr_ids`) seals to the TPM with no PCR policy. The disk still can't be read on another machine, but anyone who boots *this* machine from their own USB stick can ask the TPM to unseal. Use at least PCR 7 with Secure Boot on.
 
-!!! tip "systemd-cryptenroll"
+??? question "For the curious: systemd-cryptenroll"
     systemd also offers TPM2 enrollment for LUKS (`systemd-cryptenroll --tpm2-device=auto`), which you may see in Fedora guides. On Rocky, Clevis is the integrated path: it's the tool with dracut support for Tang, TPM2 and `sss` combinations, and the one RHEL documents for NBDE.
 
 <div class="quiz" data-answer="2" markdown>
@@ -884,6 +980,22 @@ $ sudo dnf install tang clevis clevis-luks tpm2-tools cryptsetup
 
 <div class="card" markdown>
 
+Explain Clevis unattended unlock in one sentence.
+
+Keep your passphrase, and add a second key locked in a box only the right place can open: your network (Tang), this machine's TPM in its expected boot state (tpm2), or a combination (sss). If the box won't open, a human types the passphrase.
+
+</div>
+
+<div class="card" markdown>
+
+Read this as a sentence: `{"t":2,"pins":{"tang":[{"url":"http://tang1.lab:7500"}],"tpm2":{"pcr_ids":"7"}}}`
+
+"Unlock when 2 of these succeed: Tang at tang1, and this machine's TPM with PCR 7 as expected." Both are required.
+
+</div>
+
+<div class="card" markdown>
+
 What does Clevis store in the LUKS2 header?
 
 A token containing a JWE: the random passphrase of a keyslot it added, encrypted under a pin's policy.
@@ -951,6 +1063,8 @@ They all share one LUKS volume key. Clevis adds keyslots; it never changes the v
 ## Recap
 
 !!! recap "Key takeaways"
+    - In one sentence: keep your passphrase and add a second key in a box only the right place can open (Tang: your network; tpm2: this machine in its expected boot state; sss: a combination). If it won't open, a human types the passphrase.
+    - Read every pin config as "unlock when at least `t` of these succeed". `t=1` is "any of", `t` equal to the number of pins is "all of".
     - Clevis adds a **keyslot plus a token** to LUKS2; your passphrase stays as the fallback.
     - **Tang** unlocks while the machine can reach your network. It's stateless, never sees the key, and must not be reachable from outside.
     - **TPM2** seals the key to this machine and, with a PCR policy, to its boot state. **PCR 7** is the practical default, but it doesn't measure the initramfs: pair it with Tang if a whole stolen machine is in your threat model.

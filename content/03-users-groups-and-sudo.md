@@ -24,7 +24,13 @@ A new developer joins on Monday. By lunch they need an account, access to the sh
 
 ## The big picture
 
-Linux identity answers three separate questions. Keeping them apart is the single most useful habit for debugging login problems.
+### Identity in one sentence
+
+Here is the whole idea:
+
+> **The kernel only knows numbers. NSS turns your name into a number, PAM checks you really are that name, and permissions and sudo decide what that number may do.**
+
+Everything in this module hangs off that sentence. Linux identity answers three separate questions, and keeping them apart is the single most useful habit for debugging login problems.
 
 1. **Who exists?** Is there a user called `alice`, and what is her UID? Answered by the **Name Service Switch** (NSS), which reads `/etc/passwd` and friends, or a directory server.
 2. **Is it really them?** Prove you are `alice`. Answered by **PAM** (Pluggable Authentication Modules), which checks a password, a key, or a token.
@@ -41,6 +47,93 @@ flowchart TB
 ```
 
 The kernel itself only knows numbers. A process carries a **UID** (user ID) and a set of **GIDs** (group IDs). Names like `alice` and `wheel` exist for humans and are translated to numbers by user-space libraries. When you see a file owned by a bare number in `ls -l`, it means no name maps to that number any more.
+
+!!! analogy "Think of it like a hotel"
+    The front desk register lists every guest and their room number (NSS). At check-in you show ID to prove you are that guest (PAM). Your key card then opens your room, and a manager can lend you a master key for one job, writing your name in the log each time (permissions and sudo). Where the analogy breaks: the hotel keeps your key card working after you leave the desk, and so does Linux. Your groups are copied onto your session at login and do not change until you log in again.
+
+### The few things that solve most problems
+
+Most identity tickets come down to a handful of causes. Learn these and you can fix the majority of "can't log in" and "can't do X" reports.
+
+| What's wrong | Which question failed | The check | The fix |
+|---|---|---|---|
+| **1. The user does not exist here** | Who exists? (NSS) | `getent passwd alice` prints nothing | Create the account, or fix the directory connection (`sssd`) |
+| **2. Right password, still refused** | Is it really them? (PAM) | `/var/log/secure` names the PAM stack; `chage -l`, `faillock --user` | Unexpire with `chage`, reset with `faillock --reset` |
+| **3. Just added to a group, still denied** | May they? (groups) | `id` (session) differs from `id alice` (fresh lookup) | Log out and back in, or `newgrp` |
+| **4. sudo says no** | May they? (sudo) | `sudo -l` as that user; `visudo -c` | Add a rule in `/etc/sudoers.d/` with `visudo`, or `usermod -aG wheel` |
+
+And one short process for picking the right one:
+
+```mermaid
+flowchart TB
+    S["User reports: can't log in,<br/>or can't do something"] --> A{"getent passwd USER<br/>finds them?"}
+    A -- "no" --> F1["Fix 1: identity source<br/>useradd, or check sssd"]
+    A -- "yes" --> B{"Can they log in at all?"}
+    B -- "no" --> F2["Fix 2: read /var/log/secure<br/>the pam_xxx(service:STACK) tag<br/>names the failing step"]
+    B -- "yes" --> C{"Is it a sudo command?"}
+    C -- "yes" --> F4["Fix 4: sudo -l, visudo"]
+    C -- "no" --> F3["Fix 3: compare id with id USER<br/>log in again for new groups"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **UID** / **GID** | The numbers the kernel uses for a user and a group |
+| **primary group** | The one group a process creates files with (field 4 of `/etc/passwd`) |
+| **supplementary groups** | Every other group a user belongs to, listed in `/etc/group` |
+| **NSS** | Name Service Switch: the library layer that turns names into numbers, from files or a directory |
+| **`getent`** | The command that asks NSS exactly the way programs do |
+| **hash** | A one-way scramble of a password, stored in `/etc/shadow` |
+| **PAM** | Pluggable Authentication Modules: the shared login checker used by `sshd`, `sudo`, `login` and more |
+| **stack** | One of PAM's four steps: auth, account, password, session |
+| **sudo** | Run one command as root with your own password, logged under your name |
+| **wheel** | The group whose members get full sudo on Rocky |
+| **authselect** | The tool that generates the PAM and NSS config files |
+| **sssd** | The daemon that brings in users from Active Directory, FreeIPA or LDAP |
+
+### Core skill: read the failing step from the log
+
+When a login fails, the user sees a vague "Permission denied". The system log tells you exactly which of the three questions failed. Every PAM line in `/var/log/secure` (and the journal) carries a tag shaped like this:
+
+```text
+pam_unix(sshd:account): account alice has expired (account expired)
+   │       │     │
+ module  service stack
+```
+
+Read it as a sentence: "**The module** `pam_unix`, **while** `sshd` **was running the** `account` **step, said:** account expired." The stack name tells you which question failed. `auth` means the proof failed (wrong password, lockout). `account` means the proof was fine but the account may not log in right now. `session` means login succeeded and setting up the session failed. If there is no PAM line at all and `getent` finds nothing, NSS never found the user. You'll meet the four stacks properly in the PAM section; this template is enough to start.
+
+Try these. Each is a real log line or command output from this module.
+
+**Practice 1.**
+
+```console
+$ getent passwd carol; echo "exit=$?"
+exit=2
+```
+
+??? success "Answer"
+    Question 1 failed: NSS knows no user called carol. No password reset will help. Create the account, or if carol should come from a directory, check that `sssd` is running and the machine is joined.
+
+**Practice 2.**
+
+```text
+pam_unix(sshd:account): account alice has expired (account expired)
+```
+
+??? success "Answer"
+    Question 2, the `account` stack. Her password was right (auth passed), but the account's expiry date has passed. `sudo chage -l alice` shows the date; `sudo chage -E -1 alice` removes it.
+
+**Practice 3.** You ran `sudo usermod -aG devs bob` an hour ago. In his existing SSH session bob runs:
+
+```console
+$ id
+uid=1001(bob) gid=1001(bob) groups=1001(bob)
+```
+
+??? success "Answer"
+    Question 3, groups. `/etc/group` is updated, but bob's shell still carries the group list copied at login. `id bob` (a fresh lookup) would show `devs`. He needs a new login, or `newgrp devs` for a quick test.
 
 ## Users are numbers
 
@@ -105,19 +198,20 @@ $ sudo grep '^alice:' /etc/shadow
 alice:$y$j9T$Hk3S0lG7pq1lWJkV1oCXa.$1uQ9mT0yQ6Rz3cP0xE8lD4bJ2sV7hN5kA9fW1gU3iY/:20376:0:99999:7:::
 ```
 
-Mode `----------` looks alarming, but root bypasses ordinary permission checks, and the programs that need the file (`passwd`, the login stack) run with root's power. The nine fields are:
+Mode `----------` looks alarming, but root bypasses ordinary permission checks, and the programs that need the file (`passwd`, the login stack) run with root's power. Day to day you only care about field 2 (the hash, or a `!` meaning locked) and the ageing dates, which `chage -l` shows in plain words.
 
-| # | Field | In the example |
-|---|---|---|
-| 1 | user name | `alice` |
-| 2 | password hash | `$y$j9T$…` |
-| 3 | last password change, in days since 1970-01-01 | `20376` |
-| 4 | minimum days before the password may change again | `0` |
-| 5 | maximum days before it must change | `99999` (effectively never) |
-| 6 | days of warning before it expires | `7` |
-| 7 | days after expiry before the account is disabled | empty |
-| 8 | account expiry date, in days since 1970 | empty (never) |
-| 9 | reserved | empty |
+??? question "Reference: all nine fields of /etc/shadow"
+    | # | Field | In the example |
+    |---|---|---|
+    | 1 | user name | `alice` |
+    | 2 | password hash | `$y$j9T$…` |
+    | 3 | last password change, in days since 1970-01-01 | `20376` |
+    | 4 | minimum days before the password may change again | `0` |
+    | 5 | maximum days before it must change | `99999` (effectively never) |
+    | 6 | days of warning before it expires | `7` |
+    | 7 | days after expiry before the account is disabled | empty |
+    | 8 | account expiry date, in days since 1970 | empty (never) |
+    | 9 | reserved | empty |
 
 ### Reading a password hash
 
@@ -265,6 +359,17 @@ $ sudo userdel -r bob                # delete bob, his home, and his mail spool
     `usermod -G devs bob` *replaces* all of bob's supplementary groups with just `devs`. If bob was in `wheel`, he just lost sudo. Always write `-aG` (append) unless you mean to replace the list.
 
 Locking with `-L` only blocks *password* logins. A user with an SSH key can still get in. To stop an account completely, also expire it: `sudo usermod -e 1 bob` (expiry set to 2 January 1970), or set the shell to `nologin`.
+
+!!! example "Story: the locked user who still logs in"
+    **Symptom:** you ran `sudo usermod -L bob` when he left the team, but the next day the journal shows him logging in over SSH.
+
+    **Evidence:** `sudo grep '^bob:' /etc/shadow` shows a `!` in front of his hash, so the lock is there. `/var/log/secure` shows `Accepted publickey for bob`, not `Accepted password`.
+
+    **Reasoning:** in mental-model terms, the lock only changes how PAM checks a *password*. A key login proves identity a different way and never looks at the hash.
+
+    **Fix:** `sudo usermod -e 1 bob` expires the account, which the PAM `account` step refuses for every login method. Also remove his `~/.ssh/authorized_keys`.
+
+    **Check:** `sudo chage -l bob` shows the account expiry date in 1970, and a new login attempt is refused.
 
 `userdel` without `-r` leaves the home directory behind, owned by a UID that no longer has a name. If you later create a new user who gets the same UID, they silently inherit those files. Decide on purpose.
 
@@ -589,7 +694,8 @@ account    include      password-auth
 password   include      password-auth
 ```
 
-Each line has a **control flag** that says what the result means. `required` means "this must pass, but keep running the other modules"; `requisite` means "must pass, stop immediately on failure"; `sufficient` means "if this passes, that is enough"; `optional` means the result rarely matters. The other modules keep running after a `required` failure on purpose, so an attacker cannot tell from the timing which check failed.
+??? question "Under the hood: control flags (required, requisite, sufficient, optional)"
+    Each line has a **control flag** that says what the result means. `required` means "this must pass, but keep running the other modules"; `requisite` means "must pass, stop immediately on failure"; `sufficient` means "if this passes, that is enough"; `optional` means the result rarely matters. The other modules keep running after a `required` failure on purpose, so an attacker cannot tell from the timing which check failed.
 
 Here is what happens, step by step, when alice logs in over SSH with a password.
 
@@ -1111,11 +1217,28 @@ Which tool should you use instead of editing `/etc/pam.d/system-auth` by hand?
 
 </div>
 
+<div class="card" markdown>
+
+State the identity mental model in one sentence.
+
+The kernel only knows numbers. NSS turns your name into a number, PAM checks you really are that name, and permissions and sudo decide what that number may do.
+
+</div>
+
+<div class="card" markdown>
+
+In `pam_unix(sshd:account)`, what does each part mean?
+
+`pam_unix` is the module, `sshd` is the service, and `account` is the PAM stack (step) that wrote the line.
+
+</div>
+
 </div>
 
 ## Recap
 
 !!! recap "Key takeaways"
+    - One sentence: the kernel only knows numbers; NSS answers "who exists?", PAM answers "is it really them?", and permissions and sudo answer "may they do this?". Find which question failed before fixing anything.
     - The kernel knows only numbers. Names come from NSS, which reads `/etc/passwd` and `/etc/group` and can also ask `sssd` for directory users. Use `getent`, not `grep`.
     - `/etc/shadow` holds salted password hashes and ageing data. Rocky 10 uses yescrypt (`$y$`); Rocky 9 used SHA-512 (`$6$`).
     - Every user has one primary group (user private group on Rocky) and any number of supplementary groups. Group changes take effect at the next login.

@@ -58,6 +58,56 @@ flowchart TB
     then hands it to the next. Each handoff is a place the race can be
     dropped, and the error message tells you which runner dropped it.
 
+### The boot in one sentence
+
+Here is the whole idea:
+
+> **Booting is a relay race of small programs, each just smart enough to start the next one: firmware, GRUB, the kernel, the initramfs, then systemd. When a boot fails, the last thing on the screen tells you which runner dropped the baton, and each runner has its own fix.**
+
+Everything else in this module is detail about one of those runners: how to
+see it working, how to change it, and how to fix it when it drops the baton.
+
+### The few fixes that solve most problems
+
+Most boot failures you'll meet are one of these. The left column is what you
+see; the rest follows from it.
+
+| What you see | Runner that dropped it | The fix |
+|---|---|---|
+| **1.** A `grub>` or `grub rescue>` prompt | GRUB (stage 3) | Boot the install ISO in rescue mode, reinstall the boot packages, regenerate `grub.cfg` |
+| **2.** Kernel panic, "VFS: Unable to mount root fs" | Kernel (stage 4): no usable initramfs | Boot the previous kernel, then `dracut -f --kver <version>`; check `df -h /boot` |
+| **3.** dracut emergency shell, "initqueue timeout" | Initramfs (stage 5): root device never appeared | Boot the rescue entry, fix `root=` / `rd.lvm.lv=` with `grubby` or rebuild with `dracut -f` |
+| **4.** "You are in emergency mode" | systemd (stage 7): a required mount failed | Log in, fix `/etc/fstab`, `systemctl daemon-reload`, `mount -a` |
+| **5.** Boots fine, but nobody knows the root password | (not a failure) | `rd.break` at the GRUB menu, reset the password, relabel for SELinux |
+
+```mermaid
+flowchart TB
+    S["The machine won't boot"] --> Q{"What's the last thing<br/>on the screen?"}
+    Q -- "grub> prompt" --> F1["Fix 1: repair GRUB<br/>from the install ISO"]
+    Q -- "Kernel panic:<br/>can't mount root" --> F2["Fix 2: previous kernel,<br/>rebuild the initramfs"]
+    Q -- "dracut shell /<br/>initqueue timeout" --> F3["Fix 3: rescue entry,<br/>fix root= or rebuild"]
+    Q -- "emergency mode" --> F4["Fix 4: fix /etc/fstab"]
+```
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| **firmware** (**UEFI** / **BIOS**) | The code in the motherboard that starts first. UEFI is modern; BIOS is the old way |
+| **ESP** | EFI System Partition: a small FAT partition, mounted at `/boot/efi`, holding the `.efi` boot programs |
+| **Secure Boot** / **shim** | Firmware only runs signed code / the small Microsoft-signed loader that lets Rocky's own key take over |
+| **MOK** | Machine Owner Key: your own key, enrolled so the kernel trusts modules you sign |
+| **GRUB2** | The bootloader: shows the menu, loads the kernel and initramfs |
+| **BLS entry** | One small file per installed kernel in `/boot/loader/entries/`. Each is one menu line |
+| **kernel command line** | Options passed to the kernel at boot, like `root=` and `ro`. Visible in `/proc/cmdline` |
+| **`grubby`** | The tool for changing boot entries and kernel arguments safely |
+| **initramfs** | A tiny Linux system in RAM whose only job is to find and mount the real root filesystem |
+| **dracut** | The tool that builds the initramfs |
+| **`switch_root`** | The handover from the initramfs to the real root filesystem |
+| **PID 1** / **target** | systemd, the first process / a group of units that marks a boot milestone |
+| **rescue** / **emergency** | Minimal systemd modes for repairs. Emergency is the smaller one |
+| **`rd.break`** | A kernel argument that stops the boot inside the initramfs, before the real system starts |
+
 ## The boot, step by step
 
 Click through each stage. The commands in each step show you the evidence
@@ -250,6 +300,59 @@ The boot is done.
 
 </div>
 
+## Reading where the boot stopped
+
+This is the core skill of the module. Before you change anything, name the
+runner. Use this template:
+
+> **"The last runner that spoke was `<runner>`, so every runner before it worked. The problem is in `<runner>`, or in what it was trying to hand to the next one."**
+
+Two tricks help. First, look at the *last* message, not the scariest one:
+earlier warnings are often harmless. Second, ask what that runner was trying
+to *find*: GRUB looks for `/boot`, the kernel looks for an initramfs, the
+initramfs looks for the root device, systemd looks for every required mount
+in `/etc/fstab`.
+
+### Practise: name the runner
+
+Decide the runner and the fix before you open each answer.
+
+**Case A.** A kernel update was interrupted by a power cut. On the next boot
+the screen ends with a kernel panic, "VFS: Unable to mount root fs".
+`/boot` was nearly full before the update.
+
+??? success "Answer A"
+    The kernel started (it printed a panic), so firmware and GRUB worked. The
+    kernel couldn't reach root, which means it had no usable initramfs: the
+    update ran out of space or was cut off before the image was written.
+    **Fix 2:** choose the previous kernel in GRUB, free space in `/boot`
+    (`df -h /boot`), then `sudo dracut -f --kver <broken version>`.
+
+**Case B.** You added a new data disk to `/etc/fstab` yesterday. Today the
+disk was removed for repair, and after a reboot the console shows "You are
+in emergency mode".
+
+??? success "Answer B"
+    "Emergency mode" is systemd talking, so firmware, GRUB, kernel and
+    initramfs all did their jobs and the real root is mounted. systemd
+    couldn't mount something marked as required: the missing disk. **Fix 4:**
+    log in, remount root read-write, comment out or fix the line, and add
+    `nofail` for a disk that isn't essential.
+
+**Case C.** A VM was moved to a new hypervisor that presents its disks
+through a different storage controller. The boot now waits, then drops into
+the dracut emergency shell after an "initqueue timeout".
+
+??? success "Answer C"
+    The dracut shell means the initramfs was running and gave up waiting for
+    the root device. The disk is fine, but the default **host-only**
+    initramfs only contains the drivers this machine needed *before* the
+    move. **Fix 3:** boot the rescue entry (its generic initramfs has drivers
+    for nearly everything), then rebuild with `dracut -f`.
+
+Notice the pattern: each message proves that every runner *before* it
+worked. That alone rules out most of the chain.
+
 ## Firmware and Secure Boot in practice
 
 Most of the time the firmware stage just works. Two things are worth
@@ -266,13 +369,17 @@ knowing for troubleshooting:
 ```console
 $ sudo dmesg | grep -i 'secure boot'
 [    0.000000] secureboot: Secure boot enabled
-$ cat /sys/kernel/security/lockdown
-none [integrity] confidentiality
 ```
 
-The kernel **lockdown** mode `integrity` (switched on automatically with
-Secure Boot) stops even root from doing things that could modify the running
-kernel, like loading unsigned modules or writing to `/dev/mem`.
+??? question "Under the hood: kernel lockdown"
+    ```console
+    $ cat /sys/kernel/security/lockdown
+    none [integrity] confidentiality
+    ```
+
+    The kernel **lockdown** mode `integrity` (switched on automatically with
+    Secure Boot) stops even root from doing things that could modify the
+    running kernel, like loading unsigned modules or writing to `/dev/mem`.
 
 ## GRUB2, BLS, and grubby
 
@@ -542,6 +649,16 @@ Give root password for maintenance
 (or press Control-D to continue):
 ```
 
+### Worked story: the disk that wasn't there
+
+**Symptom.** After a reboot, the console shows the emergency mode message
+above. **Evidence:** once you've logged in, `journalctl -xb -p err` names
+the mount that failed, and `/etc/fstab` has a line for a disk that `lsblk`
+doesn't show. **Reasoning:** systemd (stage 7) treats every fstab line
+without `nofail` as required, so a missing disk stops the boot. **Fix and
+check:** the workflow below, ending with `mount -a` succeeding and the boot
+continuing. Lab 4 has you break and repair exactly this.
+
 The fix workflow, once you've logged in:
 
 ```console
@@ -740,7 +857,7 @@ lists everything by duration, including things that ran in parallel and
 delayed nothing. `@` is when a unit became active, `+` how long it took to
 start.
 
-!!! note "kdump"
+??? question "Under the hood: why kdump shows up in critical-chain"
     `kdump.service` loads a second, small "crash kernel" into reserved memory
     (that's the `crashkernel=` argument). If the main kernel panics, the
     crash kernel boots and saves a memory dump to `/var/crash` for analysis.
@@ -1139,6 +1256,22 @@ multi-user.target @9.380s
 
 <div class="card" markdown>
 
+Explain the boot in one sentence.
+
+A relay race of small programs, each just smart enough to start the next: firmware, GRUB, kernel, initramfs, systemd. The last message on the screen tells you which runner dropped the baton.
+
+</div>
+
+<div class="card" markdown>
+
+The console shows a dracut emergency shell after an "initqueue timeout". Which runner failed, and what was it looking for?
+
+The initramfs (stage 5). It was looking for the root device and never found it: a wrong `root=` / `rd.lvm.lv=`, or a driver missing from a host-only image.
+
+</div>
+
+<div class="card" markdown>
+
 What is shim, and why does Rocky need it?
 
 A small first-stage bootloader signed by Microsoft that carries Rocky's own certificate, so Secure Boot firmware will run it, and it can then verify Rocky's GRUB and kernel.
@@ -1214,6 +1347,7 @@ SELinux wasn't loaded, so `/etc/shadow` lost its label. Without a relabel, nobod
 ## Recap
 
 !!! recap "Key takeaways"
+    - The boot in one sentence: a relay race (firmware, GRUB, kernel, initramfs, systemd), and the last message on screen names the runner that dropped the baton.
     - Boot is a relay: firmware → shim → GRUB2 → kernel → initramfs →
       `switch_root` → systemd → targets → login. Where it stops tells you
       what broke.
