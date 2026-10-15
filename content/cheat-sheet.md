@@ -43,7 +43,7 @@ To chain commands, pipe the output of one into the next:
 
 ```console
 $ ps aux --sort=-%mem | head -5
-$ grep -c Failed /var/log/secure
+$ sudo grep -c Failed /var/log/secure
 $ journalctl -u sshd | grep -i 'invalid user' | wc -l
 ```
 
@@ -185,7 +185,7 @@ $ journalctl -u sshd | grep -i 'invalid user' | wc -l
 | `sudo nmcli con mod NAME ipv4.addresses 10.0.0.5/24 ipv4.method manual` | Set a static address | [11](11-networking.md) |
 | `sudo nmcli con up NAME` | Apply / activate a profile | [11](11-networking.md) |
 | `nmtui` | Text-menu network configuration | [11](11-networking.md) |
-| `hostnamectl set-hostname NAME` | Set the hostname | [11](11-networking.md) |
+| `sudo hostnamectl set-hostname NAME` | Set the hostname | [11](11-networking.md) |
 | `ss -tlnp`, `ss -tunap` | Listening sockets; all connections | [11](11-networking.md) |
 | `ping`, `tracepath HOST` | Reachability; path and MTU | [11](11-networking.md) |
 | `getent hosts NAME` | Resolve a name the way apps do | [11](11-networking.md) |
@@ -326,7 +326,7 @@ $ journalctl -p err -b --no-pager | tail -20
 $ df -h; df -i
 $ free -m; uptime
 $ sudo ausearch -m AVC -ts recent
-$ ss -tlnp
+$ sudo ss -tlnp
 ```
 
 See [20 · Troubleshooting Playbook](20-troubleshooting-playbook.md) for what to

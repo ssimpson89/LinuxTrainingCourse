@@ -72,7 +72,7 @@ This glossary has 118 terms.
 ## D
 
 **D state (uninterruptible sleep)**
-:   A process waiting inside the kernel, usually for disk or NFS I/O, that cannot be interrupted even by `kill -9`. Counts toward load average. See [module 06](06-processes-and-signals.md).
+:   A process waiting inside the kernel, usually for disk or NFS I/O, that ignores signals, even `kill -9`, until the I/O completes (NFS waits use a "killable" variant that `SIGKILL` can end). Counts toward load average. See [module 06](06-processes-and-signals.md).
 
 **Daemon**
 :   A background program with no terminal, usually started by systemd, such as `sshd` or `chronyd`. See [module 07](07-systemd-and-services.md).

@@ -76,7 +76,7 @@ $ journalctl -p err -b --no-pager | tail -20   # errors since boot
 $ df -h; df -i                            # space and inodes
 $ free -m; uptime                         # memory and load
 $ sudo ausearch -m AVC -ts recent         # recent SELinux denials
-$ ss -tlnp                                # what is listening
+$ sudo ss -tlnp                           # what is listening, and by whom
 ```
 
 Drill them now. The scenario: users say "the server is acting weird".
@@ -423,8 +423,8 @@ $ df -i /var
 Filesystem           Inodes   IUsed IFree IUse% Mounted on
 /dev/mapper/rl-var  1310720 1310720     0  100% /var
 $ sudo find /var -xdev -type f | cut -d/ -f2-4 | sort | uniq -c | sort -n | tail -3
-   1204 var/lib/rpm
-   9811 var/log/sa
+   2210 var/cache/dnf
+   9811 var/lib/pcp
 1288003 var/spool/app-sessions
 ```
 
@@ -437,7 +437,8 @@ rarer than on ext4 but can still happen when the disk is nearly full too.
 </div>
 
 !!! danger "Be careful what you delete under pressure"
-    Never `rm -rf` inside `/var/lib/rpm`, `/var/lib/mysql` or similar to "make
+    Never `rm -rf` inside `/var/lib/rpm` (on Rocky 10 a symlink to the RPM
+    database in `/usr/lib/sysimage/rpm`), `/var/lib/mysql` or similar to "make
     space". Prefer emptying caches (`dnf clean all`), vacuuming the journal and
     removing files you understand. If the root filesystem is on LVM, growing it
     may be the fastest safe fix: see [10 · LVM, RAID and Encryption](10-lvm-raid-and-encryption.md).
@@ -601,8 +602,8 @@ Or, if DHCP should be providing DNS, fix the DHCP server and remove
 
 ```text
 You are in emergency mode. After logging in, type "journalctl -xb" to view
-system logs, "systemctl reboot" to reboot, "systemctl default" or "exit"
-to boot into default mode.
+system logs, "systemctl reboot" to reboot, or "exit"
+to continue bootup.
 Give root password for maintenance
 (or press Control-D to continue):
 ```
@@ -723,6 +724,14 @@ sh-5.2# touch /.autorelabel
 The next boot relabels the whole filesystem (this can take a few minutes) and
 then reboots once more by itself.
 
+??? question "Under the hood: skipping the full relabel on a huge server"
+    A full relabel walks every file and can take hours on a server with
+    hundreds of millions of files. Red Hat's documented alternative: add
+    `enforcing=0` next to `rd.break`, skip `/.autorelabel`, and after the
+    system boots (permissive, so the badly labelled `/etc/shadow` is only
+    logged, not denied) run `sudo restorecon -v /etc/shadow` and
+    `sudo setenforce 1`. Only the one file is fixed, in seconds.
+
 </div>
 
 <div class="step" data-title="Exit and reboot" markdown>
@@ -770,8 +779,8 @@ shows the CPUs mostly idle.
 
 As you saw in [19 · Performance and Observability](19-performance-and-observability.md),
 Linux load counts tasks in **uninterruptible sleep** (`D` state): tasks waiting
-inside the kernel, usually for disk or network storage. They cannot be killed,
-not even with `kill -9`, until the I/O completes.
+inside the kernel, usually for disk or network storage. A true `D` task ignores
+every signal, even `kill -9`, until the I/O completes.
 
 ```console
 $ uptime
@@ -790,6 +799,18 @@ Oct 15 12:41:02 web1 kernel: nfs: server files1 not responding, still trying
 `b` is 23 and the CPU is 98% idle. The blocked processes are all waiting in
 NFS (`rpc_…`, `nfs_…` wait channels), and the kernel says the NFS server is not
 responding.
+
+??? question "Under the hood: \"killable\" D state and hung-task warnings"
+    Notice `_killable` in those wait channels. NFS waits use a variant of
+    `D` called `TASK_KILLABLE`: it still shows as `D` and still counts in the
+    load average, but a `SIGKILL` *does* end it. So `kill -9 8120` works on a
+    process stuck on a dead NFS server, while a process stuck in a local
+    disk wait (`io_schedule`) truly cannot be killed. Separately, the kernel's
+    **hung task detector** logs `INFO: task backup.sh:8201 blocked for more
+    than 122 seconds.` with a stack trace when a task stays in `D` for longer
+    than `kernel.hung_task_timeout_secs`. Search `journalctl -k` for
+    `blocked for more than`: the stack trace names the exact subsystem
+    (`nfs`, `xfs`, `dm`) the task is stuck in.
 
 **Root cause:** the NFS server `files1` (or the network path to it) is down.
 With the default `hard` mount option, clients wait forever rather than return
@@ -933,7 +954,7 @@ channel, then import it:
 ```console
 $ sudo rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-vendor
 $ rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE}\t%{SUMMARY}\n'
-gpg-pubkey-6fedfc85-…	Rocky Enterprise Software Foundation - Release key 2024 public key
+gpg-pubkey-6fedfc85-…	Release Engineering (Rocky Linux 10) <releng@rockylinux.org> public key
 gpg-pubkey-1a2b3c4d-…	Vendor Inc. <security@vendor.example> public key
 ```
 
@@ -942,8 +963,19 @@ gpg-pubkey-1a2b3c4d-…	Vendor Inc. <security@vendor.example> public key
     as root on your server. Turning them off "temporarily" tends to become
     permanent. Fix the key. See [05 · Software: RPM and DNF](05-software-rpm-and-dnf.md).
 
-If the RPM database itself is damaged (`error: rpmdb: … DB_RUNRECOVERY`), back
-up `/var/lib/rpm` and run `sudo rpm --rebuilddb`.
+If the RPM database itself is damaged (errors such as `error: sqlite failure`
+or `cannot open Packages database`), back up the database directory and
+rebuild it:
+
+```console
+$ sudo tar -czf /root/rpmdb-backup.tgz /usr/lib/sysimage/rpm
+$ sudo rpm --rebuilddb
+```
+
+On Rocky 9 and 10 the database is a single SQLite file, `rpmdb.sqlite`, in
+`/usr/lib/sysimage/rpm` on Rocky 10 (`/var/lib/rpm` is a symlink to it) and
+in `/var/lib/rpm` on Rocky 9. The old Berkeley DB `__db.*` files and
+`DB_RUNRECOVERY` errors belong to Rocky 8 and earlier.
 
 ## Scenario 10: the web server returns 403 Forbidden
 
@@ -1081,8 +1113,10 @@ with the method before you open the hints.
         sudo systemctl daemon-reload
         ```
 
-    2. Symptom: both `sudo systemctl start httpd` and
-       `sudo systemctl start report` fail. Find out why, for each one.
+    2. Symptom: `sudo systemctl start httpd` fails, and
+       `sudo systemctl start report` returns quietly but the report never
+       runs (`systemctl status report` says `failed`). Find out why, for
+       each one.
 
     ??? tip "Hint"
         `systemctl status` shows an exit code for `report` and a log line for
@@ -1162,10 +1196,11 @@ with the method before you open the hints.
     1. Break it:
 
         ```bash
+        sudo dnf install -y bind-utils        # provides dig
         echo '203.0.113.77  rockylinux.org' | sudo tee -a /etc/hosts
         ```
 
-    2. Symptom: `curl -sI https://rockylinux.org` times out, but
+    2. Symptom: `curl -sI -m 5 https://rockylinux.org` times out, but
        `dig +short rockylinux.org` returns real addresses.
 
     ??? tip "Hint"
@@ -1364,7 +1399,7 @@ The file kept its `user_home_t` SELinux label. `restorecon -Rv /var/www/html`.
 
 ## Go deeper
 
-- Man pages: [[man:systemctl(1)]] [[man:journalctl(1)]] [[man:systemd.exit(7)]]
+- Man pages: [[man:systemctl(1)]] [[man:journalctl(1)]] [[man:systemd.exec(5)]]
   [[man:ausearch(8)]] [[man:restorecon(8)]] [[man:lsof(8)]] [[man:findmnt(8)]]
   [[man:dracut.cmdline(7)]] [[man:nsswitch.conf(5)]] [[man:namei(1)]]
 - [Red Hat: Configuring and managing logging (RHEL 10)](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/configuring_and_managing_logging/index)

@@ -333,8 +333,8 @@ cpuset cpu io memory hugetlb pids rdma misc
 
 !!! version "Rocky 9 vs 10"
     Rocky 9 already defaults to cgroup v2, but you could switch back to the
-    old v1 layout with a kernel argument. Rocky 10 (like RHEL 10) removes
-    cgroup v1 support from systemd entirely. Old tools or images that expect
+    old v1 layout with a kernel argument. Rocky 10 (like RHEL 10) no longer
+    supports cgroup v1 at all. Old tools or images that expect
     `/sys/fs/cgroup/memory/` directories will not work.
 
 ### systemd owns the tree
@@ -375,31 +375,33 @@ $ cat /proc/self/cgroup
 
 ### Looking at the tree: systemd-cgls and systemd-cgtop
 
-`systemd-cgls` prints the tree with the processes in each cgroup:
+`systemd-cgls` prints the tree with the processes in each cgroup. Your shell
+sits in a `session-N.scope`, services in `system.slice`.
 
-```console
-$ systemd-cgls --no-pager
-Control group /:
--.slice
-├─user.slice
-│ └─user-1000.slice
-│   ├─user@1000.service …
-│   │ └─init.scope
-│   │   ├─1502 /usr/lib/systemd/systemd --user
-│   │   └─1505 (sd-pam)
-│   └─session-3.scope
-│     ├─1498 sshd-session: alice [priv]
-│     ├─1510 -bash
-│     └─1688 systemd-cgls --no-pager
-├─init.scope
-│ └─1 /usr/lib/systemd/systemd --switched-root --system --deserialize=46
-└─system.slice
-  ├─sshd.service
-  │ └─1031 "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"
-  ├─chronyd.service
-  │ └─812 /usr/sbin/chronyd -F 2
-…
-```
+??? example "Example: systemd-cgls output"
+    ```console
+    $ systemd-cgls --no-pager
+    Control group /:
+    -.slice
+    ├─user.slice
+    │ └─user-1000.slice
+    │   ├─user@1000.service …
+    │   │ └─init.scope
+    │   │   ├─1502 /usr/lib/systemd/systemd --user
+    │   │   └─1505 (sd-pam)
+    │   └─session-3.scope
+    │     ├─1498 sshd-session: alice [priv]
+    │     ├─1510 -bash
+    │     └─1688 systemd-cgls --no-pager
+    ├─init.scope
+    │ └─1 /usr/lib/systemd/systemd --switched-root --system --deserialize=46
+    └─system.slice
+      ├─sshd.service
+      │ └─1031 "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"
+      ├─chronyd.service
+      │ └─812 /usr/sbin/chronyd -F 2
+    …
+    ```
 
 `systemd-cgtop` is `top` for cgroups. It shows which group is using CPU,
 memory and I/O right now, which is often the fastest answer to "which service
@@ -480,6 +482,35 @@ applies it immediately, no restart needed.
     services, setting `MemoryHigh=` a bit below `MemoryMax=` gives you a
     warning zone you can see in metrics before the kill happens.
 
+??? question "Under the hood: why memory.current looks scary (page cache counts)"
+    `memory.current` is not just your app's heap. The kernel charges **page
+    cache** (file data the group read or wrote) to the cgroup that first
+    touched it. A container that streams a 10 GB log file can sit right at
+    its limit while its program uses 50 MB. Split the number with
+    `memory.stat`:
+
+    ```console
+    $ grep -E '^(anon|file) ' /sys/fs/cgroup/system.slice/backup.service/memory.stat
+    anon 52428800
+    file 1021345792
+    ```
+
+    `file` pages are mostly cache the kernel can drop cheaply when the group
+    reaches its limit, so they rarely cause an OOM kill. `anon` (heap and
+    stack) is what really counts. Alert on `anon` and on the `oom_kill`
+    counter in `memory.events`, not on raw `memory.current`.
+
+??? question "Under the hood: CPUQuota throttles in 100 ms slices"
+    `cpu.max` is enforced per **period** (100 ms by default). A service with
+    `CPUQuota=100%` gets 100 ms of CPU time per 100 ms window, shared by all
+    its threads. An app with 8 busy threads burns that budget in about
+    12 ms, then *every* thread is frozen for the remaining 88 ms. Average CPU
+    looks modest, but request latency gets 88 ms spikes. This is the classic
+    "the container uses 60% of its CPU limit but p99 latency is terrible"
+    mystery. Prove it with `cpu.stat`: if `nr_throttled` grows almost as fast
+    as `nr_periods`, raise the quota, or use `CPUWeight=` instead (weights
+    only matter under contention and never freeze anyone).
+
 <div class="quiz" data-answer="2" markdown>
 
 A service has `CPUQuota=50%`. On a 4-CPU machine, `top` shows it at exactly
@@ -535,8 +566,12 @@ Install it (it is in AppStream; many Rocky images have it already):
 ```console
 $ sudo dnf install -y podman
 $ podman --version
-podman version 5.4.0
+podman version 5.6.0
 ```
+
+The exact 5.x version depends on your Rocky 10 point release (10.0 shipped
+5.4, later point releases bring newer 5.x versions). Everything in this
+module works on any Podman 5.
 
 ### Rootless containers, user namespaces and subuid
 
@@ -602,6 +637,17 @@ bridge with nftables rules instead.
     `podman run --init`, which injects a tiny init (`catatonit`) as PID 1 that
     forwards signals and reaps zombies.
 
+??? question "Under the hood: the pause process that owns your containers"
+    Run `ps -u $USER -o pid,cmd | grep catatonit` and you will find a
+    `catatonit -P` process you never started. Rootless Podman creates *one*
+    user namespace per user (not per container) and parks this tiny **pause
+    process** in it to keep it alive between `podman` commands. Every rootless
+    container and every `podman unshare` joins that namespace. Two practical
+    consequences: after you change `/etc/subuid`, the old mapping lives on in
+    the pause process until `podman system migrate` restarts it, and `lsns`
+    shows the pause process (not your container) as the owner of the user
+    namespace.
+
 ??? question "How does rootless networking work without root?"
     A rootless user cannot create a veth pair on the host or add nftables
     rules. So Podman creates the container's network namespace, and
@@ -627,7 +673,8 @@ CONTAINER ID  IMAGE                           COMMAND               CREATED     
 $ curl -sI localhost:8080 | head -1
 HTTP/1.1 200 OK
 $ podman logs --tail 2 web
-10.0.2.100 - - [15/Oct/2026:09:41:02 +0000] "HEAD / HTTP/1.1" 200 0 "-" "curl/8.12.1" "-"
+2026/10/15 09:40:55 [notice] 1#1: start worker process 29
+2026/10/15 09:40:55 [notice] 1#1: start worker process 30
 $ podman exec -it web bash
 root@3f2a8c1d77e1:/# hostname
 3f2a8c1d77e1
@@ -690,7 +737,7 @@ CONTAINER ID  IMAGE                           COMMAND               CREATED     
 ```text
         NS TYPE   NPROCS   PID USER  COMMAND
 4026531834 time      190     1 root  /usr/lib/systemd/systemd --switched-root --system --deserialize=46
-4026532290 user        3  4120 alice nginx: master process nginx -g daemon off;
+4026532290 user        5  2011 alice catatonit -P
 4026532291 mnt         2  4120 alice nginx: master process nginx -g daemon off;
 4026532292 uts         2  4120 alice nginx: master process nginx -g daemon off;
 4026532293 ipc         2  4120 alice nginx: master process nginx -g daemon off;
@@ -858,7 +905,8 @@ $ capsh --decode=00000000800405fb
 0x00000000800405fb=cap_chown,cap_dac_override,cap_fowner,cap_fsetid,cap_kill,cap_setgid,cap_setuid,cap_setpcap,cap_net_bind_service,cap_sys_chroot,cap_setfcap
 ```
 
-Add one with `--cap-add=NET_ADMIN`; drop all with `--cap-drop=all`. Avoid
+(Run `capsh` on the host; it comes from the `libcap` package.) Add one with
+`--cap-add=NET_ADMIN`; drop all with `--cap-drop=all`. Avoid
 `--privileged`, which turns all three layers off.
 
 ### Pods: containers that share a network
@@ -925,7 +973,8 @@ WantedBy=multi-user.target  # (5)!
 
 1. The image to run. Pulled automatically if missing.
 2. Same syntax as `podman run -v`, including `:Z`.
-3. Lets `podman auto-update` pull newer images and restart the service.
+3. Lets `podman auto-update` pull newer images and restart the service. Nothing
+   runs it on a schedule until you enable `podman-auto-update.timer`.
 4. Ordinary systemd properties work: this sets `memory.max` on the service.
 5. Quadlet units cannot be `systemctl enable`d; this section is applied by the
    generator, so the service starts at boot.
@@ -952,7 +1001,7 @@ $ /usr/libexec/podman/quadlet -dryrun
 quadlet-generator[5301]: Loading source unit file /etc/containers/systemd/web.container
 ---web.service---
 …
-ExecStart=/usr/bin/podman run --name web --cidfile=%t/%N.cid --replace --rm --cgroups=split --sdnotify=conmon -d -v /srv/web:/usr/share/nginx/html:Z --publish 8080:80 docker.io/library/nginx:latest
+ExecStart=/usr/bin/podman run --name web --cidfile=%t/%N.cid --replace --rm --cgroups=split --sdnotify=conmon -d -v /srv/web:/usr/share/nginx/html:Z --label io.containers.autoupdate=registry --publish 8080:80 docker.io/library/nginx:latest
 …
 ```
 
@@ -1027,6 +1076,7 @@ command. It can build images step by step from a script, without a
 Containerfile:
 
 ```console
+$ sudo dnf install -y buildah skopeo jq
 $ ctr=$(buildah from docker.io/rockylinux/rockylinux:10)
 $ buildah run "$ctr" -- dnf install -y nmap-ncat
 $ buildah config --cmd '["ncat","-lk","-p","9000","-e","/bin/cat"]' "$ctr"
@@ -1155,6 +1205,8 @@ to stay in the foreground.
     **Goal:** Show that a Podman container is made of the same building blocks
     as Lab 1, plus the security layer.
 
+    **You'll need:** Podman, run as your normal user (no sudo).
+
     1. Start a rootless container:
 
         ```bash
@@ -1205,6 +1257,8 @@ to stay in the foreground.
 
     **Goal:** Watch the kernel enforce `MemoryMax=` and see the evidence.
 
+    **You'll need:** a Rocky 10 VM and sudo (`python3` is installed by default).
+
     1. Start a process that tries to use 400 MB under a 100 MB limit:
 
         ```bash
@@ -1216,7 +1270,7 @@ to stay in the foreground.
 
         ```bash
         systemctl status memhog --no-pager
-        journalctl -k -n 5 --no-pager | grep -i oom
+        journalctl -k --since "2 min ago" --no-pager | grep -iE 'oom|memory cgroup'
         ```
 
     3. Now run a CPU burner capped at 25% and look at the throttling counters:
@@ -1237,6 +1291,8 @@ to stay in the foreground.
 !!! lab "Lab 4: Run a rootless web container as a Quadlet service"
 
     **Goal:** Turn a container into a user service that starts at boot.
+
+    **You'll need:** Podman and sudo (only for `loginctl`).
 
     1. Allow your user services to run without a login, and create content:
 
@@ -1297,7 +1353,7 @@ to stay in the foreground.
 | Rootless container: `cannot find mappings for user` | No entry in `/etc/subuid` / `/etc/subgid` | `usermod --add-subuids … --add-subgids …`, then `podman system migrate` |
 | Container exits immediately with code 0 | PID 1 daemonized and exited | Run the app in the foreground (`-DFOREGROUND`, `daemon off;`) |
 | Rootless containers die when you log out | No lingering for the user | `loginctl enable-linger USER` |
-| `Error: rootlessport cannot expose privileged port 80` | Unprivileged users cannot bind below 1024 | Publish a high port (`-p 8080:80`) or use a rootful container |
+| Rootless `-p 80:80` fails: `pasta failed … Failed to bind port 80 (Permission denied)` | Unprivileged users cannot bind below 1024 (`net.ipv4.ip_unprivileged_port_start`) | Publish a high port (`-p 8080:80`) or use a rootful container |
 | Quadlet unit "not found" | Syntax error; generator skipped the file | `/usr/libexec/podman/quadlet -dryrun` (add `-user` for rootless) |
 | Files in a volume owned by odd UIDs like `524388` | User namespace mapping | Use `podman unshare chown` or `--userns=keep-id` |
 | `systemctl enable` fails on a Quadlet unit | Generated units cannot be enabled | Use the `[Install]` section in the `.container` file |

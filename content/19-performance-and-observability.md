@@ -430,10 +430,10 @@ Diagnosis: several `report-gen` workers saturate both CPUs, and the high
 `%wait` shows each spends most of its time waiting for a CPU.
 
 !!! version "Rocky 9 vs 10"
-    The checklist is the same on both. Rocky 10 ships a newer `procps-ng`, so
-    `vmstat` has an extra `gu` (guest) CPU column, and a newer sysstat whose
-    `iostat -x` prints separate discard and flush columns. Read columns by name,
-    not position, in scripts.
+    The checklist is the same on both. Rocky 10 ships `procps-ng` 4, whose
+    `vmstat` adds a `gu` column at the end (time spent running KVM guests,
+    which is no longer folded into `us`). Rocky 9's `vmstat` stops at `st`.
+    Read columns by name, not position, in scripts.
 
 ## Reading each resource
 
@@ -610,6 +610,15 @@ $ pmrep -t 2 -s 3 kernel.all.load mem.util.available
 `pminfo | wc -l` lists how many metrics exist (thousands). PCP's strength is
 that the same metric names work live and in archives, across many hosts.
 
+??? question "Under the hood: sar files are not portable, PCP archives are"
+    `/var/log/sa/saDD` files are a binary format tied to the sysstat version
+    that wrote them. Copy one from a Rocky 9 box to a Rocky 10 laptop and
+    `sar -f` may refuse to read it, complaining about the file format.
+    Read it on the box that wrote it, or convert it there with `sadf -d`
+    (semicolon-separated text) before you ship it off. PCP archives under
+    `/var/log/pcp/pmlogger/` carry their own metadata, which is one reason
+    teams that collect history from many servers prefer PCP.
+
 ## Cockpit: metrics at a glance
 
 **Cockpit** is a web console for Rocky that shows CPU, memory, disk and
@@ -655,10 +664,27 @@ $ tuned-adm verify
 Verification succeeded, current system settings match the preset profile.
 ```
 
-Profiles live in `/usr/lib/tuned/` (shipped) and `/etc/tuned/` (yours). A
-custom profile can `include=throughput-performance` and override a few
-settings. Always measure before and after: a profile is a good default, not a
-guarantee.
+On Rocky 10, shipped profiles live in `/usr/lib/tuned/profiles/<name>/` and
+your own go in `/etc/tuned/profiles/<name>/`. Each is a directory holding a
+`tuned.conf`. A custom profile can `include=throughput-performance` and
+override a few settings. Always measure before and after: a profile is a good
+default, not a guarantee.
+
+!!! version "Rocky 9 vs 10"
+    Rocky 9's tuned keeps profiles one level up: `/usr/lib/tuned/<name>/` and
+    `/etc/tuned/<name>/`. Rocky 10's tuned added the `profiles/` subdirectory.
+    Custom profiles copied from a Rocky 9 box into `/etc/tuned/` are not
+    found on Rocky 10 until you move them into `/etc/tuned/profiles/`.
+
+??? question "Under the hood: what tuned actually changes"
+    A profile is just a list of plugin settings. `[sysctl]` writes kernel
+    tunables, `[cpu]` sets the CPU frequency governor and energy policy,
+    `[disk]` sets readahead and the I/O scheduler, `[vm]` controls
+    transparent huge pages. tuned also *undoes* them when you switch
+    profiles, which is why hand-written `sysctl.d` files and tuned can fight:
+    whichever applies last wins, and `tuned-adm verify` will then report a
+    mismatch. Put workload sysctls in a custom tuned profile, or make sure the
+    profile does not touch the same keys.
 
 ## perf: where is the CPU time going?
 
@@ -670,11 +696,11 @@ records what each CPU was executing.
 $ sudo dnf install -y perf
 $ sudo perf top
 Samples: 42K of event 'cpu-clock:ppp', 4000 Hz, Event count (approx.): 9918234511
-Overhead  Shared Object        Symbol
-  38.12%  libz.so.1.3.1        [.] deflate_slow
-  21.40%  report-gen           [.] build_row
-   9.85%  [kernel]             [k] clear_page_erms
-   4.02%  libc.so.6            [.] __memmove_avx_unaligned_erms
+Overhead  Shared Object          Symbol
+  38.12%  libz.so.1.3.1.zlib-ng  [.] deflate_slow
+  21.40%  report-gen             [.] build_row
+   9.85%  [kernel]               [k] clear_page_erms
+   4.02%  libc.so.6              [.] __memmove_avx_unaligned_erms
 …
 ```
 
@@ -693,6 +719,16 @@ $ sudo perf stat -p 3120 -- sleep 5
 counts events such as instructions and context switches. Run `perf` as root, and
 note that symbols are only readable if the program was not stripped; install
 debuginfo packages for more detail.
+
+??? question "Under the hood: why perf says cpu-clock in a VM"
+    On bare metal, `perf top` samples the hardware event `cycles` using the
+    CPU's performance monitoring unit (PMU). Most hypervisors do not expose
+    the PMU to guests, so perf falls back to the software timer event
+    `cpu-clock` (as in the output above). Sampling still works, but
+    `perf stat` shows `<not supported>` for `cycles`, `instructions` and
+    cache misses, so you cannot measure instructions per cycle inside such a
+    VM. If `perf stat -e cycles true` says not supported, that is the reason,
+    not a broken install.
 
 ## eBPF tools: precise answers, low overhead
 
@@ -715,16 +751,21 @@ You rarely write eBPF yourself. You use two toolkits:
 
 ```console
 $ export PATH=$PATH:/usr/share/bcc/tools
-$ ls /usr/share/bcc/tools | head -8
+$ ls /usr/share/bcc/tools | head -4
 argdist
 bashreadline
 bindsnoop
 biolatency
-biosnoop
-biotop
-bitesize
-btrfsdist
 ```
+
+??? question "Under the hood: why no kernel headers are needed"
+    Older eBPF tooling compiled C code against `kernel-devel` headers at run
+    time. Rocky's kernel is built with **BTF** (BPF Type Format), a compact
+    description of every kernel data structure, exposed at
+    `/sys/kernel/btf/vmlinux`. bpftrace and modern bcc tools read type
+    information from there, so they work on a fresh install without matching
+    header packages. If that file is missing (a custom kernel), expect
+    confusing compile errors from bcc.
 
 ### The five tools to learn first
 
@@ -934,8 +975,16 @@ copy to the database volume this morning. "Nothing changed" changed.
 Short term: lower the copy's I/O priority, or pause it.
 
 ```console
+$ cat /sys/block/vdb/queue/scheduler
+none [mq-deadline] kyber bfq
 $ sudo ionice -c3 -p 14402
 ```
+
+`ionice` only works if the disk's **I/O scheduler** honours priorities:
+`bfq` and `mq-deadline` do, `none` (the default for NVMe and many virtio
+disks) ignores them silently. If the scheduler is `none`, pause the job
+instead (`sudo kill -STOP 14402`, later `-CONT`) or move it into a cgroup
+with an I/O limit.
 
 Long term: run it as a service with an I/O limit (`IOWriteBandwidthMax=`), at
 night, to a different volume. Then measure again: `iostat` shows `vdb`
@@ -1023,9 +1072,11 @@ the ticket.
        In terminal B, run
        `dd if=/dev/zero of=/var/tmp/bl bs=4k count=20000 oflag=direct`.
 
-    **Check your work:** `opensnoop` shows three opens by `cat`: one with
-    `ERR 0`, one with `ERR 2` (no such file) and one with `ERR 13` (permission
-    denied). `biolatency` prints a histogram with a clear peak.
+    **Check your work:** among `cat`'s opens (it also opens its libraries
+    and locale files first) you see `/etc/hostname` with `ERR 0`,
+    `/etc/nosuchfile` with `ERR 2` (no such file) and `/etc/shadow` with
+    `ERR 13` (permission denied). `biolatency` prints a histogram with a
+    clear peak.
 
     **Clean up:** `rm -f /var/tmp/bl`
 
@@ -1045,14 +1096,15 @@ the ticket.
         ```bash
         sudo tuned-adm profile throughput-performance
         sysctl vm.dirty_ratio vm.swappiness
-        grep -A3 '^\[sysctl\]' /usr/lib/tuned/profiles/throughput-performance/tuned.conf 2>/dev/null \
-          || grep -A3 '^\[sysctl\]' /usr/lib/tuned/throughput-performance/tuned.conf
+        grep -E '^vm\.(dirty_ratio|swappiness)' /usr/lib/tuned/profiles/throughput-performance/tuned.conf
         ```
 
     3. Try `tuned-adm verify` to confirm the system matches the profile.
 
     **Check your work:** `vm.dirty_ratio` and `vm.swappiness` match the
-    `[sysctl]` section of the profile file.
+    values in the profile file (on a VM that started on `virtual-guest`, both
+    values change). On Rocky 9 the file is
+    `/usr/lib/tuned/throughput-performance/tuned.conf`.
 
     **Clean up:** `sudo tuned-adm profile "$(tuned-adm recommend)"`
 
