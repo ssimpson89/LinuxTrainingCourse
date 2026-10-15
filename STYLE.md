@@ -165,6 +165,9 @@ systemctl enable --now httpd  # (2)!
 2. Start it now and at every boot.
 ````
 
+Annotations don't render inside `console` blocks. Annotate a `bash` or
+`yaml` block instead.
+
 Keyboard keys: `++ctrl+c++`.
 
 ### Admonitions
