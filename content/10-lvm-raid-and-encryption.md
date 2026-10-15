@@ -567,13 +567,13 @@ Keyslots:
 `/etc/crypttab` is to encrypted devices what `/etc/fstab` is to filesystems. At boot, `systemd-cryptsetup-generator` turns each line into a unit that unlocks the device; then fstab mounts the result.
 
 ```text title="/etc/crypttab"
-secret   UUID=5a1f3c2e-8b4d-4e61-9a0f-2d7c6b1e4f90   none                                luks
-backup   UUID=c0e8d1a2-3f47-4b5c-8e9d-1a2b3c4d5e6f   /etc/cryptsetup-keys.d/backup.key   luks,nofail
+secret  UUID=5a1f3c2e-8b4d-4e61-9a0f-2d7c6b1e4f90  none                   luks
+backup  UUID=c0e8d1a2-3f47-4b5c-8e9d-1a2b3c4d5e6f  /root/keys/backup.key  luks,nofail
 ```
 
 The four fields are: the **name** to create under `/dev/mapper/`, the **device** (use the LUKS UUID from `blkid`), the **key** (`none` means ask for a passphrase at boot), and **options**. Then reference `/dev/mapper/secret` in `/etc/fstab` as usual.
 
-A key file stored on the same machine only makes sense for secondary volumes when the root filesystem is itself encrypted; otherwise anyone with the disk has the key. For unattended unlocking of the root volume, Rocky supports **Clevis** (network-bound unlocking with a Tang server) and TPM2 binding; see the Go deeper links.
+A key file stored on the same machine only makes sense for secondary volumes when the root filesystem is itself encrypted; otherwise anyone with the disk has the key. For unattended unlocking of the root volume, Rocky supports **Clevis** (network-bound unlocking with a Tang server) and TPM2 binding (`systemd-cryptenroll`), both beyond this module.
 
 <div class="quiz" data-answer="1" markdown>
 

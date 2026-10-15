@@ -98,10 +98,7 @@ The list of shared directories, called **exports**, lives in `/etc/exports` or i
 /srv/nfs/public     *(ro,all_squash)
 ```
 
-```text
-/srv/nfs/projects   192.168.122.0/24(rw,sync)
-# directory         client(options) — NO space between client and "("
-```
+Read the first line as: share `/srv/nfs/projects` with the network `192.168.122.0/24`, read-write and synchronous, and with `10.0.5.17`, read-only. The options in parentheses belong to the client written directly in front of them, with **no space** in between.
 
 !!! danger "The space that changes everything"
     `192.168.122.0/24(rw)` means "that network gets read-write". `192.168.122.0/24 (rw)`, with a space, means "that network gets the *defaults* (read-only), and **everyone else in the world** gets read-write". `exportfs -v` shows what was really applied; check it every time.
@@ -119,6 +116,19 @@ The options you'll actually use:
 | `all_squash` | Treat *every* client user as anonymous. Good for public read-only shares. |
 | `anonuid=N,anongid=N` | Which UID/GID the anonymous user maps to (default 65534, `nobody`) |
 | `sec=krb5p` | Require Kerberos with encryption |
+
+<div class="quiz" data-answer="3" markdown>
+
+`/etc/exports` contains `/srv/data 10.0.0.0/24 (rw)`. What does `exportfs -v` show?
+
+- `10.0.0.0/24` gets read-write, nobody else can mount
+- The line is rejected as a syntax error
+- `10.0.0.0/24` gets the defaults (read-only), and every other host (`*`) gets read-write
+- Every host gets read-only
+
+Right. The space splits it into two clients: `10.0.0.0/24` with no options (so `ro`) and `(rw)` with no host, which means "everyone". Always check `exportfs -v`.
+
+</div>
 
 ### Root squash
 
@@ -419,6 +429,19 @@ Related SELinux booleans:
 
 !!! warning "Don't label system directories samba_share_t"
     Relabelling `/home`, `/etc`, or `/var` as `samba_share_t` breaks other confined services that expect their own labels. Share dedicated directories like `/srv/samba/…`, or use the booleans.
+
+<div class="quiz" data-answer="2" markdown>
+
+You created `/data/share`, set `chmod 2770` and the right group, added the share to `smb.conf`, and `testparm` is happy. Users connect but get "access denied", and `ausearch -m avc` shows `smbd_t` denied on `default_t`. What's the proper fix?
+
+- `setenforce 0`
+- `semanage fcontext -a -t samba_share_t "/data/share(/.*)?"` then `restorecon -Rv /data/share`
+- `chmod 777 /data/share`
+- `setsebool -P samba_enable_home_dirs on`
+
+Correct. The directory has the wrong SELinux type. A permanent rule plus `restorecon` labels it `samba_share_t`, and SELinux stays on. `samba_enable_home_dirs` is only for home directories.
+
+</div>
 
 ### Test, inspect, connect
 
