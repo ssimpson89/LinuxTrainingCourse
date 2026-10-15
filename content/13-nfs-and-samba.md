@@ -68,11 +68,16 @@ sequenceDiagram
 
 The consequence: **UIDs must match** across machines. If alice is UID 1001 on the client but UID 1001 is bob on the server, alice's files show up as bob's. In real environments a central directory (FreeIPA, Active Directory, LDAP via SSSD) keeps UIDs consistent. For stronger security, NFS supports Kerberos (`sec=krb5`, `krb5i`, `krb5p`), where users really authenticate; that needs a Kerberos realm and is beyond this module.
 
+??? question "Under the hood: why files sometimes show up as nobody"
+    On the wire, NFSv4 was designed to send owners as *names* (`alice@lab.example.com`), translated by the ID-mapping service using the `Domain` in `/etc/idmapd.conf`. With `sec=sys`, Linux clients and servers skip that and send plain numbers instead (the `nfs4_disable_idmapping` module parameter, on by default), which is why matching UIDs is what matters in practice.
+
+    With Kerberos, names are used. If client and server disagree on the idmapd `Domain` (it defaults to the DNS domain, so two hosts in different subdomains disagree), every file appears owned by `nobody` even though access still works. Check `/etc/idmapd.conf` on both sides and clear the client's cache with `sudo nfsidmap -c`.
+
 ### NFS versions on Rocky
 
 **NFSv4** (with minor versions 4.1 and 4.2) is the modern protocol. It uses one TCP port, 2049, and has built-in locking. The older **NFSv3** needs several helper services (`rpcbind` on port 111, `rpc.mountd`, `rpc.statd`) on extra ports, which makes firewalls harder.
 
-On Rocky 10, the NFS server enables both NFSv3 and NFSv4 out of the box, and clients negotiate the highest version both sides support (normally 4.2). Unless you have old clients that need v3, turn v3 off: fewer services, one port.
+On Rocky 10 (as on 9), the NFS server enables both NFSv3 and NFSv4 out of the box: the `vers3=` line in the stock `/etc/nfs.conf` is commented out, so the kernel default (on) applies. Clients negotiate the highest version both sides support (normally 4.2). Unless you have old clients that need v3, turn v3 off: fewer services, one port.
 
 ```ini title="/etc/nfs.conf (excerpt)"
 [nfsd]
@@ -160,6 +165,21 @@ $ sudo exportfs -v
 
 `exportfs -r` re-reads the exports files and syncs the kernel's export table; `-a` all, `-v` verbose. You don't need to restart `nfs-server` after editing exports. Notice the defaults that appeared: `secure` (clients must use a source port below 1024), `root_squash`, `no_subtree_check`.
 
+??? question "Under the hood: who is connected right now?"
+    NFSv4 is stateful: the server tracks every client and every file it has open or locked. Since kernel 5.3 that state is visible in `/proc/fs/nfsd/clients/`, one numbered directory per client:
+
+    ```console
+    $ sudo cat /proc/fs/nfsd/clients/*/info
+    clientid: 0x5b1e0c2a6704d8a1
+    address: "192.168.122.20:803"
+    status: confirmed
+    name: "Linux NFSv4.2 client01.lab.example.com"
+    minor version: 2
+    …
+    ```
+
+    The `nfsdclnts` command (in `nfs-utils`) formats the same data, including which files each client holds open. This is what you check before rebooting a server ("who will hang?") or when a client swears it isn't connected. `showmount -a` can't help here: it only knows about NFSv3 mounts made through `rpc.mountd`.
+
 ### Firewall and SELinux
 
 ```console
@@ -207,8 +227,8 @@ systemd recognises `nfs` as a network filesystem and waits for the network autom
 A permanent mount of a server that's down can hang logins and scripts. **autofs** mounts a share only when someone accesses its path, and unmounts it after a period of inactivity. It's also handy for hundreds of home directories, where you don't want hundreds of permanent mounts.
 
 ```mermaid
-flowchart LR
-    A["User runs: cd /net/projects"] --> B{"Already mounted?"}
+flowchart TB
+    A["User runs: cd /shares/projects"] --> B{"Already mounted?"}
     B -- yes --> E["Use it"]
     B -- no --> C["automount daemon looks up 'projects' in the map"]
     C --> D["mount server1:/srv/nfs/projects"]
@@ -218,11 +238,11 @@ flowchart LR
 
 autofs uses two kinds of files. The **master map** says which directories autofs controls and which map file describes each. A **map** lists the keys (subdirectory names) and what to mount for each.
 
-```text title="/etc/auto.master.d/net.autofs"
-/net   /etc/auto.net-shares   --timeout=300
+```text title="/etc/auto.master.d/shares.autofs"
+/shares   /etc/auto.shares   --timeout=300
 ```
 
-```text title="/etc/auto.net-shares"
+```text title="/etc/auto.shares"
 projects   -rw,vers=4.2   server1:/srv/nfs/projects
 public     -ro            server1:/srv/nfs/public
 ```
@@ -230,20 +250,23 @@ public     -ro            server1:/srv/nfs/public
 ```console
 $ sudo dnf install -y autofs
 $ sudo systemctl enable --now autofs
-$ ls /net
-$ ls /net/projects
+$ ls /shares
+$ ls /shares/projects
 report.txt  roadmap.md
-$ ls /net
+$ ls /shares
 projects
 ```
 
-`/net` looks empty at first: the subdirectory appears only when you access it by name. For home directories, a **wildcard map** does the whole set in one line: `*  -rw  server1:/home/&` mounts `server1:/home/alice` when someone accesses `/home/alice`.
+`/shares` looks empty at first: the subdirectory appears only when you access it by name. For home directories, a **wildcard map** does the whole set in one line: `*  -rw  server1:/home/&` mounts `server1:/home/alice` when someone accesses `/home/alice`.
+
+!!! pitfall "Don't use /net for your own map"
+    The stock `/etc/auto.master` on Rocky already claims `/net` with the special `-hosts` map: `ls /net/server1` lists that server's exports and mounts them on demand. A second `/net` entry in `auto.master.d` conflicts with it. Pick another top directory (`/shares`, `/nfs`), or comment out the `/net -hosts` line if you don't want it. Note that `-hosts` asks the server's `rpc.mountd` for the export list over NFSv3 RPC, so it returns nothing from a v4-only server.
 
 !!! tip "The systemd alternative"
     For a single share, `x-systemd.automount` in fstab gives similar on-demand behaviour without autofs: `server1:/srv/nfs/projects /mnt/projects nfs defaults,x-systemd.automount,x-systemd.idle-timeout=300 0 0`.
 
 !!! version "Rocky 9 vs 10"
-    The NFS and autofs workflow is the same on Rocky 9 and 10. On Rocky 9 and earlier you'll still find `/etc/sysconfig/nfs` mentioned in old guides; all server settings now live in `/etc/nfs.conf`.
+    The NFS and autofs workflow is the same on Rocky 9 and 10. Old guides still mention `/etc/sysconfig/nfs`; it was retired back in Rocky/RHEL 8, and all server and client daemon settings live in `/etc/nfs.conf` (plus drop-ins in `/etc/nfs.conf.d/`) on both versions.
 
 <div class="quiz" data-answer="2" markdown>
 
@@ -304,7 +327,7 @@ The pieces:
 7. Permissions for new files are ANDed with this mask. Here: group read-write, nothing for others.
 8. New files get group `finance`, whoever creates them, so the team can always share them.
 
-The default `smb.conf` on Rocky also contains `[homes]` (each user automatically gets a share of their home directory) and printer sections.
+The default `smb.conf` on Rocky also contains `[homes]` (each user automatically gets a share of their home directory), `[printers]`, and `[print$]` sections. Delete the ones you don't need: a file server that also advertises printer drivers is just more attack surface.
 
 ### Users: Linux account plus Samba password
 
@@ -325,7 +348,7 @@ carol:1003:
 
 The two passwords are independent: changing one with `passwd` doesn't change the other. `smbpasswd -x` deletes a Samba user; `-d` and `-e` disable and enable.
 
-!!! pitfall "\"I created the user but the login fails\""
+!!! pitfall "I created the user, but the login fails"
     The most common Samba ticket. Either `smbpasswd -a` was never run (check `pdbedit -L`), or the user isn't in the group listed in `valid users`. Remember that changing a Linux password doesn't set the Samba one.
 
 ### Permissions: share rules AND Linux permissions AND SELinux
@@ -391,7 +414,7 @@ system_u:object_r:samba_share_t:s0 /srv/samba/finance
 </div>
 
 ```mermaid
-flowchart LR
+flowchart TB
     R["carol writes budget.xlsx"] --> A{"Share allows<br/>carol to write?"}
     A -- no --> X["Access denied"]
     A -- yes --> B{"Linux perms allow<br/>UID of carol?"}
@@ -400,6 +423,22 @@ flowchart LR
     C -- no --> X
     C -- yes --> OK["Write succeeds"]
 ```
+
+??? question "Under the hood: watch smbd become the user"
+    Each client connection gets its own `smbd` child process, forked from the main daemon. After login, that child switches its *effective* UID to the user's Linux UID before touching files, so the kernel's normal permission and SELinux checks apply exactly as if carol ran the command herself:
+
+    Take the PID from `smbstatus` (4211 in the example below) and ask the kernel who that process is:
+
+    ```console
+    $ ps -o pid,ruser,euser,label -p 4211
+        PID RUSER    EUSER    LABEL
+       4211 root     carol    system_u:system_r:smbd_t:s0
+    $ grep -E '^(Uid|Groups)' /proc/4211/status
+    Uid:	0	1003	0	1003
+    Groups:	1003 2001
+    ```
+
+    The real UID stays root (so the process can switch back between requests) while the effective and filesystem UIDs are carol's, and the supplementary groups are hers too. That's the whole reason Linux permissions are a hard ceiling for Samba, and why one user's crash or hang doesn't affect other users. If a permission problem makes no sense, this is the ground truth: the groups listed here are the ones the kernel checks.
 
 ### Setting up the share, step by step
 
@@ -478,9 +517,10 @@ Password for [SAMBA\carol]:
 
 	Sharename       Type      Comment
 	---------       ----      -------
+	print$          Disk      Printer Drivers
 	finance         Disk      Finance team files
 	IPC$            IPC       IPC Service (Samba 4.22.4)
-	carol           Disk      Home directory of carol
+SMB1 disabled -- no workgroup available
 $ smbclient //localhost/finance -U carol -c 'put /etc/hosts hosts.txt; ls'
 putting file /etc/hosts as \hosts.txt (…)
   .                                   D        0  Thu Oct 15 10:44:02 2026
@@ -955,7 +995,7 @@ These labs use one Rocky 10 VM as both server and client, connecting to `localho
 | Edits to smb.conf seem ignored | Typo in a parameter name, silently skipped | `testparm -s` |
 | New files not editable by teammates | `create mask` default `0744` strips group write | `create mask = 0660`, setgid directory, `force group` |
 
-!!! pitfall "Turning SELinux off to \"fix\" Samba"
+!!! pitfall "Turning SELinux off to fix Samba"
     `setenforce 0` makes the symptom disappear and hides the real problem: a missing `samba_share_t` label. Label the directory with `semanage fcontext` + `restorecon` instead. It's one command and keeps the protection.
 
 ## Cheat sheet

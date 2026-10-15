@@ -97,17 +97,20 @@ $ sudo blkid /dev/vda2
 /dev/vda2: UUID="6c3e1a5d-6c1b-4f0e-9d0a-5b2f0e8c1a77" TYPE="xfs" PARTUUID="a1d4…"
 ```
 
-The stable aliases live under `/dev/disk/`. Each is a symlink to the current kernel name:
+The stable aliases live under `/dev/disk/` (`by-uuid/`, `by-id/`, `by-label/`, `by-path/`, `by-partuuid/`). Each is a symlink to the current kernel name, created by **udev**, the service that reacts to hardware events and builds `/dev`.
 
-```console
-$ ls -l /dev/disk/by-uuid/
-lrwxrwxrwx. 1 root root 10 Oct 15 09:02 0f6a4b0e-2d1c-4a8e-b3a2-91e5d3c7a6f1 -> ../../dm-0
-lrwxrwxrwx. 1 root root 10 Oct 15 09:02 4A1C-7F2E -> ../../vda1
-lrwxrwxrwx. 1 root root 10 Oct 15 09:02 6c3e1a5d-6c1b-4f0e-9d0a-5b2f0e8c1a77 -> ../../vda2
-…
-```
+??? question "Under the hood: the /dev/disk aliases, and which UUID is which"
+    ```console
+    $ ls -l /dev/disk/by-uuid/
+    lrwxrwxrwx. 1 root root 10 Oct 15 09:02 0f6a4b0e-2d1c-4a8e-b3a2-91e5d3c7a6f1 -> ../../dm-0
+    lrwxrwxrwx. 1 root root 10 Oct 15 09:02 4A1C-7F2E -> ../../vda1
+    lrwxrwxrwx. 1 root root 10 Oct 15 09:02 6c3e1a5d-6c1b-4f0e-9d0a-5b2f0e8c1a77 -> ../../vda2
+    …
+    ```
 
-Other folders there: `by-id/` (model and serial number), `by-path/` (physical port), `by-label/` (filesystem label), `by-partuuid/` (GPT partition ID). They are created by **udev**, the service that reacts to hardware events and builds `/dev`.
+    `by-id/` names disks by model and serial number (best for "which physical disk is this?"), `by-path/` by the port or slot it's plugged into, `by-label/` by filesystem label, and `by-partuuid/` by the GPT partition's own ID.
+
+    Two different UUIDs trip people up. The **filesystem UUID** (`UUID=` in `blkid`) lives inside the filesystem and changes when you run `mkfs` again. The **PARTUUID** lives in the GPT entry and survives a reformat, but not repartitioning. fstab normally uses the first. And because a filesystem UUID is copied along with the data, a `dd` clone or an LVM snapshot has the *same* UUID as the original, which is why XFS refuses to mount both at once (`nouuid`, Module 10) and why `xfs_admin -U generate` exists.
 
 <div class="quiz" data-answer="3" markdown>
 
@@ -131,14 +134,17 @@ A **partition table** is a small data structure at the start of the disk that li
 **GPT** (GUID Partition Table) is the modern format, part of the UEFI standard. It allows 128 partitions by default, handles enormous disks, gives every partition a unique ID, and keeps a **backup copy** of the table at the end of the disk so a damaged header can be repaired. Rocky 10 uses GPT for new installs.
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph GPT["A GPT disk, start to end"]
-    direction LR
+    direction TB
     P["Protective MBR<br/>(sector 0)"] --> H["GPT header +<br/>partition entries"] --> D1["Partition 1"] --> D2["Partition 2"] --> D3["…free space…"] --> B["Backup entries +<br/>backup header"]
     end
 ```
 
-The **protective MBR** is a fake MBR entry that covers the whole disk. Old tools that don't understand GPT see "one big partition of unknown type" and leave it alone instead of thinking the disk is empty.
+??? question "Under the hood: the protective MBR and the backup table"
+    The **protective MBR** is a fake MBR entry that covers the whole disk. Old tools that don't understand GPT see "one big partition of unknown type" and leave it alone instead of thinking the disk is empty.
+
+    The backup header at the *end* of the disk has a production consequence: when you grow a virtual disk in your hypervisor or cloud console, the backup header is now in the middle of the disk, not at the end. `parted` and `fdisk` notice and offer to fix it ("Fix/Ignore?"), and `sgdisk -e /dev/X` moves it explicitly. Until it is moved, you can't create a partition in the new space. The same backup copy is why `wipefs -a` is the honest way to erase a disk's signatures: zeroing the first few MiB leaves the backup GPT behind, and tools may "recover" a partition table you thought you'd destroyed.
 
 ### Tools for partitioning
 
@@ -361,7 +367,7 @@ Both are **journaling** filesystems. Before changing their metadata, they write 
     meta-data=/dev/vdb1              isize=512    agcount=4, agsize=655232 blks
              =                       sectsz=512   attr=2, projid32bit=1
              =                       crc=1        finobt=1, sparse=1, rmapbt=1
-             =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+             =                       reflink=1    bigtime=1 inobtcount=1 …
     data     =                       bsize=4096   blocks=2620928, imaxpct=25
     …
     $ sudo xfs_info /data             # inspect a mounted XFS
@@ -402,7 +408,14 @@ If a filesystem is damaged (after a hardware fault or a hard power cut that the 
 | Repair | `xfs_repair /dev/X` | `e2fsck -f /dev/X` (or `fsck.ext4`) |
 | At boot | No boot-time check; the journal replays on mount | `systemd-fsck` runs if the fstab pass field is non-zero |
 
-`fsck.xfs` exists but deliberately does nothing; XFS checks are always manual. If `xfs_repair` refuses because the log is dirty, first try mounting the filesystem once (which replays the log) and unmounting it. `xfs_repair -L` zeroes the log and can lose the most recent changes: it's the last resort.
+`fsck.xfs` exists but deliberately does nothing at a normal boot; XFS checks are manual.
+
+??? question "Under the hood: when xfs_repair refuses, and forcing a check at boot"
+    If `xfs_repair` refuses with "the filesystem has valuable metadata changes in a log", the journal is dirty. First try mounting the filesystem once (which replays the log) and unmounting it, then repair. `xfs_repair -L` zeroes the log and can lose the most recent changes: it's the last resort, not the first thing to type.
+
+    `fsck.xfs` is a tiny shell script. It only calls `xfs_repair` when a check is *forced*, for example by adding `fsck.mode=force` to the kernel command line for one boot. That's the trick for repairing the root filesystem, which you can't unmount while running from it. Read it yourself: `cat /usr/sbin/fsck.xfs`.
+
+    One more on-disk detail that confuses people: XFS inode numbers are huge (`16777347` above) because they encode *where* the inode lives (allocation group, block, offset). That's what the `inode64` mount option is about: it lets XFS put inodes anywhere on the disk instead of only in the first terabyte.
 
 <div class="quiz" data-answer="1" markdown>
 
@@ -509,24 +522,27 @@ flowchart LR
     U -. "device missing, no nofail" .-> E["emergency.target"]
 ```
 
-You can see the generated unit:
+??? question "Under the hood: the generated unit, and the nofail trap"
+    You can read the unit the generator wrote:
 
-```console
-$ systemctl cat data.mount
-# /run/systemd/generator/data.mount
-# Automatically generated by systemd-fstab-generator
+    ```console
+    $ systemctl cat data.mount
+    # /run/systemd/generator/data.mount
+    # Automatically generated by systemd-fstab-generator
 
-[Unit]
-Documentation=man:fstab(5) man:systemd-fstab-generator(8)
-SourcePath=/etc/fstab
-After=blockdev@dev-disk-by\x2duuid-3d2c9a10\x2d….target
+    [Unit]
+    Documentation=man:fstab(5) man:systemd-fstab-generator(8)
+    SourcePath=/etc/fstab
+    After=blockdev@dev-disk-by\x2duuid-3d2c9a10\x2d….target
 
-[Mount]
-What=/dev/disk/by-uuid/3d2c9a10-5be4-4b7e-9f22-6a1e0c4b7d55
-Where=/data
-Type=xfs
-Options=defaults,nofail,noatime
-```
+    [Mount]
+    What=/dev/disk/by-uuid/3d2c9a10-5be4-4b7e-9f22-6a1e0c4b7d55
+    Where=/data
+    Type=xfs
+    Options=defaults,nofail,noatime
+    ```
+
+    The links that hook it into boot live next to it: `ls /run/systemd/generator/local-fs.target.requires/` (normal lines) and `local-fs.target.wants/` (lines with `nofail`). That difference is the trap. A `nofail` mount is only *wanted*, so `local-fs.target` doesn't wait for it, and a service that starts early can write into the empty `/data` directory on the root filesystem. When the disk finally mounts on top, those files are hidden (one of the "df vs du" causes later in this module). Fix it on the service side: `RequiresMountsFor=/data` in the service's `[Unit]` section makes it wait for the mount and refuse to start without it.
 
 ### Writing a mount unit yourself
 
@@ -682,6 +698,17 @@ There's 15 GB pinned by PID 1873. Two fixes:
 - Restart (or reload) the service so it closes and reopens its log. The cleanest fix.
 - If you can't restart it now, truncate the file through the process's file descriptor: `sudo truncate -s 0 /proc/1873/fd/7`.
 
+??? question "Under the hood: rescuing a file you deleted by mistake"
+    The same `/proc/PID/fd/N` link works in the other direction. As long as the process keeps the file open, the data is still on disk and `/proc` gives you a handle to it, so you can copy it back out:
+
+    ```console
+    $ sudo ls -l /proc/1873/fd/7
+    l-wx------. 1 app app 64 Oct 15 09:10 /proc/1873/fd/7 -> /var/log/app/app.log (deleted)
+    $ sudo cp /proc/1873/fd/7 /var/tmp/app.log.rescued
+    ```
+
+    This has saved more than one database file deleted by a tired admin. Do it *before* you restart the service: once the last process closes the file, the blocks are freed and the data is gone.
+
 !!! tip "Prevent it next time"
     Don't `rm` an active log. Truncate it (`truncate -s 0 file`) or let logrotate handle it with `copytruncate` or a reload. See [08 · Logging and the Journal](08-logging-and-the-journal.md).
 
@@ -715,7 +742,7 @@ Swap:          4.0Gi          0B       4.0Gi
 
 Only 412 MiB "free"? Look at `buff/cache`: 5.5 GiB of file data the kernel is holding *just in case*. It gives that memory back instantly when a program needs it. The number that matters is **available**: 5.6 GiB, the memory programs can actually get. Unused RAM is wasted RAM, so the kernel fills it with cache.
 
-!!! example "Try it: watch the cache work"
+??? example "Try it: watch the cache work"
     ```console
     $ dd if=/dev/zero of=/var/tmp/cachetest bs=1M count=500 status=none
     $ sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
@@ -756,7 +783,7 @@ Filesystem           Size  Used Avail Use% Mounted on
 
 </div>
 
-<div class="task" data-expect="sudo du -xh --max-depth=1 /var||sudo du -xh -d1 /var||sudo du -xh -d 1 /var" data-hint="sudo du, stay on one filesystem (-x), human sizes (-h), one level deep (--max-depth=1), on /var." markdown>
+<div class="task" data-expect="sudo du -xh --max-depth=1 /var||sudo du -xh -d1 /var||sudo du -xh -d 1 /var" data-match="^sudo du (-xh|-hx|-x -h|-h -x) (--max-depth=1|-d ?1) /var/?$" data-hint="sudo du, stay on one filesystem (-x), human sizes (-h), one level deep (--max-depth=1), on /var." markdown>
 
 **Step 3.** As root, see how big each directory directly under `/var` is, without crossing into other filesystems.
 
@@ -771,7 +798,7 @@ Filesystem           Size  Used Avail Use% Mounted on
 
 </div>
 
-<div class="task" data-expect="sudo lsof +L1" data-hint="lsof can list files whose link count is less than 1." markdown>
+<div class="task" data-expect="sudo lsof +L1" data-match="^sudo lsof (\+L1|\+L 1)$" data-hint="lsof can list files whose link count is less than 1." markdown>
 
 **Step 4.** `du` finds far less than `df` reports. Look for deleted files that are still held open.
 
@@ -957,15 +984,19 @@ All labs use **loop devices**: a regular file attached as a fake disk with `lose
         $ df -i /mnt/x /mnt/e
         ```
 
-    5. Try to grow something. Partition 1 (XFS) can't grow, because partition 2 sits right after it. That's the everyday reason LVM exists (next module). Partition 2 (ext4) has free space after it, so grow that one while it stays mounted:
+    5. Try to grow something. Partition 1 (XFS) can't grow, because partition 2 sits right after it. That's the everyday reason LVM exists (next module). Partition 2 (ext4) has free space after it. Unmount it while `parted` moves the partition's end (in script mode `parted` won't touch a partition that's in use), then mount it again and grow the filesystem **online**:
 
         ```console
+        $ sudo umount /mnt/e
         $ sudo parted -s $LOOP resizepart 2 100%
         $ sudo partprobe $LOOP
         $ lsblk $LOOP
+        $ sudo mount ${LOOP}p2 /mnt/e
         $ sudo resize2fs ${LOOP}p2
         $ df -h /mnt/e
         ```
+
+        On a real server you'd grow the partition without unmounting using `growpart` (package `cloud-utils-growpart`), which is how cloud images grow their root disk on first boot.
 
     **Check your work:** `df -h /mnt/e` shows roughly 690 MB instead of 270 MB, and `df -i` showed a fixed inode count for ext4 but a much larger (dynamic) one for XFS.
 
@@ -1047,7 +1078,7 @@ All labs use **loop devices**: a regular file attached as a fake disk with `lose
 
     **You'll need:** sudo.
 
-    1. Make a tiny ext4 filesystem with only 128 inodes:
+    1. Make a tiny ext4 filesystem with only about 128 inodes (`mkfs` rounds the number up to fill whole inode-table blocks):
 
         ```console
         $ truncate -s 100M /var/tmp/tiny.img
@@ -1058,7 +1089,7 @@ All labs use **loop devices**: a regular file attached as a fake disk with `lose
     2. Fill the inodes with empty files:
 
         ```console
-        $ for i in $(seq 1 200); do sudo touch /mnt/tiny/f$i 2>/dev/null || { echo "failed at $i"; break; }; done
+        $ for i in $(seq 1 1000); do sudo touch /mnt/tiny/f$i 2>/dev/null || { echo "failed at $i"; break; }; done
         $ df -h /mnt/tiny; df -i /mnt/tiny
         ```
 

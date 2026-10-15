@@ -100,8 +100,13 @@ Use the first two in configs and commands. `dm-0` numbers can change between boo
 
 The `pvs`/`vgs`/`lvs` commands give one-line summaries. Their siblings `pvdisplay`, `vgdisplay` and `lvdisplay` give long, detailed output. `lvs -a -o +devices` shows which PVs each LV actually lives on.
 
+??? question "Under the hood: where LVM keeps its brain, and the undo button"
+    LVM's metadata (which extents belong to which LV) is plain text, stored in a small area near the start of every PV. You can read it: `sudo vgcfgbackup -f /tmp/rl.txt rl && less /tmp/rl.txt` shows each LV as a list of segments with PV names and extent ranges.
+
+    Every LVM command that changes metadata also saves a copy of the *previous* version in `/etc/lvm/archive/` and the current one in `/etc/lvm/backup/`. That's an undo button most admins never learn about. If someone runs `lvremove` on the wrong volume and nothing has overwritten its extents yet, `sudo vgcfgrestore --list rl` shows the archived versions with the command that created each, and `vgcfgrestore -f /etc/lvm/archive/rl_000NN-….vg rl` puts the old layout back (deactivate the VG's affected LVs first, and read [[man:vgcfgrestore(8)]] before you try it on a server). The data was never touched; only the map was.
+
 !!! version "Rocky 9 vs 10: the LVM devices file"
-    Since Rocky 9, LVM only looks at devices listed in **`/etc/lvm/devices/system.devices`**. `pvcreate` and `vgcreate` add new devices automatically, but if you move a disk from another machine its VG won't appear until you import it with `sudo vgimportdevices VGNAME` (or `lvmdevices --adddev /dev/X`). List the file's contents with `sudo lvmdevices`. This prevents LVM from grabbing disks that belong to virtual machines or other hosts.
+    Since Rocky 9, LVM only looks at devices listed in **`/etc/lvm/devices/system.devices`**. `pvcreate` and `vgcreate` add new devices automatically, but if you move a disk from another machine its VG won't appear until you import it with `sudo vgimportdevices VGNAME` (or `lvmdevices --adddev /dev/X`). List the file's contents with `sudo lvmdevices`. This prevents LVM from grabbing disks that belong to virtual machines or other hosts. The same file explains a classic "my VG vanished" moment after cloning a VM or swapping a disk controller: the devices file identifies disks by their WWID or serial, and if those change, LVM ignores the disk until you run `vgimportdevices` again.
 
 ## Working with LVM
 
@@ -323,6 +328,19 @@ To **keep the changes** and discard the snapshot: `sudo lvremove data/app_snap`.
 
 !!! warning "Classic snapshots slow down writes"
     Every first write to a block becomes a read plus two writes. With several snapshots of the same origin, each write is copied to each one. Fine for an hour during an upgrade; bad as a permanent backup scheme.
+
+??? question "Under the hood: one snapshot, four device-mapper devices"
+    A classic snapshot is built from several hidden device-mapper devices. Take one and look:
+
+    ```console
+    $ sudo dmsetup ls | grep data
+    data-app	(253:2)
+    data-app-real	(253:3)
+    data-app_snap	(253:4)
+    data-app_snap-cow	(253:5)
+    ```
+
+    `app-real` is the original data, `app_snap-cow` is the snapshot's store, `app` itself becomes a `snapshot-origin` target that copies old blocks into the store before each first write, and `app_snap` is a `snapshot` target that reads from the store first and falls back to `-real`. `sudo dmsetup table` shows those target names. This is why `lsblk` suddenly grows extra branches after `lvcreate -s`, and why the copy-on-write cost lands on every write to the *origin*, not the snapshot.
 
 !!! pitfall "Mounting an XFS snapshot fails with 'duplicate UUID'"
     The snapshot has the same filesystem UUID as the origin, and XFS refuses to mount two filesystems with the same UUID. Mount the snapshot with `-o nouuid` (add `ro` for a backup): `sudo mount -o ro,nouuid /dev/data/app_snap /mnt/snap`.
@@ -573,6 +591,11 @@ backup  UUID=c0e8d1a2-3f47-4b5c-8e9d-1a2b3c4d5e6f  /root/keys/backup.key  luks,n
 
 The four fields are: the **name** to create under `/dev/mapper/`, the **device** (use the LUKS UUID from `blkid`), the **key** (`none` means ask for a passphrase at boot), and **options**. Then reference `/dev/mapper/secret` in `/etc/fstab` as usual.
 
+??? question "Under the hood: key file lookup and TRIM through LUKS"
+    If the key field in crypttab is `none` or empty, systemd first looks for a key file named after the volume in `/etc/cryptsetup-keys.d/NAME.key` (and `/run/cryptsetup-keys.d/`), and only asks for a passphrase if there isn't one. That's why the keyslot table above puts key files there.
+
+    By default dm-crypt does **not** pass discard (TRIM) requests down to the SSD, because the pattern of freed blocks leaks some information (which areas are empty, roughly what filesystem is inside). On SSDs and thin-provisioned SAN or cloud volumes that means freed space is never returned to the device. If you accept that leak, add the `discard` option in crypttab (or `cryptsetup open --allow-discards`, or `cryptsetup refresh --allow-discards --persistent NAME` to store the flag in the LUKS2 header). `sudo dmsetup table NAME` shows `allow_discards` when it's on.
+
 A key file stored on the same machine only makes sense for secondary volumes when the root filesystem is itself encrypted; otherwise anyone with the disk has the key. For unattended unlocking of the root volume, Rocky supports **Clevis** (network-bound unlocking with a Tang server) and TPM2 binding (`systemd-cryptenroll`), both beyond this module.
 
 <div class="quiz" data-answer="1" markdown>
@@ -742,7 +765,10 @@ Every lab creates image files in `/var/tmp`, attaches them as loop devices, and 
         $ sudo mount /dev/snapvg/app /mnt/app
         $ cat /mnt/app/config.txt
         version 1
+        $ sudo lvs snapvg
         ```
+
+        The merge runs in the background. When `lvs` no longer lists `app_pre`, it's finished (on a volume this small, that's a second or two). You can't take a new snapshot of `app` until it's done.
 
     4. Now overflow a snapshot. Make a tiny 20 MiB one and write 100 MB to the origin:
 
@@ -826,10 +852,10 @@ Every lab creates image files in `/var/tmp`, attaches them as loop devices, and 
 
     **You'll need:** sudo.
 
-    1. Create a fake disk and format it as LUKS2. Type `YES` and pick a throwaway passphrase:
+    1. Create a fake disk and format it as LUKS2. Type `YES` and pick a throwaway passphrase. (The image is 512 MiB because LUKS2 uses 16 MiB for its header and `mkfs.xfs` refuses filesystems smaller than 300 MB.)
 
         ```console
-        $ truncate -s 300M /var/tmp/crypt.img
+        $ truncate -s 512M /var/tmp/crypt.img
         $ C=$(sudo losetup -f --show /var/tmp/crypt.img)
         $ sudo cryptsetup luksFormat $C
         $ sudo cryptsetup luksDump $C | grep -E 'Version|cipher|PBKDF|^  [0-9]+: luks2'

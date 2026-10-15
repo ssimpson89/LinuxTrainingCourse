@@ -193,9 +193,10 @@ The kernel is split into several RPMs:
 | Package | Contains |
 |---------|----------|
 | `kernel` | An empty "meta" package that pulls in the others |
-| `kernel-core` | The kernel image (`vmlinuz`) and the minimal set of modules needed to boot most machines |
-| `kernel-modules-core`, `kernel-modules` | The bulk of drivers (network cards, filesystems, …) |
-| `kernel-modules-extra` | Rarely used drivers, not installed by default |
+| `kernel-core` | The kernel image (`vmlinuz`) and boot files; requires `kernel-modules-core` |
+| `kernel-modules-core` | The core set of modules needed to boot most machines and VMs (virtio, common storage and filesystems, basic networking such as `dummy`) |
+| `kernel-modules` | The bulk of hardware drivers (network cards, RAID controllers, USB devices, …) |
+| `kernel-modules-extra` | Rarely used drivers and protocols, not installed by default |
 | `kernel-devel`, `kernel-headers` | Files for building out-of-tree modules and compiling programs |
 
 The files land in predictable places:
@@ -210,6 +211,8 @@ initramfs-6.12.0-124.8.1.el10_1.x86_64.img   vmlinuz-6.12.0-124.8.1.el10_1.x86_6
 $ ls /lib/modules/
 6.12.0-55.39.1.el10_0.x86_64  6.12.0-124.8.1.el10_1.x86_64
 ```
+
+To find which package owns a module, ask RPM: `rpm -qf $(modinfo -n xfs)`.
 
 `vmlinuz-*` is the compressed kernel, `initramfs-*` the early boot environment ([14 · The Boot Process](14-the-boot-process.md)), `config-*` the exact build options (`grep CONFIG_XFS_FS /boot/config-$(uname -r)`), and `/lib/modules/VERSION/` the modules for each installed kernel.
 
@@ -286,7 +289,7 @@ description:    Dummy netdevice driver which discards all packets sent to it
 license:        GPL
 …
 signer:         Rocky kernel signing key
-sig_hashalgo:   sha256
+…
 parm:           numdummies:Number of dummy pseudo devices (int)
 ```
 
@@ -295,10 +298,18 @@ parm:           numdummies:Number of dummy pseudo devices (int)
 | Load a module (and its dependencies) | `sudo modprobe dummy` |
 | Load with a parameter | `sudo modprobe dummy numdummies=2` |
 | Unload | `sudo modprobe -r dummy` |
-| Current parameter values | `cat /sys/module/dummy/parameters/numdummies` (if readable) |
+| Current parameter values | `grep -r . /sys/module/NAME/parameters/` (only parameters the driver chose to expose; `dummy`'s isn't) |
 | Show what `modprobe` would do | `modprobe -n -v dummy` |
 
 Use `modprobe`, not the low-level `insmod`/`rmmod`: `modprobe` resolves dependencies (from `modules.dep`) and applies your configuration.
+
+??? question "Under the hood: how the kernel loads a module by itself"
+    There are two automatic paths, and both end in the same user-space program.
+
+    1. **Hardware appears.** The kernel sends a uevent with a `MODALIAS` string describing the device (for a PCI card, vendor and device IDs). udev runs the equivalent of `modprobe <modalias>`, which matches it against the wildcards in `/lib/modules/$(uname -r)/modules.alias`. Try `cat /sys/class/net/eth0/device/modalias`, then `modprobe -R "$(cat /sys/class/net/eth0/device/modalias)"` to see which module that resolves to.
+    2. **A feature is requested.** When a program asks for something not yet loaded (a filesystem type in `mount`, a network protocol family, `ip link add type dummy`), the kernel itself calls the program named in `/proc/sys/kernel/modprobe` (normally `/sbin/modprobe`) with an alias such as `fs-xfs` or `rtnl-link-dummy`. That's the `alias:` line in the `modinfo` output above.
+
+    Hardened systems use this knowledge: `sysctl kernel.modules_disabled=1` blocks *all* further module loading until reboot, a one-way switch you flip once boot has finished loading what it needs.
 
 ### Configuring modules permanently
 
@@ -459,6 +470,12 @@ A few knobs you'll actually meet:
 !!! warning "tuned may set these too"
     Rocky runs **tuned**, which applies a performance profile at boot (`tuned-adm active` shows it, often `virtual-guest` on VMs). Profiles set sysctls such as `vm.swappiness` and `vm.dirty_ratio`. If your value "doesn't stick", check whether tuned is overriding it, and consider a custom tuned profile instead. More in [19 · Performance and Observability](19-performance-and-observability.md).
 
+??? question "Under the hood: sysctls that must be set before userspace starts"
+    `systemd-sysctl.service` runs early, but not before the initramfs or before modules load. Two consequences bite people:
+
+    - **Per-interface or per-module settings** (for example `net.ipv4.conf.eth1.rp_filter`, or anything under `net.bridge.`) don't exist until the interface or module appears. If the file applies first, the setting fails with "No such file or directory". systemd re-applies matching `sysctl.d` entries when a network device appears, but for module-owned keys the reliable fix is to load the module first (`/etc/modules-load.d/`).
+    - **Settings needed during early boot** can go on the kernel command line: since kernel 5.8, any `sysctl.NAME=VALUE` argument (for example `sysctl.vm.swappiness=10`) is applied by the kernel itself before PID 1 starts. Add it with `sudo grubby --update-kernel=ALL --args="sysctl.vm.swappiness=10"`.
+
 !!! tip "Change one thing at a time"
     Copying a "Linux performance tuning" list of 40 sysctls from a blog post is a classic way to create problems you can't explain. Change one parameter, measure, and write down why in a comment in the `.conf` file.
 
@@ -525,6 +542,22 @@ Programs often ask for more memory than they'll use (`malloc` a big buffer and t
 | `2` | Strict: total commitments may not exceed swap + `vm.overcommit_ratio`% of RAM |
 
 The catch: if programs actually *use* everything they were promised, the memory runs out after the promises were made. Something has to give.
+
+??? question "Under the hood: see memory trouble coming with PSI"
+    Swap activity and free memory are lagging signals. **Pressure stall information** (PSI) measures what users feel: the share of time tasks were stalled waiting for memory (or CPU, or I/O).
+
+    Rocky's kernel is built with PSI but switches it **off by default** (`CONFIG_PSI_DEFAULT_DISABLED=y`), so `/proc/pressure/` doesn't exist on a stock install. Turn it on with a boot argument and reboot:
+
+    ```console
+    $ sudo grubby --update-kernel=ALL --args="psi=1"
+    $ sudo reboot
+    …
+    $ cat /proc/pressure/memory
+    some avg10=0.00 avg60=0.00 avg300=0.00 total=1849021
+    full avg10=0.00 avg60=0.00 avg300=0.00 total=402117
+    ```
+
+    `some` is the percentage of time at least one task was stalled on memory, `full` the percentage when *all* non-idle tasks were. A healthy box sits near zero; a box heading for an OOM kill shows `full` climbing for minutes beforehand. Every cgroup then has its own copy, so `cat /sys/fs/cgroup/system.slice/postgresql.service/memory.pressure` tells you whether one service is starving. Monitoring agents and `systemd-oomd` base their decisions on exactly these numbers.
 
 ### The OOM killer
 
@@ -656,20 +689,22 @@ A **kernel panic** is the kernel stopping because it hit a problem it can't safe
 
 <div class="step" data-title="Reserve memory at boot" markdown>
 
-The `crashkernel=` option on the kernel command line reserves a block of RAM that the normal kernel never uses. Rocky sets a sensible default at install time.
+The `crashkernel=` option on the kernel command line reserves a block of RAM that the normal kernel never uses. The installer sets it, using a value that scales with installed RAM. On Rocky 10 x86_64 the default is:
 
 ```console
 $ grep -o 'crashkernel=[^ ]*' /proc/cmdline
-$ sudo kdumpctl showmem
+crashkernel=2G-64G:256M,64G-:512M
+$ sudo kdumpctl get-default-crashkernel
+2G-64G:256M,64G-:512M
 ```
 
-To reset it to the recommended default for this kernel: `sudo kdumpctl reset-crashkernel` (takes effect after reboot).
+Read it as "RAM from 2 to 64 GiB: reserve 256 MiB; 64 GiB or more: reserve 512 MiB". Below 2 GiB of RAM nothing is reserved, so **kdump doesn't work on a 2 GiB lab VM** out of the box. To reset the value to the recommended default for the installed kernel: `sudo kdumpctl reset-crashkernel` (takes effect after a reboot).
 
 </div>
 
 <div class="step" data-title="Preload the capture kernel" markdown>
 
-`kdump.service` (package `kexec-tools`) uses **kexec** to load a second kernel and a small special initramfs into that reserved memory, ready to go.
+`kdump.service` (package `kdump-utils` on Rocky 10, `kexec-tools` on Rocky 9) uses **kexec** to load a second kernel and a small special initramfs into that reserved memory, ready to go.
 
 ```console
 $ sudo systemctl status kdump --no-pager
@@ -715,6 +750,9 @@ Start with `vmcore-dmesg.txt`: the kernel log up to the panic, often enough to s
 
 </div>
 
+!!! version "Rocky 9 vs 10: kdump"
+    Rocky 9 shipped kdump inside `kexec-tools`; Rocky 10 splits it into `kexec-tools`, `kdump-utils` (the service and `kdumpctl`) and `makedumpfile`. Rocky 9's default was `1G-4G:192M,4G-64G:256M,64G-:512M`; that string is not supported on Rocky 10, so kickstarts and Ansible roles that hard-code it need updating. The old `crashkernel=auto` from Rocky 8 is gone on both.
+
 !!! tip "Make sure there's room"
     A vmcore can be several GB on a big machine. Make sure `/var/crash` (or the target in `/etc/kdump.conf`) has free space, or send dumps to another disk or over NFS/SSH. Test kdump once per server build, in a maintenance window, so you know it works before you need it.
 
@@ -722,7 +760,7 @@ Start with `vmcore-dmesg.txt`: the kernel log up to the panic, often enough to s
 
 Rebooting to apply a kernel security fix means downtime. **Live patching** applies fixes to the running kernel's code in memory, with no reboot. On RHEL, Red Hat ships prebuilt live patches as `kpatch-patch-*` packages for subscribers.
 
-On Rocky, the `kpatch` tool itself is available in the repositories, but Rocky doesn't publish the prebuilt `kpatch-patch` packages, so out of the box there are no live patches to apply. Rocky users who need rebootless kernel fixes typically buy a commercial live-patching service or build patches themselves with `kpatch-build`, which takes real expertise. Check the Rocky forums for the current state before planning around it.
+On Rocky, the `kpatch` tool (and its systemd service) is rebuilt from RHEL and available in the repositories, but Rocky does not build or publish any `kpatch-patch-*` packages. So `dnf search kpatch-patch` finds nothing and, out of the box, there are no live patches to apply. Rocky users who need rebootless kernel fixes either buy a commercial live-patching service for Rocky or build patches themselves with `kpatch-build`, which takes real expertise and a matching debuginfo kernel.
 
 The kernel side is the same either way. A live patch is a special module; once loaded it shows up under `/sys/kernel/livepatch/` and the kernel is tainted with `K`. Even with live patching, plan regular reboots: live patches cover selected security fixes, not every update.
 
@@ -749,7 +787,7 @@ The kernel side is the same either way. A live patch is a special module; once l
         $ chmod +x /tmp/myapp.sh
         $ /tmp/myapp.sh
         cannot load config
-        $ strace -f -e trace=openat /tmp/myapp.sh 2>&1 | grep -v ENOENT.*locale | grep ENOENT
+        $ strace -f -e trace=openat /tmp/myapp.sh 2>&1 | grep -v 'ENOENT.*locale' | grep ENOENT
         ```
 
     3. Compare reading a file in big vs tiny chunks:
@@ -771,7 +809,7 @@ The kernel side is the same either way. A live patch is a special module; once l
 
     **Goal:** Load a harmless module with parameters, make the parameters permanent, then block it two different ways.
 
-    **You'll need:** sudo. The `dummy` network driver creates fake interfaces and touches no hardware. If `modprobe` says it isn't found, install it with `sudo dnf install -y kernel-modules-extra`.
+    **You'll need:** sudo. The `dummy` network driver creates fake interfaces and touches no hardware. It ships in `kernel-modules-core`, so it's on every Rocky 10 system (check with `rpm -qf $(modinfo -n dummy)`).
 
     1. Inspect and load it:
 
@@ -896,7 +934,7 @@ The kernel side is the same either way. A live patch is a special module; once l
 
         After it reboots, look in `/var/crash/` and read `vmcore-dmesg.txt` near the end.
 
-    **Check your work:** the journal shows `Memory cgroup out of memory` and `oom-kill:constraint=CONSTRAINT_MEMCG` for `tail`, the rest of the system was unaffected, and `kdumpctl status` reports kdump as operational. Step 3 shows PID 1 (systemd) with `adj=-1000`, which means never chosen.
+    **Check your work:** the journal shows `Memory cgroup out of memory` and `oom-kill:constraint=CONSTRAINT_MEMCG` for `tail`, the rest of the system was unaffected, and `kdumpctl status` reports kdump as operational (on a VM with less than 2 GiB of RAM it won't be, because no `crashkernel` memory is reserved). Step 3 prints a score for each process; whatever PID 1's numbers say, the kernel never picks init as an OOM victim.
 
     ??? success "What just happened?"
         The OOM killer worked inside the cgroup boundary: only processes in `oomlab.scope` were candidates. That's exactly how systemd's `MemoryMax=` protects the rest of a server from one runaway service.
