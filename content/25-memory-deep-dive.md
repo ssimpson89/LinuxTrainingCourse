@@ -286,7 +286,7 @@ those shared pages twenty times; summing PSS counts them once in total.
 ```console
 $ free -h
                total        used        free      shared  buff/cache   available
-Mem:           3.6Gi       735Mi       402Mi        19Mi       2.5Gi       2.7Gi
+Mem:           3.6Gi       853Mi       402Mi        19Mi       2.5Gi       2.7Gi
 Swap:          3.9Gi       0.8Mi       3.9Gi
 $ cat /proc/meminfo
 MemTotal:        3735652 kB
@@ -344,8 +344,16 @@ Hugepagesize:       2048 kB
 | `CommitLimit` | Commit ceiling (only enforced in overcommit mode 2) | n/a |
 | `HugePages_*` | Static huge page pool: total, free, reserved, surplus | `Total` large but app not using them: wasted RAM |
 
-`free`'s `buff/cache` is `Buffers + Cached + SReclaimable`. `used` is
-`total - free - buff/cache`.
+`free`'s `buff/cache` is `Buffers + Cached + SReclaimable`. On Rocky 10,
+`used` is simply `total - available` (here 3735652 - 2861944 kB, about
+853 MiB), so `used` and `available` always add up to `total`.
+
+!!! version "Rocky 9 vs 10: the used column in free changed"
+    Rocky 9 ships procps-ng 3.3, where `used` is `total - free - buff/cache`.
+    Rocky 10 ships procps-ng 4, where `used` is `total - available`. The same
+    machine shows a bigger `used` on Rocky 10 (it now includes things like
+    unreclaimable slab and tmpfs). Scripts and dashboards that scrape `free`
+    will report a jump after the upgrade with no real change in memory use.
 
 !!! pitfall "Alerting on MemFree"
     A Linux box that has been up for a week should have little free memory,
@@ -451,7 +459,7 @@ file doesn't flush your database's hot data: those pages are seen once, stay
 inactive, and are the first to go.
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["Allocation request"] --> W{"Free pages above the low watermark?"}
     W -- yes --> OK["Allocate"]
     W -- no --> KS["Wake kswapd (background reclaim)"]
@@ -603,17 +611,27 @@ chooses and how to read its report.
 
 ### How the victim is chosen
 
-Every process has a **badness** score, shown in `/proc/<pid>/oom_score`
-(0 to 1000 plus adjustments). It's roughly "what fraction of available
-memory would killing this free": resident memory + swap used + page tables.
-Then `oom_score_adj` (-1000 to +1000) is added, scaled to the same units.
+Every process has a **badness** score. Internally it's "how many pages
+would killing this free": resident memory + swap used + page tables. Then
+`oom_score_adj` (-1000 to +1000) is added, scaled so that +1000 means "as
+big as all of RAM and swap". The largest total dies.
 
 ```console
 $ for p in $(pgrep -x 'sshd|mysqld|python3'); do printf '%-8s %-8s score=%-4s adj=%s\n' $p $(cat /proc/$p/comm) $(cat /proc/$p/oom_score) $(cat /proc/$p/oom_score_adj); done
 812      sshd     score=0    adj=-1000
-1288     mysqld   score=112  adj=0
-5120     python3  score=681  adj=0
+1288     mysqld   score=701  adj=0
+5120     python3  score=982  adj=0
 ```
+
+??? question "Under the hood: why a tiny process scores about 666"
+    `/proc/<pid>/oom_score` is not the raw badness. Since kernel 5.9 it is
+    rescaled so that `oom_score_adj` fits in: roughly
+    `(1000 + badness × 1000 / (RAM + swap)) × 2 / 3`. A process using almost
+    no memory with `oom_score_adj=0` therefore shows about `666`, one with
+    adj `-1000` shows `0`, and the maximum is about `1333`. Older blog
+    posts that say "0 to 1000, and an idle process scores 0" describe
+    pre-5.9 kernels. Compare scores with each other, never against a fixed
+    threshold.
 
 The `sshd` listener sets its own `oom_score_adj` to -1000 at startup (your
 login sessions get 0 back), so you can still log in to fix an out-of-memory
@@ -633,7 +651,7 @@ The kernel writes a long report to the log every time. Here is one from a
 cgroup OOM (lab 5 produces exactly this), trimmed:
 
 ```text
-python3 invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0
+python3 invoked oom-killer: gfp_mask=0x100dca(GFP_HIGHUSER_MOVABLE|__GFP_ZERO), order=0, oom_score_adj=0
 CPU: 0 UID: 0 PID: 5120 Comm: python3 Not tainted 6.12.0-124.8.1.el10_1.x86_64 #1
 Call Trace:
  <TASK>
@@ -661,6 +679,8 @@ Memory cgroup out of memory: Killed process 5120 (python3) total-vm:275772kB, an
 
 1. **`python3 invoked oom-killer`**: the process whose allocation failed.
    It is *not necessarily the victim*; it's just the one that asked last.
+   `GFP_HIGHUSER_MOVABLE` means an ordinary user-space page (a page fault on
+   heap memory); `GFP_KERNEL` would mean the kernel wanted memory for itself.
    `order=0` means a single 4 KiB page was wanted. A high `order` (like 3 or
    more) with plenty of free memory points at **fragmentation**, not
    exhaustion.
@@ -689,6 +709,22 @@ memory is in tmpfs or the kernel.
 ```console
 $ journalctl -k -g 'invoked oom-killer|Killed process' --no-pager
 ```
+
+<div class="quiz" data-answer="2" markdown>
+
+An OOM report starts with `nginx invoked oom-killer` and ends with
+`Out of memory: Killed process 4410 (java)`. What happened?
+
+- nginx was killed because it asked for memory
+- The whole machine ran out of memory; nginx's allocation triggered the OOM killer, which chose java as the biggest scorer
+- java hit its own cgroup `MemoryMax=`
+- nginx sent `SIGKILL` to java
+
+Right. The invoker is just whoever asked last. `Out of memory:` without the
+`Memory cgroup` prefix means a global OOM, and the victim is picked by
+`oom_score` across the whole machine.
+
+</div>
 
 ## cgroup v2 memory controls
 
@@ -740,6 +776,12 @@ oom_group_kill 0
 `set-property` writes a persistent drop-in; add `--runtime` for a temporary
 change. `systemd-cgtop -m` shows every cgroup sorted by memory.
 
+!!! tip "Size limits from memory.peak, not from a guess"
+    Every cgroup has a `memory.peak` file: the highest `memory.current` it
+    has reached. Run a service for a representative week, read
+    `/sys/fs/cgroup/system.slice/myapp.service/memory.peak`, and set
+    `MemoryMax=` with headroom above it.
+
 !!! note "Page cache counts against the limit"
     A service's file reads and writes are charged to its cgroup. A log
     shipper reading 10 GB of logs under `MemoryMax=1G` is fine: the kernel
@@ -765,10 +807,12 @@ ManagedOOMMemoryPressure=kill
 ManagedOOMMemoryPressureLimit=50%
 ```
 
-On Rocky, `systemd-oomd` is packaged separately and is not running on a
-default server install (unlike Fedora, which enables it). Check with
-`rpm -q systemd-oomd` and `systemctl is-enabled systemd-oomd`, then
-`oomctl` to see what it monitors once enabled.
+Fedora turns `systemd-oomd` on for desktops; Rocky does not set it up on a
+server install. Find out what your box has with
+`rpm -qf /usr/lib/systemd/systemd-oomd` (it may be a separate
+`systemd-oomd` package) and `systemctl is-enabled systemd-oomd.service`.
+Once it runs, `oomctl` shows the cgroups it watches. It depends on PSI,
+so check the tip below first.
 
 ## PSI: measuring the pain, not the usage
 
@@ -796,10 +840,20 @@ service that is slow because it's at its `MemoryHigh=` shows high
 `memory.pressure` in its own cgroup while the system-wide file stays calm.
 
 !!! tip "If /proc/pressure doesn't exist"
-    PSI must be enabled in the running kernel. RHEL-family kernels have at
-    times built it in but switched it off by default. If
-    `ls /proc/pressure` fails, enable it with
-    `sudo grubby --update-kernel=ALL --args=psi=1` and reboot.
+    PSI must be enabled in the running kernel. RHEL-family kernels have
+    built it in but switched it off by default
+    (`CONFIG_PSI_DEFAULT_DISABLED=y`, confirmed on RHEL 8). Check your own
+    kernel rather than trusting a guide:
+
+    ```console
+    $ grep PSI /boot/config-$(uname -r)
+    $ ls /proc/pressure
+    ```
+
+    If `/proc/pressure` is missing (and with it every cgroup's
+    `memory.pressure`), enable it with
+    `sudo grubby --update-kernel=ALL --args=psi=1` and reboot. PSI costs a
+    little scheduler overhead, which is why vendors default it off.
 
 <div class="quiz" data-answer="1" markdown>
 
@@ -881,6 +935,8 @@ HugePages_Free:      512
 
 THP is controlled through sysfs. The bracket marks the current mode:
 
+Rocky 10 ships THP in `always` mode; confirm yours:
+
 ```console
 $ cat /sys/kernel/mm/transparent_hugepage/enabled
 [always] madvise never
@@ -907,14 +963,23 @@ To switch THP off persistently, use the boot parameter or a tuned profile:
 $ sudo grubby --update-kernel=ALL --args=transparent_hugepage=never
 ```
 
-### KSM in one paragraph
+??? question "Under the hood: multi-size THP in kernel 6.12"
+    Rocky 10's kernel can also back anonymous memory with "mid-size" folios
+    (16 KiB, 64 KiB and so on) instead of jumping straight from 4 KiB to
+    2 MiB. Each size has its own switch under
+    `/sys/kernel/mm/transparent_hugepage/hugepages-<size>kB/enabled`, and
+    most default to `never` or `inherit`. Before you tune or blame THP, list
+    them all:
+    `grep -r . /sys/kernel/mm/transparent_hugepage/hugepages-*/enabled`.
+    Usage counters live in `/sys/kernel/mm/transparent_hugepage/hugepages-*/stats/`.
 
-**KSM** (kernel samepage merging) scans memory regions that opted in, finds
-identical pages, and merges them into one copy-on-write page. Its big user
-is KVM: twenty guests running the same OS share many identical pages. It
-costs CPU to scan, and it's controlled via `/sys/kernel/mm/ksm/` (`run`,
-`pages_sharing`). On KVM hosts the `ksm` and `ksmtuned` services manage it;
-see [27 · Virtualization with KVM](27-virtualization-kvm.md).
+??? question "Going further: KSM (kernel samepage merging)"
+    **KSM** scans memory regions that opted in (with
+    `madvise(MADV_MERGEABLE)`), finds identical pages, and merges them into
+    one copy-on-write page. Its big user is KVM: twenty guests running the
+    same OS share many identical pages. It costs CPU to scan, and it's
+    controlled via `/sys/kernel/mm/ksm/` (`run`, `pages_sharing`). See
+    [27 · Virtualization with KVM](27-virtualization-kvm.md).
 
 ## Spotting a memory leak
 
@@ -971,7 +1036,7 @@ growth is in `SUnreclaim` instead of a process, it's the kernel or a driver:
 
 ```text
                total        used        free      shared  buff/cache   available
-Mem:           3.6Gi       735Mi       402Mi        19Mi       2.5Gi       2.7Gi
+Mem:           3.6Gi       853Mi       402Mi        19Mi       2.5Gi       2.7Gi
 Swap:          3.9Gi       0.8Mi       3.9Gi
 ```
 
@@ -1028,17 +1093,20 @@ Oct 15 11:20:41 rocky-lab kernel: Memory cgroup out of memory: Killed process 51
 
 All labs use a Rocky 10 VM with at least 2 GB of RAM and sudo. They create
 pressure only inside cgroups or on scratch files, so the rest of the VM stays
-responsive. Create the helper script once:
+responsive. Create the helper script once (it allocates memory 10 MiB at a
+time and writes to it, so it is really resident):
 
-```bash title="/var/tmp/eat.py"
+```bash
+cat > /var/tmp/eat.py <<'EOF'
 import sys, time
-target = int(sys.argv[1]) if len(sys.argv) > 1 else 400   # MiB
+target = int(sys.argv[1]) if len(sys.argv) > 1 else 400
 chunks = []
 for i in range(target // 10):
-    chunks.append(b'x' * (10 << 20))   # 10 MiB, actually written, so really resident
+    chunks.append(b'x' * (10 << 20))
     print(f"{(i + 1) * 10} MiB", flush=True)
     time.sleep(0.2)
 time.sleep(600)
+EOF
 ```
 
 !!! lab "Lab 1: Map a process's memory"
@@ -1068,7 +1136,7 @@ time.sleep(600)
 
     **Goal:** See file data land in RAM, prove it with `fincore`, and drop it.
 
-    1. Create a test file without polluting the cache much, then evict it:
+    1. Create a 500 MB test file (writing it fills the cache), then evict it:
 
         ```bash
         dd if=/dev/urandom of=/var/tmp/cachetest bs=1M count=500 status=none
@@ -1145,6 +1213,7 @@ time.sleep(600)
         ```
 
     3. Compare with the system-wide view: `cat /proc/pressure/memory`.
+    4. Note the high-water mark: `cat $CG/memory.peak`.
 
     **Check your work:** progress in terminal A is quick up to about 200 MiB
     and then slows down sharply. `memory.events high` keeps increasing, the
@@ -1156,7 +1225,15 @@ time.sleep(600)
         own memory. With only anonymous memory to reclaim, that means
         swapping it out, and the kernel adds sleep penalties to slow the
         allocator down. The stall shows up in the cgroup's PSI, while the
-        rest of the system is barely affected.
+        rest of the system is barely affected. With no swap at all, the
+        cgroup has nothing left to reclaim, so the kernel just keeps
+        sleeping the allocator (up to about 2 seconds per attempt): a
+        service stuck at `MemoryHigh=` with no swap can look hung while
+        never being killed.
+
+    ??? tip "Hint: memory.pressure: No such file or directory"
+        PSI is switched off in this kernel. See the tip in the PSI section,
+        or skip the PSI part and watch `memory.current` and `memory.events`.
 
     **Clean up:** press ++ctrl+c++ in terminal A; the scope disappears.
 
@@ -1185,7 +1262,8 @@ time.sleep(600)
        `memory: usage … limit` line, the tasks table, the `constraint=`, and
        the `Killed process` line.
 
-    **Check your work:** the unit log stops near `250 MiB`, `memory.events`
+    **Check your work:** the unit log stops at about `240 MiB` (bash and
+    the Python interpreter use some of the 256 MiB), `memory.events`
     shows `oom 1` and `oom_kill 1`, and the kernel log line starts with
     `Memory cgroup out of memory: Killed process … (python3)`. `bash` (the
     `sleep 600`) is still alive in the cgroup.

@@ -141,6 +141,16 @@ Oct 15 10:02:11 rocky-lab kernel: crashme[4321]: segfault at 20 ip 0000000000401
   crash happened inside that library, though the bug is usually in whoever
   called it with bad arguments.
 
+??? question "Under the hood: why some segfaults leave no log line"
+    These one-liners are controlled by the `debug.exception-trace` sysctl
+    (`1` by default on x86_64) and are **rate-limited** by the kernel's
+    printk limiter. A service that segfaults in a tight restart loop logs the
+    first few crashes, then the kernel prints `… callbacks suppressed` and goes
+    quiet. Absence of the line is not proof that nothing crashed: check
+    `coredumpctl list` and the unit's `NRestarts` too. The `likely on CPU`
+    suffix (kernel 6.1+) exists for fleet operators: if every segfault on a
+    host lands on the same core, suspect the hardware, not the software.
+
 <div class="quiz" data-answer="3" markdown>
 
 A service shows `code=killed, status=9/KILL` and there is no core dump. What
@@ -174,8 +184,8 @@ kernel.core_pattern = |/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h %d
 The leading `|` means "don't write a file, **pipe** the dump into this
 program". The `%` codes pass details along: `%P` the PID, `%u`/`%g` the user
 and group, `%s` the signal, `%t` the time, `%c` the core size limit, `%h` the
-hostname. systemd sets this value at boot from
-`/usr/lib/sysctl.d/50-coredump.conf`.
+hostname, `%d` the dump mode and `%F` a pidfd for the dying process. systemd
+sets this value at boot from `/usr/lib/sysctl.d/50-coredump.conf`.
 
 ```mermaid
 flowchart LR
@@ -201,6 +211,28 @@ $ ls -lh /var/lib/systemd/coredump/
 The name encodes the executable, UID, boot ID, PID and timestamp. The `+`
 is an ACL that lets the crashing user read their own core.
 
+??? question "Under the hood: the two halves of systemd-coredump"
+    The program the kernel starts from `core_pattern` is a short-lived
+    helper running outside any service sandbox. It reads the core from its
+    stdin, then hands it over the socket `/run/systemd/coredump` to a fresh
+    instance of `systemd-coredump@.service`, which does the slow work
+    (compressing, writing, building the stack trace) under systemd's
+    resource limits. So when a dump goes missing, look in two places:
+    `journalctl -t systemd-coredump` and
+    `journalctl -u 'systemd-coredump@*'`.
+
+    The same `50-coredump.conf` also sets `kernel.core_pipe_limit=16`
+    (the kernel keeps up to 16 crashing processes alive until the helper has
+    read their `/proc/<pid>` data) and `fs.suid_dumpable=2`, so even setuid
+    programs dump core, with the result readable only by root.
+
+    One more knob decides *what* goes into a core:
+    `/proc/<pid>/coredump_filter`, a per-process bit mask inherited across
+    `fork()`. The default `00000033` includes private and shared anonymous
+    memory and ELF headers, but not file-backed mappings. A database with a
+    100 GB shared buffer pool therefore produces a 100 GB core; clear bit 1
+    (`echo 0x31 > /proc/<pid>/coredump_filter`) to leave shared memory out.
+
 !!! version "Rocky 9 vs 10: no ABRT"
     Older RHEL-family guides talk about **ABRT** (the Automatic Bug Reporting
     Tool, `abrtd`, `/var/spool/abrt`). Red Hat dropped ABRT in RHEL 9 and
@@ -219,7 +251,7 @@ work", one of these is the reason.
 | `Storage=` | `coredump.conf` | `external` | `external` = file in /var/lib, `journal` = inside the journal, `none` = log only |
 | `ProcessSizeMax=`, `ExternalSizeMax=` | `coredump.conf` | 32G on 64-bit | Bigger processes are logged but not stored |
 | `MaxUse=`, `KeepFree=` | `coredump.conf` | 10% of the filesystem used, 15% kept free | Old cores are deleted to respect these |
-| `fs.suid_dumpable` | sysctl | `0` on hardened setups, check yours | Whether setuid programs may dump core at all |
+| `fs.suid_dumpable` | sysctl | `2` (set by systemd's `50-coredump.conf`); hardening guides set `0` | Whether setuid programs may dump core at all |
 
 Check your shell's limit first. If it is zero, the journal will say so:
 
@@ -487,16 +519,29 @@ Installing dependencies:
  …
 ```
 
-Passing `--enablerepo='*debug*'` makes the command work whatever the exact
-repo IDs are on your minor release. Even better, `gdb` tells you what to
-install. When it opens a core with missing symbols it prints a line like:
+Why the explicit `--enablerepo`? The plugin only switches on debug repos
+whose IDs follow the `<repo>-debuginfo` naming, and Rocky's are named
+`<repo>-debug`. The wildcard works whatever the IDs are. Even better, `gdb`
+tells you what to install. When it opens a core with missing symbols it
+prints a hint like:
 
 ```text
-Missing separate debuginfos, use: dnf debuginfo-install glibc-2.39-37.el10.x86_64
+Missing rpms, try: dnf --enablerepo='*debug*' install glibc-debuginfo-2.39-37.el10.x86_64
 ```
 
-Copy that line, add `sudo` and `--enablerepo='*debug*'`, run it, and reopen
-the core.
+Older gdb builds (Rocky 9) word it as `Missing separate debuginfos, use:
+dnf debuginfo-install …`. Either way, copy the command, add `sudo`, run it,
+and reopen the core.
+
+??? question "Under the hood: why you see function names without debuginfo"
+    Even before you install anything, `coredumpctl info` often shows real
+    function names. Rocky's binaries carry **MiniDebugInfo**: a small,
+    xz-compressed symbol table hidden in an ELF section called
+    `.gnu_debugdata`. It holds function names only, with no files, lines or
+    variables. Check for it with
+    `readelf -S /usr/bin/sleep | grep gnu_debugdata`. That is why a stack
+    trace can say `clock_nanosleep` but `bt full` still shows no locals
+    until the real `-debuginfo` package is installed.
 
 !!! pitfall "Debug packages for an old kernel or package"
     Rocky's main mirrors only carry the current minor release. If the crash
@@ -505,34 +550,30 @@ the core.
     debuginfo soon after a crash, or better, keep the exact versions in your
     own mirror for important hosts.
 
-### debuginfod: symbols on demand
+??? question "Under the hood: debuginfod, symbols on demand"
+    **debuginfod** is an HTTP service that serves debug info and source by
+    build ID. Tools built with `libdebuginfod` (gdb, `eu-stack`, `perf`)
+    download exactly the files they need instead of you installing whole
+    packages. They find servers through one environment variable:
 
-**debuginfod** is an HTTP service that serves debug info and source by
-build ID. Tools built with `libdebuginfod` (gdb, `eu-stack`,
-`systemd-coredump`'s stack traces, `perf`) download exactly the files they
-need, on demand, instead of you installing whole packages. They find servers
-through one environment variable:
+    ```console
+    $ echo $DEBUGINFOD_URLS
 
-```console
-$ echo $DEBUGINFOD_URLS
+    $ cat /etc/debuginfod/*.urls 2>/dev/null
+    ```
 
-$ cat /etc/debuginfod/*.urls 2>/dev/null
-```
+    `DEBUGINFOD_URLS` is a space-separated list of server URLs, set at login
+    by `/etc/profile.d/debuginfod.sh` from the files in `/etc/debuginfod/`
+    (package `elfutils-debuginfod-client`). If both are empty, as above, no
+    server is configured and `gdb` only uses locally installed debuginfo.
 
-`DEBUGINFOD_URLS` is a space-separated list of server URLs, set at login by
-`/etc/profile.d/debuginfod.sh` from the files in `/etc/debuginfod/` (part of
-`elfutils-debuginfod-client`). If both are empty, as above, no server is
-configured and `gdb` will only use locally installed debuginfo.
-
-!!! note "Is there a Rocky debuginfod server?"
     We could not confirm that the Rocky project runs a public debuginfod
-    server for Rocky 10, so check your own system's `/etc/debuginfod/`
-    rather than trusting a blog post. Upstream servers such as Fedora's only
-    know Fedora builds, and build IDs never match across distributions, so
-    pointing Rocky at them won't help. You can run your own server with the
-    `elfutils-debuginfod` package, indexing a directory of debuginfo RPMs
-    (`debuginfod -R /srv/debuginfo-rpms`), which is a nice upgrade for a
-    fleet. Otherwise, `dnf debuginfo-install` is the reliable path.
+    server, so trust what your own `/etc/debuginfod/` says. Fedora's or
+    another distribution's server won't help: build IDs never match across
+    distributions. For a fleet, run your own with the `elfutils-debuginfod`
+    package, indexing a directory of debuginfo RPMs
+    (`debuginfod -R /srv/debuginfo-rpms`). Otherwise, `dnf debuginfo-install`
+    is the reliable path.
 
 ## gdb for admins
 
@@ -673,8 +714,8 @@ Thread 1 (Thread 0x7f2a1e2f6740 (LWP 2817) "myapp"):
 #1  0x0000000000402f40 in main ()
 ```
 
-`gstack` (with the older alias `pstack` on some releases) ships with `gdb`.
-If neither exists, the same thing is one line of `gdb`:
+`gstack` (and its alias `pstack`) ships in the `gdb` package: it is a small
+script that runs gdb in batch mode. The same thing as one line of `gdb`:
 
 ```console
 $ sudo gdb -p 2817 -batch -ex 'thread apply all bt' 2>/dev/null
@@ -938,10 +979,12 @@ kdump: Reserved 256MB memory for crash kernel
 
 !!! version "Rocky 9 vs 10"
     On Rocky 9, everything lives in the single `kexec-tools` package. Rocky 10
-    splits out `kdump-utils` and `makedumpfile`. Rocky 10 also rejects the older
-    three-range `crashkernel=1G-4G:192M,…` syntax: use `kdumpctl
-    reset-crashkernel` to set the current default instead of copying values
-    from old guides.
+    splits out `kdump-utils` and `makedumpfile`. The default reservation also
+    changed: Rocky 10 uses `crashkernel=2G-64G:256M,64G-:512M` (so a VM with
+    less than 2 GB reserves nothing), and Red Hat documents the old
+    `1G-4G:192M,4G-64G:256M,64G-:512M` value as no longer supported. Use
+    `kdumpctl reset-crashkernel` to set the current default instead of
+    copying values from old guides.
 
 If `showmem` reports 0 MB, no memory is reserved and kdump can't work. The
 supported way to set the default reservation is:
@@ -955,26 +998,42 @@ $ sudo reboot
 storage drivers need more). If the capture kernel runs out of memory during a
 test, raise the value with `grubby --update-kernel=ALL --args=crashkernel=…`.
 
+The reservation is real RAM taken away at boot. It shows up as
+`Crash kernel` in `/proc/iomem` (`sudo grep -i crash /proc/iomem`) and is
+missing from `MemTotal`, which is one reason `free` never shows the full
+amount of RAM you paid for ([module 25](25-memory-deep-dive.md)).
+
 The behaviour is controlled by one well-commented file:
 
-```ini title="/etc/kdump.conf (default, comments removed)"
-auto_reset_crashkernel yes  # (1)!
-path /var/crash  # (2)!
-core_collector makedumpfile -l --message-level 7 -d 31  # (3)!
+```text title="/etc/kdump.conf (default, comments removed)"
+auto_reset_crashkernel yes
+path /var/crash
+core_collector makedumpfile -l --message-level 7 -d 31
 ```
 
-1. When a new kernel or kdump-utils is installed, refresh `crashkernel=` to the current default.
-2. Directory on the dump target. With no target line, that's the root filesystem.
-3. `-l` compresses with LZO, `-d 31` drops free, cache, zero and user pages.
+- `auto_reset_crashkernel yes`: when a new kernel or kdump-utils is
+  installed, refresh `crashkernel=` to the current default.
+- `path`: directory on the dump target. With no target line, that's the
+  root filesystem.
+- `core_collector`: `-l` compresses with LZO, `-d 31` drops free, cache,
+  zero and user pages.
 
-Common additions are a remote target, so a dying disk can't eat the
-evidence, and a different final action:
+See your own file with `grep -v '^#' /etc/kdump.conf | grep .`; the shipped
+defaults can change between minor releases.
 
-```ini title="/etc/kdump.conf (additions)"
-nfs nfs1.example.com:/export/crash
-# or: ssh kdump@crash1.example.com  (then run: kdumpctl propagate)
-failure_action reboot
-```
+??? question "Going further: dump to another machine"
+    A dying disk or a full `/var` can eat the evidence. kdump can write the
+    vmcore over the network instead:
+
+    ```text title="/etc/kdump.conf (additions)"
+    nfs nfs1.example.com:/export/crash
+    failure_action reboot
+    ```
+
+    For SSH, use `ssh kdump@crash1.example.com` plus
+    `sshkey /root/.ssh/kdump_id_rsa`, then run `sudo kdumpctl propagate` to
+    install the key on the server. The kdump initramfs must contain the NIC
+    driver and network config, which `kdumpctl restart` adds for you.
 
 After **any** edit, rebuild and reload with `sudo kdumpctl restart` (or
 `sudo systemctl restart kdump`), then check `kdumpctl status`. The kdump
@@ -1096,6 +1155,14 @@ Oct 15 03:12:40 db1 kernel: INFO: task postgres:4410 blocked for more than 120 s
 
 A soft lockup threshold of `2 × watchdog_thresh` gives the 20 seconds.
 
+!!! pitfall "The hung task detector goes quiet after 10 reports"
+    `kernel.hung_task_warnings` (default `10`) is a countdown: each report
+    decrements it, and at `0` the detector stops printing until reboot. On a
+    box with a flaky NFS mount, the first ten warnings may be from last week
+    and the hang you care about today logs nothing. Check
+    `sysctl kernel.hung_task_warnings`, and set it to `-1` for unlimited
+    while you investigate.
+
 ### Magic SysRq: talking to a sick kernel
 
 **Magic SysRq** is a set of single-letter commands handled directly by the
@@ -1121,21 +1188,20 @@ root always work, whatever that value says. The classic emergency sequence on
 a wedged box is `s`, `u`, `b`: sync, remount read-only, reboot. On a box where
 you want evidence, `w` first, then `c` with kdump armed.
 
-### netconsole: logs that leave the box
+??? question "Going further: netconsole, logs that leave the box"
+    If the machine dies before the journal reaches disk, the last kernel
+    messages are lost. **netconsole** is a kernel module that sends kernel
+    messages as UDP packets to another host as they happen:
 
-If the machine dies before the journal reaches disk, the last kernel messages
-are lost. **netconsole** is a kernel module that sends kernel messages as UDP
-packets to another host as they happen:
+    ```console
+    $ sudo modprobe netconsole netconsole=6665@192.168.122.50/enp1s0,6666@192.168.122.1/52:54:00:12:34:56
+    ```
 
-```console
-$ sudo modprobe netconsole netconsole=6665@192.168.122.50/enp1s0,6666@192.168.122.1/52:54:00:12:34:56
-```
-
-The format is `local-port@local-ip/interface,remote-port@remote-ip/remote-mac`.
-On the receiving host, anything that listens on UDP 6666 works (for example
-`nc -u -l 6666`, or rsyslog with a UDP input). It's a cheap way to catch the
-last words of a machine that hard-hangs. kdump's `ssh` and `nfs` targets
-cover the same need for full dumps.
+    The format is `local-port@local-ip/interface,remote-port@remote-ip/remote-mac`.
+    On the receiving host, anything that listens on UDP 6666 works (for
+    example `nc -u -l 6666`, or rsyslog with a UDP input). It's a cheap way to
+    catch the last words of a machine that hard-hangs. Remove it with
+    `sudo modprobe -r netconsole`.
 
 ## Which tool when: a decision tree
 
@@ -1238,7 +1304,8 @@ You set up kdump, but after a test crash no vmcore appears and
 
 Right. Without a reservation, there is nowhere to load the capture kernel.
 Run `kdumpctl reset-crashkernel --kernel=ALL`, reboot, and check `showmem`
-again.
+again. On a VM with under 2 GB of RAM the default range reserves nothing at
+all, so give the VM more memory first.
 
 </div>
 
@@ -1306,8 +1373,8 @@ reboot the VM: **snapshot it first**.
         ```
 
     2. Open it: `coredumpctl debug sleep`. Run `bt`. Note the `??` frames or
-       bare function names with no file and line, and the
-       `Missing separate debuginfos` hint. `quit`.
+       bare function names with no file and line, and the `Missing rpms`
+       (or `Missing separate debuginfos`) hint. `quit`.
     3. Install the symbols gdb asked for:
 
         ```bash
@@ -1370,8 +1437,10 @@ reboot the VM: **snapshot it first**.
     **Goal:** Arm kdump, crash the kernel deliberately, and collect a vmcore.
 
     !!! danger "This lab panics the kernel"
-        Snapshot the VM first. Run this only in a disposable VM with at least
-        2 GB of RAM (the default reservation needs it).
+        Snapshot the VM first. Run this only in a disposable VM with 3 GB of
+        RAM or more: the default `crashkernel=2G-64G:256M,…` reserves nothing
+        on a machine that the kernel sees as having less than 2 GB, and a
+        "2 GB" VM usually comes in just under that.
 
     1. Check the pieces:
 
