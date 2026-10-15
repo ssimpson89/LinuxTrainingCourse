@@ -1,5 +1,5 @@
-site_name: Linux Training Course
-site_description: Linux Internals training track
+site_name: Rocky Linux Deep Dive
+site_description: An easy-to-follow, hands-on deep dive into how Rocky Linux really works.
 docs_dir: content
 site_dir: dist
 
@@ -7,6 +7,12 @@ theme:
   name: material
   icon:
     logo: material/console-line
+    admonition:
+      lab: material/flask-outline
+      analogy: material/lightbulb-on-outline
+      version: material/source-branch
+      pitfall: material/alert-octagon-outline
+      recap: material/check-all
   font:
     text: Inter
     code: JetBrains Mono
@@ -28,6 +34,7 @@ theme:
   features:
     - navigation.instant
     - navigation.tracking
+    - navigation.sections
     - navigation.top
     - navigation.footer
     - toc.follow
@@ -36,9 +43,19 @@ theme:
     - content.code.copy
     - content.code.select
     - content.code.annotate
+    - content.tabs.link
+    - content.tooltips
 
 extra_css:
   - stylesheets/extra.css
+  - stylesheets/widgets.css
+
+extra_javascript:
+  - javascripts/widgets.js
+
+extra:
+  # Base URL for man page references written as [[man:systemctl(1)]].
+  man_site: https://rockyman.org/
 
 hooks:
   - hooks/wikilinks.py
@@ -48,37 +65,65 @@ plugins:
 
 nav:
   - Home: index.md
-  - '00 · Track Overview': 00-track-overview.md
-  - '01 · Permissions and Access Control': 01-permissions-and-access-control.md
-  - '02 · Users, Authentication and PAM': 02-users-authentication-and-pam.md
-  - '03 · Processes, Scheduling and Signals': 03-processes-scheduling-and-signals.md
-  - '04 · Filesystems and the VFS': 04-filesystems-and-the-vfs.md
-  - '05 · Storage and LVM': 05-storage-and-lvm.md
-  - '06 · Networking Deep': 06-networking-deep.md
-  - '07 · systemd': 07-systemd.md
-  - '08 · Boot and Init': 08-boot-and-init.md
-  - '09 · The Kernel': 09-the-kernel.md
-  - '10 · Namespaces and cgroups v2': 10-namespaces-and-cgroups-v2.md
-  - '11 · Observability and Tracing with eBPF': 11-observability-and-tracing-with-ebpf.md
-  - '12 · SELinux and Hardening': 12-selinux-and-hardening.md
-  - '13 · Samba and SMB': 13-samba-and-smb.md
-  - '14 · Early Userspace: dracut, udev, initqueue': 14-early-userspace-dracut-hooks-udev-and-the-initqueue.md
+  - Getting Grounded:
+      - '00 · Start Here': 00-start-here.md
+      - '01 · How Linux Works': 01-how-linux-works.md
+      - '02 · The Shell and the Filesystem': 02-shell-and-filesystem.md
+  - Running the System:
+      - '03 · Users, Groups and sudo': 03-users-groups-and-sudo.md
+      - '04 · Permissions and ACLs': 04-permissions-and-acls.md
+      - '05 · Software: RPM and DNF': 05-software-rpm-and-dnf.md
+      - '06 · Processes and Signals': 06-processes-and-signals.md
+      - '07 · systemd and Services': 07-systemd-and-services.md
+      - '08 · Logging and the Journal': 08-logging-and-the-journal.md
+  - Storage and Networking:
+      - '09 · Disks and Filesystems': 09-disks-and-filesystems.md
+      - '10 · LVM, RAID and Encryption': 10-lvm-raid-and-encryption.md
+      - '11 · Networking': 11-networking.md
+      - '12 · Firewalls with firewalld': 12-firewalld.md
+      - '13 · File Sharing: NFS and Samba': 13-nfs-and-samba.md
+  - Under the Hood:
+      - '14 · The Boot Process': 14-the-boot-process.md
+      - '15 · The Kernel': 15-the-kernel.md
+      - '16 · SELinux': 16-selinux.md
+      - '17 · Security Hardening': 17-security-hardening.md
+      - '18 · Containers from the Ground Up': 18-containers.md
+      - '19 · Performance and Observability': 19-performance-and-observability.md
+  - Putting It Together:
+      - '20 · Troubleshooting Playbook': 20-troubleshooting-playbook.md
+      - Command Cheat Sheet: cheat-sheet.md
+      - Glossary: glossary.md
 
 markdown_extensions:
   - tables
+  - abbr
   - admonition
   - attr_list
+  - def_list
+  - footnotes
   - md_in_html
-  - pymdownx.superfences
+  - pymdownx.snippets:
+      auto_append:
+        - includes/abbreviations.md
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight:
       use_pygments: true
+      anchor_linenums: true
   - pymdownx.tasklist:
       custom_checkbox: true
   - pymdownx.details
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.inlinehilite
+  - pymdownx.keys
   - pymdownx.mark
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - toc:
       permalink: true
-      toc_depth: 2
+      toc_depth: 3

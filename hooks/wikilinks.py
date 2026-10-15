@@ -8,6 +8,9 @@ render as plain text rather than raw brackets.
 
 Wikilinks inside fenced code blocks and inline code spans are left alone:
 shell snippets legitimately contain ``[[ ... ]]`` tests and grep patterns.
+
+``[[man:systemctl(1)]]`` renders as a man page badge linking to the Rocky
+Linux man page site configured as ``extra.man_site`` in mkdocs.yml.
 """
 
 import re
@@ -18,11 +21,20 @@ _PROTECTED = re.compile(
     r"(?ms)(^[ \t]*(?P<fence>```+|~~~+).*?^[ \t]*\2[ \t]*$|`+[^`\n]*`+)"
 )
 
+_MAN = re.compile(r"^man:\s*([\w.+:-]+)\((\w+)\)$")
+
 _slugs = set()
+_man_site = "https://rockyman.org/"
 
 
 def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def on_config(config, **kwargs):
+    global _man_site
+    _man_site = (config.get("extra") or {}).get("man_site", _man_site)
+    return config
 
 
 def on_files(files, config, **kwargs):
@@ -34,6 +46,13 @@ def on_files(files, config, **kwargs):
 
 
 def _replace(match: re.Match) -> str:
+    man = _MAN.match(match.group(1).strip())
+    if man:
+        name, section = man.groups()
+        return (
+            f'<a class="man-ref" href="{_man_site}" title="Read {name}({section}) '
+            f'on Rocky Linux: run man {section} {name}">{name}({section})</a>'
+        )
     target, _, alias = match.group(1).partition("|")
     text = (alias or target).strip()
     slug = _slugify(target.strip())
