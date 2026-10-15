@@ -149,17 +149,20 @@ Use `bash` blocks for scripts and files you write, `ini` for unit files and
 `.conf` files, `text` for plain listings. Give a file a title:
 ```` ```ini title="/etc/systemd/system/hello.service" ````.
 
-Use code annotations to explain parts of a command or config:
+Use code annotations to explain parts of a command or script, but **only in
+languages that allow a trailing `#` comment** (bash, YAML, Python). systemd
+units, `journald.conf`, logrotate and other ini-style files do not accept
+trailing comments, so a reader who copies an annotated line gets a broken
+config. For those, explain the lines in a list under the block.
 
 ````markdown
-```ini
-[Service]
-ExecStart=/usr/local/bin/hello  # (1)!
-Restart=on-failure  # (2)!
+```bash
+dnf -y install httpd  # (1)!
+systemctl enable --now httpd  # (2)!
 ```
 
-1. The command systemd runs. Must be an absolute path.
-2. Restart only when it exits non-zero or is killed by a signal.
+1. Install the Apache web server package.
+2. Start it now and at every boot.
 ````
 
 Keyboard keys: `++ctrl+c++`.

@@ -269,6 +269,69 @@ persistent (next section): a volatile journal forgets earlier boots.
 
 </div>
 
+### Practice: query the journal
+
+<div class="terminal-sim" data-title="Journal detective" markdown>
+
+<div class="task" data-expect="journalctl -u sshd||journalctl -u sshd.service" data-hint="-u filters by unit." markdown>
+
+**Step 1.** Show every journal entry from the SSH server's unit.
+
+```text
+Oct 13 09:12:45 rocky10 systemd[1]: Starting sshd.service - OpenSSH server daemon...
+Oct 13 09:12:45 rocky10 sshd[899]: Server listening on 0.0.0.0 port 22.
+Oct 13 09:12:45 rocky10 systemd[1]: Started sshd.service - OpenSSH server daemon.
+```
+
+</div>
+
+<div class="task" data-expect="journalctl -b -p err||journalctl -p err -b||journalctl -b -p 3||journalctl -p 3 -b" data-hint="Combine -b (this boot) with -p (priority)." markdown>
+
+**Step 2.** Show only errors (and worse) from the current boot.
+
+```text
+Oct 15 09:02:11 rocky10 kernel: ACPI: _OSC evaluation for CPUs failed, trying _PDC
+Oct 15 11:20:41 rocky10 kernel: Out of memory: Killed process 4120 (python3) …
+```
+
+</div>
+
+<div class="task" data-expect="journalctl --list-boots" data-hint="There's a --list-something option for boots." markdown>
+
+**Step 3.** How many boots does this journal remember?
+
+```text
+IDX BOOT ID                          FIRST ENTRY                 LAST ENTRY
+ -1 5a7d3e2c1b0a49f8e7d6c5b4a3928170 Wed 2026-10-14 08:55:02 UTC Wed 2026-10-14 18:01:44 UTC
+  0 8e4c2f0d6a7b4e1c9d3f5a6b7c8d9e0f Thu 2026-10-15 09:02:09 UTC Thu 2026-10-15 13:40:11 UTC
+```
+
+</div>
+
+<div class="task" data-expect="journalctl -k||journalctl --dmesg||journalctl -k -b||journalctl -b -k" data-hint="One short option selects kernel messages, like dmesg." markdown>
+
+**Step 4.** Show the kernel's messages through the journal instead of `dmesg`.
+
+```text
+Oct 15 09:02:09 rocky10 kernel: Linux version 6.12.0-55.12.1.el10_0.x86_64 …
+Oct 15 09:02:09 rocky10 kernel: Command line: BOOT_IMAGE=(hd0,gpt2)/vmlinuz-6.12.0-55.12.1.el10_0.x86_64 root=/dev/mapper/rl-root ro …
+…
+```
+
+</div>
+
+<div class="task" data-expect="logger -t practice hello" data-match="logger +(-t +practice +['\x22]?hello['\x22]?|['\x22]?hello['\x22]? +-t +practice)" data-hint="logger -t sets the tag; the message comes after it." markdown>
+
+**Step 5.** Write the message `hello` to the system log with the tag `practice`.
+
+```text
+(no output: check it with journalctl -t practice)
+```
+
+</div>
+
+</div>
+
 ## Persistent versus volatile journal
 
 journald can store its files in two places:
@@ -312,6 +375,32 @@ flowchart TD
     C -- no --> E
     E --> F["lost at reboot"]
 ```
+
+### Prove it: where the journal really is
+
+Ask journald itself which files it's using and how big they are:
+
+```console
+$ sudo ls -l /var/log/journal/$(cat /etc/machine-id)/
+-rw-r-----+ 1 root systemd-journal 16777216 Oct 15 09:02 system@8f1d…-0000000000000001-00063f….journal
+-rw-r-----+ 1 root systemd-journal  8388608 Oct 15 13:40 system.journal
+-rw-r-----+ 1 root systemd-journal  8388608 Oct 15 13:38 user-1000.journal
+$ journalctl --header --file /var/log/journal/$(cat /etc/machine-id)/system.journal | head -4
+File path: /var/log/journal/2b1e…/system.journal
+File ID: 51c0…
+Machine ID: 2b1e…
+Boot ID: 8e4c2f0d6a7b4e1c9d3f5a6b7c8d9e0f
+```
+
+The directory is named after the **machine ID** (`/etc/machine-id`), a
+unique ID generated at install. `system.journal` is the active file;
+names with `@` are archived (rotated) files that are never modified again.
+`user-1000.journal` holds messages from UID 1000's own processes, which is how
+normal users can read their own logs. The `+` after the permissions means an
+ACL grants read access to groups like `wheel` and `adm`. Journal files are
+binary, so read them with `journalctl` (`--file` or `-D <dir>` reads
+copies, for example from a dead server's disk), and check them for corruption
+with `journalctl --verify`.
 
 ### Configuring journald
 
@@ -408,6 +497,21 @@ disable it, but leave it on while you learn.
     [16 · SELinux](16-selinux.md) and
     [17 · Security Hardening](17-security-hardening.md).
 
+<div class="quiz" data-answer="2" markdown>
+
+A colleague asks where to look for failed `sudo` attempts on a Rocky server
+using only text files. Where do you point them?
+
+- `/var/log/messages`
+- `/var/log/secure`
+- `/var/log/audit/audit.log` only
+- `/var/log/cron`
+
+Correct. `sudo` and PAM log to the `authpriv` facility, which rsyslog writes
+to `/var/log/secure` (and excludes from `messages` with `authpriv.none`).
+
+</div>
+
 ## logrotate: keeping text logs in check
 
 Text log files grow forever unless something trims them. **logrotate**
@@ -457,6 +561,21 @@ $ systemctl list-timers logrotate.timer
 
 The journal doesn't need logrotate: journald rotates and vacuums its own files
 using the limits you set in `journald.conf`.
+
+<div class="quiz" data-answer="3" markdown>
+
+You rotated `/var/log/myapp.log` by renaming it, but the app keeps writing
+into `myapp.log-20261015` instead of the new file. Why?
+
+- logrotate forgot to create the new file
+- The disk is full
+- The app still holds an open file descriptor to the renamed file; it must be told to reopen (`postrotate`) or use `copytruncate`
+- Log files can't be renamed while SELinux is enforcing
+
+Right. A rename doesn't affect an open file descriptor. That's why rules
+usually send a reload or `HUP` in `postrotate`.
+
+</div>
 
 ## Writing your own log messages
 
@@ -864,6 +983,84 @@ from this module. Pick the noisiest or earliest source and go back to
 | `systemd-cat -t tag <cmd>` | Send a command's output to the journal |
 | `logrotate -d <conf>` / `-f <conf>` | Dry-run / force rotation |
 | `ausearch -m avc -ts recent` | Recent SELinux denials (audit log) |
+
+## Flashcards
+
+<div class="flashcards" markdown>
+
+<div class="card" markdown>
+
+Who writes `/var/log/messages` on Rocky Linux?
+
+rsyslog, which reads messages from the journal (via `imjournal`) and writes them out by facility and priority.
+
+</div>
+
+<div class="card" markdown>
+
+Which file holds SSH logins and `sudo` use?
+
+`/var/log/secure` (the `authpriv` facility), and the journal (`journalctl -u sshd`).
+
+</div>
+
+<div class="card" markdown>
+
+With `Storage=auto`, when is the journal persistent?
+
+Only if `/var/log/journal/` exists. Otherwise it lives in `/run/log/journal/` and is lost at reboot.
+
+</div>
+
+<div class="card" markdown>
+
+What does `journalctl -p err` show?
+
+Messages with priority `err` (3) and everything more severe: `crit`, `alert`, `emerg`.
+
+</div>
+
+<div class="card" markdown>
+
+What's special about journal fields that start with `_`, like `_PID`?
+
+They're trusted: journald fills them in from the kernel, so the logging program can't fake them.
+
+</div>
+
+<div class="card" markdown>
+
+Where do you configure journald on Rocky 10 without fighting package updates?
+
+A drop-in such as `/etc/systemd/journald.conf.d/50-local.conf`, then restart `systemd-journald`.
+
+</div>
+
+<div class="card" markdown>
+
+What runs logrotate on Rocky Linux?
+
+`logrotate.timer`, a systemd timer, once a day.
+
+</div>
+
+<div class="card" markdown>
+
+Where are SELinux denials logged?
+
+In the audit log, `/var/log/audit/audit.log`, written by `auditd`. Search with `ausearch -m avc`.
+
+</div>
+
+<div class="card" markdown>
+
+In rsyslog, what's the difference between `@host` and `@@host`?
+
+`@` forwards over UDP; `@@` forwards over TCP.
+
+</div>
+
+</div>
 
 ## Recap
 

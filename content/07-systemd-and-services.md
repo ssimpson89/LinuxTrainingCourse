@@ -246,7 +246,7 @@ Description=OpenSSH server daemon
 
 </div>
 
-<div class="task" data-expect="systemd-analyze calendar weekly||systemd-analyze calendar 'weekly'||systemd-analyze calendar &quot;weekly&quot;" data-hint="systemd-analyze has a calendar verb that explains OnCalendar= expressions." markdown>
+<div class="task" data-expect="systemd-analyze calendar weekly||systemd-analyze calendar 'weekly'" data-hint="systemd-analyze has a calendar verb that explains OnCalendar= expressions." markdown>
 
 **Step 5.** When would a timer with `OnCalendar=weekly` next fire?
 
@@ -518,15 +518,13 @@ happens to start PostgreSQL.
 
 ```mermaid
 flowchart LR
-    subgraph "Requirement: who gets pulled in"
-      A1["myapp.service"] -- "Wants=" --> B1["postgresql.service"]
-    end
-    subgraph "Ordering: who goes first"
-      B2["postgresql.service"] -- "starts before (myapp has After=)" --> A2["myapp.service"]
-    end
+    A["myapp.service"] == "Wants= : start postgresql too" ==> B["postgresql.service"]
+    B -. "After= on myapp : postgresql must be up first" .-> A
 ```
 
-You almost always want both together:
+The thick arrow is the **requirement** (who gets pulled in); the dotted arrow
+is the **ordering** (who goes first). They are two separate lines in the unit
+file:
 
 ```ini
 [Unit]
@@ -700,6 +698,22 @@ events: `OnBootSec=10min` (10 minutes after boot), `OnUnitActiveSec=1h`
 !!! tip "One-off timers without files"
     `sudo systemd-run --on-active=30m /usr/bin/systemctl restart httpd`
     schedules a single run 30 minutes from now, as a transient unit.
+
+<div class="quiz" data-answer="1" markdown>
+
+You created `backup.service` and `backup.timer`, ran
+`sudo systemctl enable --now backup.service`, and the job never runs on
+schedule. What went wrong?
+
+- You enabled the service, not the timer; the timer is what must be enabled and started
+- Timers only work with `Type=simple` services
+- `OnCalendar=` needs a cron-style expression
+- You forgot `RemainAfterExit=yes`
+
+Right. The timer unit carries the schedule and the `[Install]` section. Run
+`sudo systemctl enable --now backup.timer` and check `systemctl list-timers`.
+
+</div>
 
 ## Socket activation
 
