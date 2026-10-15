@@ -428,7 +428,7 @@ Dozens of programs do cryptography: OpenSSH, OpenSSL (used by `curl`, `httpd`, P
 $ update-crypto-policies --show
 DEFAULT
 $ ls /etc/crypto-policies/back-ends/
-bind.config  gnutls.config  java.config  krb5.config  libreswan.config  libssh.config  nss.config  openssh.config  opensshserver.config  openssl.config  …
+bind.config  gnutls.config  java.config  krb5.config  libreswan.config  libssh.config  nss.config  openssh.config  opensshserver.config  opensslcnf.config  …
 ```
 
 The policy levels are:
@@ -436,11 +436,11 @@ The policy levels are:
 | Policy | Use it when |
 |---|---|
 | `DEFAULT` | Almost always. Secure settings that still talk to the modern world. |
-| `LEGACY` | You must talk to very old systems. Weakens everything; use only temporarily. |
-| `FUTURE` | You want stronger, forward-looking settings and can accept that many peers will fail. On Rocky 10.1 it allows **only** hybrid post-quantum key exchange, which most of the internet does not offer yet. Lab and isolated networks only. |
+| `LEGACY` | You must talk to very old systems. Re-allows SHA-1 signatures, TLS RSA key exchange and CBC ciphers (still TLS 1.2 minimum); use only temporarily. |
+| `FUTURE` | You want stronger, forward-looking settings and can accept that many peers will fail. It requires 3072-bit RSA keys, which rejects most public certificates. From Rocky 10.2 it also allows **only** TLS 1.3 with hybrid post-quantum key exchange, which most of the internet does not offer yet. Lab and isolated networks only. |
 | `FIPS` | Required by regulation, together with a FIPS-mode installation (see below). |
 
-You can also add **subpolicies** to adjust one aspect, written with a colon: `DEFAULT:NO-SHA1` or `DEFAULT:SHA1`. The available modules are in `/usr/share/crypto-policies/policies/modules/`. Prefer a narrow subpolicy over switching the whole machine to `LEGACY`.
+You can also add **subpolicies** to adjust one aspect, written with a colon: `DEFAULT:AD-SUPPORT` (Kerberos encryption types Active Directory needs) or, from Rocky 10.1, `DEFAULT:NO-PQ`. The available modules are in `/usr/share/crypto-policies/policies/modules/`, and the list differs between releases: Rocky 9's `SHA1` and `NO-SHA1` modules don't exist on Rocky 10.0 or 10.1. [Module 33](33-tls-and-crypto-policies.md#subpolicies-and-custom-modules) lists and explains each one. Prefer a narrow subpolicy over switching the whole machine to `LEGACY`.
 
 ```console
 $ sudo update-crypto-policies --set FUTURE
@@ -451,7 +451,7 @@ to fully take place.
 $ sudo update-crypto-policies --set DEFAULT
 ```
 
-Note the message: running programs keep the old settings until restarted. Switch back to `DEFAULT` right away on a lab VM: under `FUTURE` on Rocky 10.1, even `dnf` may fail to reach mirrors that do not offer post-quantum key exchange.
+Note the message: running programs keep the old settings until restarted. Switch back to `DEFAULT` right away on a lab VM: under `FUTURE` on Rocky 10.2 and later, even `dnf` may fail to reach mirrors that do not offer post-quantum key exchange (and on any release, servers with 2048-bit RSA certificates fail).
 
 ??? question "Under the hood: what a policy really is"
     A policy is a small text file of algorithm lists (`/usr/share/crypto-policies/policies/DEFAULT.pol`) plus optional subpolicy modules (`.pmod`). `update-crypto-policies` compiles them into one config snippet per library, in that library's own syntax, under `/etc/crypto-policies/back-ends/`. Each library is patched to read its snippet. For example, OpenSSH's `/etc/ssh/ssh_config.d/50-redhat.conf` includes `/etc/crypto-policies/back-ends/openssh.config`.
@@ -464,7 +464,7 @@ Note the message: running programs keep the old settings until restarted. Switch
     `update-crypto-policies --check` tells you whether the generated back-ends still match the configured policy (someone may have hand-edited them).
 
 !!! version "Rocky 10: post-quantum cryptography and FIPS"
-    Large future quantum computers could break today's key exchange algorithms, and an attacker can record traffic now to decrypt it later. **Post-quantum cryptography** (PQC) uses new algorithms, such as **ML-KEM** for key exchange, that resist this. In Rocky 10.0 PQC was a preview you had to switch on yourself. In **Rocky 10.1 and later, the predefined policies (including `DEFAULT`) enable and prefer hybrid ML-KEM key exchange** for TLS and SSH where both sides support it. If an old peer chokes on it, the `NO-PQ` subpolicy turns it off (`DEFAULT:NO-PQ`). You can see the preference in the SSH client's effective settings:
+    Large future quantum computers could break today's key exchange algorithms, and an attacker can record traffic now to decrypt it later. **Post-quantum cryptography** (PQC) uses new algorithms, such as **ML-KEM** for key exchange, that resist this. In Rocky 10.0 (OpenSSL 3.2) PQC was a technology preview you had to switch on yourself (the `crypto-policies-pq-preview` package and the `TEST-PQ` subpolicy); `DEFAULT` used classic X25519. In **Rocky 10.1 and later (OpenSSL 3.5), every predefined policy, including `DEFAULT`, enables and prefers hybrid ML-KEM key exchange** for TLS and SSH where both sides support it, falling back to classic key exchange otherwise. If an old peer or middlebox chokes on it, the `NO-PQ` subpolicy (new in 10.1) turns it off: `DEFAULT:NO-PQ`. [Module 33](33-tls-and-crypto-policies.md#post-quantum-tls-on-rocky-10) goes deeper. You can see the preference in the SSH client's effective settings:
 
     ```console
     $ ssh -G localhost | grep '^kexalgorithms'
@@ -1080,7 +1080,7 @@ maxauthtries 3
 | Audit rules cannot be changed | Rules loaded with `-e 2` (immutable) | Edit the files, then reboot |
 | `systemctl restart auditd` refused | auditd's unit forbids manual stop | `sudo service auditd restart`, or `augenrules --load` for rules |
 | AIDE report is pages of noise | Baseline never updated after patching | `aide --update` after reviewing, then promote the new DB |
-| Old client cannot connect after policy change | `FUTURE` (or no SHA-1) rejects its algorithms | Upgrade the client; use a narrow subpolicy if you must |
+| Old client cannot connect after policy change | `FUTURE` rejects its key size or algorithms, or (Rocky 10) it only speaks TLS RSA key exchange, which `DEFAULT` no longer allows | Upgrade the client; use a narrow subpolicy if you must |
 | `fips-mode-setup: command not found` | Removed in Rocky 10 | Reinstall with `fips=1` on the installer kernel command line |
 | A real user is locked out | faillock counted someone else's guesses | `faillock --user <name> --reset`; prefer keys and fail2ban for internet-facing SSH |
 | OpenSCAP remediation broke a service | Applied a generic profile blindly | Test on a VM first; record exceptions |
