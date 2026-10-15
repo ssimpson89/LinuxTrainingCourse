@@ -50,6 +50,38 @@ time understand it on one read, and would an expert nod along?*
 - Headings are sentence case and describe the idea: "How the shell finds a
   command", not "PATH".
 
+## Simple on top, deep underneath
+
+Every module must be easy to understand on a first read *and* go deep. We
+get both by layering, not by cutting. Module 16 (SELinux) is the reference
+example of this pattern.
+
+1. **One-sentence mental model first.** Early in "The big picture", state
+   the whole topic in one plain sentence, in a `>` blockquote. ("Every
+   process wears a badge, every file wears a sticker, and a rulebook lists
+   which badges may touch which stickers.") Everything after it hangs off
+   that sentence. Use the same vocabulary throughout the module.
+2. **"The few things that solve most problems" up front.** If the topic
+   has a small set of fixes, moves or concepts that cover most real
+   situations, give them as a table near the top, plus a short flow for
+   picking the right one.
+3. **A "Words you'll see" table** in the big picture: each term the module
+   uses, with a one-line plain meaning.
+4. **Teach the core skill early.** The thing a learner most needs to do
+   (read a denial, read `ip addr` output, read a boot log) comes before the
+   reference material, with a template for interpreting it and 2 to 3
+   practice examples with hidden answers (`??? success "Answer"`).
+5. **Worked stories over lists.** Each main concept gets at least one
+   example told as symptom → evidence (real command and output) →
+   reasoning → fix → check.
+6. **Fold, don't cut.** Internals, rarely used fields, history and edge
+   cases go in `??? question` collapsibles. A reader who skips every
+   collapsible must still get a correct, complete working model. An
+   expert who opens them all must still find the depth.
+7. **Plain words.** Short sentences. Define a term before using it. Prefer
+   "the web server's badge" over "the subject's security context" until
+   the formal term has been introduced.
+
 ## Module skeleton
 
 Every module page follows this shape. Section names in **bold** are fixed;
