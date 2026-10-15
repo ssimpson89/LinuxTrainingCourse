@@ -55,6 +55,17 @@ Two outputs come out of every build:
 | Will config edits survive upgrades? | Overwritten | `%config(noreplace)` keeps them |
 | Can I roll out to 40 servers? | ssh loops | `dnf upgrade` from your repo, Ansible, Satellite-style tools |
 
+??? question "Under the hood: reading `rpm -V` output"
+    `rpm -V` compares every file on disk with the size, mode, owner and SHA256 digest recorded in the package header. Silence means "unchanged". Each changed file gets a row of flags:
+
+    ```console
+    $ sudo rpm -V openssh-server
+    S.5....T.  c /etc/ssh/sshd_config
+    .M.......    /usr/libexec/openssh/sshd-session
+    ```
+
+    `S` size, `M` mode, `5` digest, `D` device, `L` symlink target, `U` user, `G` group, `T` modification time, `P` capabilities; a dot means "matches". The `c` marks a config file, where changes are expected. A `5` on a binary in `/usr` is the one that should make you look harder: run `rpm -qf` on it and reinstall from a trusted repo (`sudo dnf reinstall PKG`). `rpm -Va` checks every package on the system.
+
 ## Setting up a build environment
 
 Never build packages as root. A broken spec file with a stray `rm -rf` in `%install` can wipe a real system if it runs as root; as a normal user it fails harmlessly.
@@ -81,6 +92,9 @@ $ cat ~/.rpmmacros
 | `BUILD/` | Where `%prep` unpacks the source and `%build` compiles it |
 | `BUILDROOT/` | Created during the build: a fake root that `%install` populates |
 | `RPMS/`, `SRPMS/` | The finished packages |
+
+!!! note "Reading Fedora guides? The layout moved in RPM 4.20"
+    Rocky 10 ships RPM 4.19, with the classic layout above: sources unpack to `BUILD/NAME-VERSION/` and the buildroot is `BUILDROOT/NAME-VERSION-RELEASE.ARCH/`. RPM 4.20 (Fedora 41 and later) moved both under a per-build directory, `BUILD/NAME-VERSION-build/`. If a recent Fedora guide shows different paths, that is why. Specs that use `%{buildroot}` and `%{_builddir}` instead of literal paths work on both.
 
 `rpmdevtools` lives in AppStream. Two other tools you will use, **mock** and **rpmlint**, come from **EPEL** (Extra Packages for Enterprise Linux), which needs CRB enabled:
 
@@ -233,6 +247,9 @@ BUILDROOT/rockyhello-1.0-1.el10.x86_64/
 <div class="step" data-title="Post-processing" markdown>
 
 Automatic "brp" (buildroot policy) scripts run: strip debug symbols into a separate **debuginfo** package, compress man pages, fix shebangs and file modes, byte-compile Python. Then dependency generators scan every file to compute `Requires` and `Provides`.
+
+??? question "Under the hood: how a debuginfo package finds its binary"
+    Every ELF file built with Rocky's flags carries a unique **build ID** (a hash stored in the binary; `file /usr/bin/bash` prints it). `find-debuginfo` moves the DWARF symbols into `/usr/lib/debug/usr/bin/NAME-…debug` in the `-debuginfo` package, and adds symlinks named after the build ID: `/usr/lib/.build-id/xx/yyyy…` in the main package and `/usr/lib/debug/.build-id/xx/yyyy….debug` in the debuginfo package. gdb, `coredumpctl` and crash tools look symbols up by build ID, not by file name, so they always find the debuginfo of the *exact* build that crashed. That is why `rpm -qpl` on your package lists `/usr/lib/.build-id/` entries you never wrote in `%files`.
 
 </div>
 
@@ -519,6 +536,13 @@ The `result/` directory holds the RPMs and three logs: `build.log` (the rpmbuild
 !!! tip "Useful mock commands"
     `mock -r CFG --shell` opens a shell in the chroot to poke around. `mock -r CFG --clean` resets it. `mock --scrub=all` removes all cached chroots and frees disk space. Mock caches downloaded packages, so the second build is much faster.
 
+??? question "Under the hood: what is actually in a mock config"
+    Open `/etc/mock/rocky-10-x86_64.cfg` and its template `/etc/mock/templates/rocky-10.tpl`. Three settings explain most mock behaviour:
+
+    - `chroot_setup_cmd` is the minimal buildroot: `bash`, `coreutils`, `rpm-build`, `redhat-rpm-config`, `rocky-release`, `tar`, `gzip` and a few more. There is no `gcc` in it, which is why a missing `BuildRequires: gcc` fails in mock.
+    - `bootstrap_image` is `quay.io/rockylinux/rockylinux:10`. Mock first unpacks that container image and uses the DNF *inside* it to build the chroot, so the chroot is created with Rocky 10's own package manager even if your host runs Rocky 9 or Fedora.
+    - The template defines its own repos (`baseos`, `appstream`, `crb`, `extras`, `devel`, …) with GPG keys from the `distribution-gpg-keys` package. Your host's `/etc/yum.repos.d/` is **not** used. To build against an internal mirror, override the repo URLs in `~/.config/mock.cfg` or a custom config that `include()`s the stock one.
+
 ### rpmlint: the packaging linter
 
 `rpmlint` checks packages and specs against packaging conventions: missing license, bad permissions, binaries in the wrong place, hard-coded paths, missing man pages.
@@ -786,10 +810,12 @@ libssl.so.3()(64bit)
 
         ```bash
         cd ~ && dnf download --source which
-        rpm -i which-*.src.rpm          # installs into ~/rpmbuild, NOT the system
+        rpm -i which-*.src.rpm
         ls ~/rpmbuild/SOURCES/ | grep which
         grep -nE '^(Version|Release|Source|Patch)|%autosetup|%setup|%patch' ~/rpmbuild/SPECS/which.spec
         ```
+
+        `rpm -i` on a *source* RPM unpacks it into `~/rpmbuild`; it does not touch the system or the rpm database. Warnings like `user mockbuild does not exist - using root` are harmless: the SRPM records the build system's user, which your machine doesn't have.
 
     2. Unpack and patch the source to see the code, then make a patch:
 

@@ -98,7 +98,7 @@ Four distributions share the Enterprise Linux family tree. They differ mainly in
 | **AlmaLinux** | Downstream rebuild | Mainly CentOS Stream since 2023 | Application binary (ABI) compatible; may ship fixes earlier or differ in small ways |
 | **Oracle Linux** | Downstream rebuild | Oracle's own sourcing | RHEL-compatible kernel plus its own UEK kernel option |
 
-In August 2023, CIQ, Oracle and SUSE also formed **OpenELA** (the Open Enterprise Linux Association) to publish Enterprise Linux sources openly. Rocky has used OpenELA's patching tooling, but treat OpenELA as a sibling effort rather than "Rocky's source".
+In August 2023, CIQ, Oracle and SUSE also formed **OpenELA** (the Open Enterprise Linux Association) to publish Enterprise Linux sources openly. The RESF is not a member. Treat OpenELA as a sibling effort that happens to share a sponsor (CIQ), not as "Rocky's source".
 
 !!! version "Hardware baseline on 10"
     RHEL 10, and therefore Rocky 10, requires the **x86-64-v3** microarchitecture level on Intel/AMD (roughly Haswell-era CPUs and later). AlmaLinux publishes an extra x86-64-v2 build of version 10. Rocky 10 also adds **riscv64** as an architecture. If an old server will not boot Rocky 10, check its CPU level before anything else.
@@ -197,7 +197,16 @@ A **build system** takes a source package and produces binary RPMs in a clean, r
 | Rocky 9 | **Peridot**, a cloud-native build system written in Go by the Rocky community |
 | Rocky 10 | **Koji** again |
 
-Rocky's 10.0 announcement explains the switch back: the next generation of Peridot ("Peridot Two") was not ready, and Rocky 10 needed **IMA file signing** (per-file signatures that the kernel's Integrity Measurement Architecture can check at runtime), which Koji's signing integration supported and Peridot's signing tool did not. The plan is for Peridot Two to implement Koji's API so builds can move across later.
+Rocky's 10.0 announcement explains the switch back: the next generation of Peridot ("Peridot Two") was not ready, and Rocky wanted to support **IMA** (the kernel's Integrity Measurement Architecture, which can check per-file signatures at runtime), which Koji's signing integration made practical. Peridot Two is planned as a reimplementation of Koji's XML-RPC API, so Koji clients and builds can move across later. Today Peridot remains only for Rocky 9 and some SIG builds.
+
+??? question "Under the hood: does my Rocky 10 package carry IMA file signatures?"
+    Don't take it on trust; ask rpm. IMA signatures live in the package header, one per file, in the `FILESIGNATURES` tag:
+
+    ```console
+    $ rpm -q --qf '[%{FILENAMES} %{FILESIGNATURES}\n]' bash | head -3
+    ```
+
+    If the second column is empty, the package has no IMA signatures and an IMA appraisal policy would reject its files. If it holds long hex strings, they are there, and `rpm-plugin-ima` writes them into each file's `security.ima` extended attribute at install time (check with `getfattr -m security.ima -d /usr/bin/bash`). Nothing enforces them unless you load an IMA appraisal policy: signing and enforcement are separate decisions.
 
 Underneath both sits **mock**, a tool that creates a fresh minimal chroot, installs only the declared build dependencies, and runs `rpmbuild` inside it. A Koji or Peridot "build" is essentially an orchestrated mock run with careful bookkeeping. You will use mock yourself in [module 22](22-building-rpms.md).
 
@@ -342,7 +351,7 @@ A **repository** is a directory of RPMs plus metadata (`repodata/`) that DNF dow
 
 <div class="layer" data-label="debuginfo and source" data-tag="disabled" markdown>
 
-Every repo has a debug twin (`baseos-debuginfo`, …) holding the symbols you need for crash analysis ([module 24](24-debugging-crashes.md)), and a source twin (`baseos-source`, …) holding SRPMs. `dnf debuginfo-install` and `dnf download --source` enable these on demand.
+Every repo has a debug twin (`baseos-debuginfo`, …) holding the symbols you need for crash analysis ([module 24](24-debugging-crashes.md)), and a source twin (`baseos-source`, …) holding SRPMs. `dnf debuginfo-install` and `dnf download --source` enable these on demand, because they look for repos whose IDs end in `-debuginfo` and `-source`.
 
 </div>
 
@@ -367,7 +376,9 @@ highavailability           Rocky Linux 10 - High Availability              disab
 ```
 
 !!! tip "Trust the repo IDs on your machine"
-    Repo IDs have changed between releases (for example `ha` on Rocky 8). Always copy the ID from `dnf repolist --all` on the system in front of you before scripting `--enablerepo`.
+    Repo IDs have changed between releases (for example `ha` on Rocky 8), and other tools use their own names: mock's Rocky configs call the debug repo `baseos-debug`. Always copy the ID from `dnf repolist --all` on the system in front of you before scripting `--enablerepo`.
+
+`rocky-repos` splits these across four files: `rocky.repo` (BaseOS, AppStream, CRB and their twins), `rocky-addons.repo` (HighAvailability, RT, NFV, SAP, SAPHANA), `rocky-extras.repo` (extras and plus) and `rocky-devel.repo` (devel). `ls /etc/yum.repos.d/` shows them.
 
 ### Anatomy of a repo file
 
@@ -383,7 +394,7 @@ metadata_expire=6h
 gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-10
 ```
 
-1. `mirrorlist=…`: DNF asks the **mirrorlist** service for a list of mirrors near you. `$releasever` is `10` (the major version), so you always get the latest minor release. `$rltype` is a DNF variable from `/etc/dnf/vars/`.
+1. `mirrorlist=…`: DNF asks the **mirrorlist** service for a list of mirrors near you. `$releasever` is `10` (the major version), so you always get the latest minor release. `$rltype` is a DNF variable from `/etc/dnf/vars/` that lets a variant (for example a cloud image) ask for a different repo flavour; on a normal install it is empty. The debug and source twins use the same URL with `-debug` or `-source` appended to the repo name (and `arch=source` for sources).
 2. `#baseurl=…`: The commented-out direct URL. Uncomment it (and comment out `mirrorlist`) to pin a single server, for example an internal mirror.
 3. `gpgcheck=1`: Refuse to install any package whose GPG signature does not verify.
 4. `countme=1`: Once a week DNF adds an anonymous counter to one request, which is how the project estimates its user count.
@@ -456,7 +467,7 @@ dl.rockylinux.org/pub/sig/    ← Special Interest Group repos
 
 ### The vault
 
-Rocky supports only the **latest minor release** of each major version. When 10.2 ships, 10.1 stops receiving updates and, between a day and a week later, its tree moves to the **vault** at `dl.rockylinux.org/vault/rocky/`. Nothing is deleted: you can still fetch every package ever published, which is invaluable for reproducing an old bug or rolling back. But vault content gets no fixes, so it is for investigation, not for running production.
+Rocky supports only the **latest minor release** of each major version. When 10.2 ships, 10.1 stops receiving updates and, shortly afterwards, its tree moves to the **vault** at `dl.rockylinux.org/vault/rocky/`. Nothing is deleted: you can still fetch every package ever published, which is invaluable for reproducing an old bug or rolling back. But vault content gets no fixes, so it is for investigation, not for running production.
 
 !!! warning "Pinning a minor release is not a supported way to run Rocky"
     Setting `releasever=10.1` and pointing at the vault keeps you on 10.1 forever, *without* security fixes. If you need longer-lived minor releases, that is a commercial offering (for example, CIQ's LTS products), not something the community repos provide.
@@ -576,12 +587,21 @@ libxml2-2.12.5-9.el10_1.x86_64.rpm:
 
 **Digests** prove the file is intact. **Signatures** prove who made it. If the key is not imported, you see `NOKEY`; if the file was modified, you see `BAD` or `NOT OK`.
 
+??? question "Under the hood: why there are two signatures and five digests"
+    An RPM file is four parts in a row: a lead (legacy), a **signature header**, the **main header** (name, dependencies, file list, per-file digests) and the compressed **payload** (the files).
+
+    - `Header V4 RSA/SHA256 Signature` covers only the main header. Because the main header stores the payload's SHA256 digest and every file's digest, a good header signature plus a good `Payload SHA256 digest` vouches for every byte. This is why `dnf` can verify a package before decompressing it.
+    - `V4 RSA/SHA256 Signature` (header plus payload) and the `SHA1`/`MD5` lines are legacy, kept so older rpm versions can still check the file.
+    - After install, the per-file digests are what `rpm -V PKG` compares against your disk. That is how you detect a binary changed after installation, long after the package signature was checked.
+
+    Rocky 10.2 also ships a second, post-quantum (PQC) key alongside the RSA one, in preparation for PQC package signing in a later point release. `ls /etc/pki/rpm-gpg/` shows what `rocky-gpg-keys` installed on your system.
+
 Which keys does RPM trust right now?
 
 ```console
 $ rpm -q gpg-pubkey --qf '%{VERSION}\t%{SUMMARY}\n'
 6fedfc85	Rocky Enterprise Software Foundation …
-3228467c	Fedora (epel10) <epel@fedoraproject.org>
+e37ed158	Fedora (epel10) <epel@fedoraproject.org>
 ```
 
 The `VERSION` of a `gpg-pubkey` pseudo-package is the short key ID. To trust a new key (for example, your own repo's, from [module 22](22-building-rpms.md)):
@@ -604,7 +624,7 @@ $ sudo rpm -e gpg-pubkey-<keyid>      # remove trust again
 
 <div class="quiz" data-answer="1" markdown>
 
-`rpm -K` reports `digests OK` but `signatures NOKEY` for a downloaded package. What does that tell you?
+`rpm -Kv` on a downloaded package shows every digest line `OK`, but the signature lines end in `NOKEY`. What does that tell you?
 
 - The file is intact, but its signing key is not in your RPM database, so you cannot yet tell who signed it
 - The package has been tampered with
@@ -637,19 +657,24 @@ See the boot flow in context in [module 14](14-the-boot-process.md).
 ```console
 $ mokutil --sb-state
 SecureBoot enabled
-$ mokutil --list-enrolled | grep -E 'Subject:|Issuer:'
-        Subject: … Rocky Enterprise Software Foundation … Secure Boot …
-        Issuer: … Rocky Enterprise Software Foundation … Secure Boot …
+$ mokutil --list-enrolled | grep -E 'Subject:'
+        Subject: …O=Rocky Enterprise Software Foundation, CN=Rocky Linux Secure Boot Root CA…
+$ sudo keyctl list %:.platform
+…: ---lswrv     0     0 asymmetric: Rocky Enterprise Software Foundation: Rocky Linux Secure Boot Root CA: …
+…: ---lswrv     0     0 asymmetric: Microsoft Corporation: Microsoft Corporation UEFI CA 2011: …
 $ sudo journalctl -k -b | grep -i 'Loaded X.509'
-kernel: Loaded X.509 cert 'Rocky kernel signing key: …'
+kernel: Loaded X.509 cert 'Rocky … kernel signing key: …'
 kernel: integrity: Loaded X.509 cert 'Microsoft Corporation UEFI CA 2011: …'
 …
 ```
 
-`--list-enrolled` shows the MOK list, which on a stock system mostly reflects the Rocky CA that shim carries. `mokutil --db` and `mokutil --kek` show what the firmware itself trusts.
+`mokutil --db` and `mokutil --kek` show what the firmware itself trusts. The kernel copies the firmware `db` and the MOK list into its **platform keyring** at boot, which `keyctl` shows (from the `keyutils` package); exact certificate names vary between releases, so read them on your own machine.
+
+??? question "Under the hood: why --list-enrolled shows a Rocky CA you never enrolled"
+    Shim exports its built-in vendor certificate (Rocky's Secure Boot root CA) into the `MokListRT` UEFI variable alongside anything you enrolled, so the OS can see the whole set shim trusts. That is why `mokutil --list-enrolled` lists Rocky's CA on a fresh install, and also why it can come back **empty** on old shims or some hypervisors: the variable was not exported, but shim still trusts the CA internally. The keys you add with `mokutil --import` only take effect after the next reboot, when the blue **MokManager** screen asks for the one-time password you set. Nobody at the console means the key is never enrolled.
 
 !!! warning "The Microsoft CA transition (2026)"
-    Microsoft's original UEFI CA from 2011 is being retired in favour of new 2023 CAs. Rocky announced in June 2026 that it is shipping **dual-signed** shims (old and new CA) so machines keep booting during the transition. A machine whose firmware has had the old CA removed *before* the new one is enrolled will refuse an old-CA-only shim. Keep `shim-x64` updated and apply firmware updates from your hardware vendor.
+    Microsoft's original third-party UEFI CA (*Microsoft Corporation UEFI CA 2011*) expired in late June 2026, replaced by the 2023 CAs. In its June 2026 Secure Boot post, Rocky said it ships **dual-signed** shims (signed by both the 2011 and the 2023 CA), so the same shim boots on old firmware that knows only the 2011 CA and new firmware that knows only the 2023 one. Expiry alone does not stop a signed shim from booting; firmware does not check dates. What breaks things is *revocation*: a `dbx` update that revokes the 2011 CA also invalidates dual-signed binaries on most firmware. Keep `shim-x64` updated, check `mokutil --db` for the 2023 CA, and apply firmware updates from your hardware vendor before anyone pushes such a `dbx` update.
 
 !!! example "Try it"
     On a VM with UEFI and Secure Boot enabled, run `mokutil --sb-state` and `sudo dmesg | grep -i secure`. On a BIOS VM, `mokutil` reports that EFI variables are not supported: a quick way to tell how a machine booted.
@@ -664,7 +689,7 @@ Not everything belongs in a RHEL-compatible core. **Special Interest Groups** ar
 | **SIG/Cloud** | Running Rocky in and as public/private cloud images |
 | **SIG/Kernel** | Alternative kernels (for example mainline or other long-term branches) and drivers |
 | **SIG/Security** | Extra security features and hardened override packages |
-| Others | Desktop and Gaming, FastTrack, HPC and AI, Containers, and more at various stages |
+| Others | Desktop and Gaming, FastTrack, HPC and AI, and more at various stages (the wiki lists which are active) |
 
 ```console
 $ dnf search rocky-release
@@ -702,19 +727,19 @@ Put it all together. Step through what happens between a vulnerability being fou
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. Disclosure" markdown>
+<div class="step" data-title="Disclosure" markdown>
 
 A researcher reports a flaw in, say, libxml2. It gets a **CVE** ID. The upstream project and Red Hat's security team coordinate a fix, often under embargo until a disclosure date.
 
 </div>
 
-<div class="step" data-title="2. Fix lands upstream" markdown>
+<div class="step" data-title="Fix lands upstream" markdown>
 
 Red Hat patches the package. The change usually appears in the CentOS Stream 10 Git repositories and is shipped in RHEL as an **RHSA** advisory with a new release number such as `2.12.5-10.el10_2`.
 
 </div>
 
-<div class="step" data-title="3. Rocky imports the source" markdown>
+<div class="step" data-title="Rocky imports the source" markdown>
 
 Rocky's tooling picks up the new source (CentOS Stream, UBI or cloud-instance routes), runs srpmproc, applies any debranding patches, and commits to Rocky Git.
 
@@ -725,31 +750,31 @@ flowchart LR
 
 </div>
 
-<div class="step" data-title="4. Build" markdown>
+<div class="step" data-title="Build" markdown>
 
 Koji schedules builds for every architecture. Each builder runs mock with a clean buildroot. Logs and results are stored with the build.
 
 </div>
 
-<div class="step" data-title="5. Sign" markdown>
+<div class="step" data-title="Sign" markdown>
 
-The signing service signs each RPM with the Rocky 10 key (and IMA file signatures). Unsigned output never goes to the public repos.
+The signing service signs each RPM with the Rocky 10 key. Unsigned output never goes to the public repos.
 
 </div>
 
-<div class="step" data-title="6. Publish and errata" markdown>
+<div class="step" data-title="Publish and errata" markdown>
 
 The packages are composed into the BaseOS or AppStream repo. Apollo attaches **RLSA-2026:NNNN** to the updateinfo metadata, mirroring the RHSA number. The new tree syncs to dl.rockylinux.org.
 
 </div>
 
-<div class="step" data-title="7. Mirrors" markdown>
+<div class="step" data-title="Mirrors" markdown>
 
 Hundreds of mirrors sync. MirrorManager only hands out mirrors whose content is current, so clients find the update as it propagates.
 
 </div>
 
-<div class="step" data-title="8. Your server" markdown>
+<div class="step" data-title="Your server" markdown>
 
 `dnf upgrade --security` (or `dnf-automatic`) downloads the package, checks the checksum against metadata, verifies the GPG signature against `RPM-GPG-KEY-Rocky-10`, installs it, and records the transaction in `dnf history`.
 
@@ -1136,7 +1161,8 @@ Before: git.centos.org. After: CentOS Stream, RHEL SRPMs via UBI images and clou
 
 - [[man:rpm(8)]] [[man:rpmkeys(8)]] [[man:dnf(8)]] [[man:dnf.conf(5)]] [[man:os-release(5)]] [[man:mokutil(1)]] [[man:yum-config-manager(1)]]
 - [Rocky Linux documentation: repositories, release engineering and guides](https://docs.rockylinux.org/)
-- [Rocky Linux GPG key information (official fingerprints)](https://rockylinux.org/resources/gpg-key-info)
+- [Rocky Linux GPG key information (official fingerprints)](https://rockylinux.org/keys/)
+- [Rocky Linux and the changing Secure Boot landscape (June 2026)](https://rockylinux.org/news/2026-06-02-secure-boot-ca-kek-transition)
 - [Keeping Open Source Open: Rocky's 2023 sourcing statement](https://rockylinux.org/news/keeping-open-source-open/)
 - [Rocky Linux 10.0 release announcement (build system, IMA)](https://rockylinux.org/news/rocky-linux-10-0-ga-release)
 - [Rocky Linux wiki: Special Interest Groups](https://wiki.rockylinux.org/special_interest_groups/current/)

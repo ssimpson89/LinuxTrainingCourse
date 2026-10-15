@@ -103,10 +103,13 @@ During an install, Anaconda runs inside **tmux** on the first console. Press ++c
 | `/tmp/program.log` | Every external command run (mkfs, lvcreate, …) |
 | `/tmp/ks-script-*.log` | Output of `%pre`/`%post` scripts (if you don't set `--log`) |
 
+??? question "Under the hood: where the kickstart lives during an install"
+    The kickstart is fetched twice over. Dracut's Anaconda module in the initrd reads `inst.ks=`, brings up the network if needed, downloads the file and saves it as `/run/install/ks.cfg`. Anaconda then parses that copy, and `%include` files are read *after* `%pre` has run, which is what makes the "generate a snippet in `%pre`" trick work. From the tmux shell (++ctrl+b++ then ++2++) you can `cat /run/install/ks.cfg` to see exactly what the installer received, which settles any "did it fetch the old version from the cache?" argument.
+
 After installation, Anaconda copies these to `/var/log/anaconda/` on the new system. It also writes **`/root/anaconda-ks.cfg`**: a kickstart that reproduces the install you just did, whether you clicked through the GUI or not. It is the best starting point for writing your own.
 
 !!! version "Rocky 9 vs 10"
-    Remote graphical installs on Rocky 10 use **RDP** (`inst.rdp`, port 3389) instead of VNC; the `vnc` kickstart command is gone. The `timezone --ntpservers` option was replaced by the separate `timesource` command, and the long-deprecated `auth`/`authconfig` commands are removed (use `authselect` in `%post` if needed). Check old kickstarts with `ksvalidator` (below) before reusing them.
+    Remote graphical installs on Rocky 10 use **RDP** (`inst.rdp`, port 3389) instead of VNC, and the `vnc` kickstart command is deprecated. Several commands and options are removed outright: `timezone --ntpservers` and `--nontp` (use the separate `timesource` command), `timezone --isUtc` (use `--utc`), the `auth`/`authconfig` commands (use `authselect`), `pwpolicy`, and the `%anaconda` section. Check old kickstarts with `ksvalidator` (below) before reusing them.
 
 ## Kickstart, line by line
 
@@ -220,7 +223,9 @@ $ echo $?
 $ ksvalidator -v RHEL10 old-rocky8.ks
 The following problem occurred on line 7 of the kickstart file:
 
-The auth command has been removed. Use authselect instead.
+… auth … has been removed …
+$ echo $?
+1
 ```
 
 `-v RHEL10` picks the syntax version for Rocky 10 (Rocky uses the RHEL versions). `ksvalidator -l` lists the versions your pykickstart knows.
@@ -299,43 +304,43 @@ Step through a UEFI PXE install:
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. Power on" markdown>
+<div class="step" data-title="Power on" markdown>
 
 The firmware's boot order puts the network first (or someone picks "Network boot" once). The NIC's UEFI driver starts the PXE client.
 
 </div>
 
-<div class="step" data-title="2. DHCP discover" markdown>
+<div class="step" data-title="DHCP discover" markdown>
 
-The client broadcasts a DHCP request that includes **option 93**, the client architecture: `7` for x86-64 UEFI (PXE), `16` for x86-64 UEFI HTTP boot, `0` for legacy BIOS. This is how one DHCP server can hand each machine the right boot file.
+The client broadcasts a DHCP request that includes **option 93**, the client architecture: `7` for x86-64 UEFI PXE (a few firmwares send `9` instead), `16` for x86-64 UEFI HTTP boot, `0` for legacy BIOS. This is how one DHCP server can hand each machine the right boot file.
 
 </div>
 
-<div class="step" data-title="3. DHCP offer" markdown>
+<div class="step" data-title="DHCP offer" markdown>
 
 The server answers with an IP address plus where to boot from: the **next-server** (TFTP server address) and the **boot file name** (option 67), for example `rocky/EFI/BOOT/BOOTX64.EFI`. For HTTP boot the file name is a full URL.
 
 </div>
 
-<div class="step" data-title="4. shim and GRUB" markdown>
+<div class="step" data-title="shim and GRUB" markdown>
 
-The firmware downloads `BOOTX64.EFI`, which is **shim** (signed by Microsoft, so Secure Boot works; see [module 21](21-inside-rocky-linux.md#secure-boot-the-chain-before-the-os)). Shim loads `grubx64.efi` from the same directory. GRUB then fetches its `grub.cfg` from the same server.
+The firmware downloads `BOOTX64.EFI`, which is **shim** (signed by Microsoft, so Secure Boot works; see [module 21](21-inside-rocky-linux.md#secure-boot-the-chain-before-the-os)). Shim loads `grubx64.efi` from the same directory. GRUB then fetches its `grub.cfg` from that same TFTP directory (here `rocky/EFI/BOOT/`).
 
 </div>
 
-<div class="step" data-title="5. Kernel and initrd" markdown>
+<div class="step" data-title="Kernel and initrd" markdown>
 
 The GRUB menu entry loads `vmlinuz` and `initrd.img` (from `images/pxeboot/` on the Rocky ISO) over TFTP or HTTP, with boot options such as `inst.repo=` and `inst.ks=`.
 
 </div>
 
-<div class="step" data-title="6. Stage 2 and kickstart" markdown>
+<div class="step" data-title="Stage 2 and kickstart" markdown>
 
 The initrd brings up the network (DHCP again, this time from Linux), downloads the installer image via `inst.repo`, and fetches the kickstart from `inst.ks`. All over HTTP.
 
 </div>
 
-<div class="step" data-title="7. Install and reboot" markdown>
+<div class="step" data-title="Install and reboot" markdown>
 
 Anaconda installs from the repo, runs `%post`, and reboots. The firmware tries the network again: make sure the boot order then falls through to the disk (or have `%post` set it with `efibootmgr`), or the machine will reinstall itself in a loop.
 
@@ -358,6 +363,9 @@ sequenceDiagram
     C->>H: GET ks/pxe.ks
     Note over C: Anaconda installs, then reboots
 ```
+
+??? question "Under the hood: how one PXE server gives each machine its own menu"
+    GRUB's network boot does not ask for `grub.cfg` straight away. It tries a series of more specific names in its directory first: `grub.cfg-01-` followed by the client's MAC address (lower case, dashes), then the client's IP address in upper-case hex, dropping one hex digit at a time (`grub.cfg-C0A8646E`, `grub.cfg-C0A8646`, …), and only then plain `grub.cfg`. Drop a file named `grub.cfg-01-52-54-00-ab-cd-ef` next to the default and that one machine gets its own kernel arguments, for example a different `inst.ks=` for its role. With `log-dhcp` and dnsmasq's TFTP logging you can watch the client walk through the list.
 
 !!! note "dnsmasq or Kea?"
     Rocky 10 no longer ships the old ISC `dhcp-server`; the full-featured DHCP server is **Kea**, which Red Hat's own network-boot documentation uses. For a lab or a small install network, **dnsmasq** is far simpler: one config file gives you DHCP, PXE options and a built-in TFTP server. The lab below uses dnsmasq.
@@ -445,8 +453,11 @@ flowchart LR
     OB --> I["qcow2 / ami / vhd / iso"]
 ```
 
-!!! note "Two front ends"
-    Upstream osbuild also offers a newer, service-free `image-builder` command-line tool that builds directly from a blueprint. Whether it is packaged for your Rocky release is worth checking with `dnf info image-builder`; the `composer-cli` workflow above is the established one.
+!!! note "Front ends are changing"
+    Upstream osbuild also offers a newer, service-free `image-builder` command-line tool that builds directly from a blueprint, and Red Hat documents it for RHEL 10.2. Check whether your Rocky release packages it with `dnf info image-builder`; the `composer-cli` workflow above is the established one. In the web console, `cockpit-image-builder` replaces the deprecated `cockpit-composer`.
+
+??? question "Under the hood: why images don't all end up with the same identity"
+    A cloned disk carries everything in it, including `/etc/machine-id` and the SSH host keys. Image Builder and Rocky's cloud images avoid duplicates by shipping an **empty** `/etc/machine-id`: systemd sees it at first boot, generates a fresh ID and treats the boot as a first boot (`ConditionFirstBoot=`); images also ship without SSH host keys, and `sshd-keygen@.service` creates them when sshd first starts. If you build a template by hand from an installed VM instead, run `virt-sysprep` on it (or empty `/etc/machine-id` and delete `/etc/ssh/ssh_host_*`) before cloning, or every clone gets the same DHCP lease identity and the same host keys.
 
 ## cloud-init: personalising images at first boot
 
@@ -496,6 +507,9 @@ Total Time: 27.81300 seconds
 
 When something goes wrong, read `/var/log/cloud-init.log` (detailed) and `/var/log/cloud-init-output.log` (output of your commands). Validate user-data before you use it with `cloud-init schema --config-file user-data`. To test changes on the same VM, `sudo cloud-init clean --logs --reboot` makes it run as a first boot again.
 
+??? question "Under the hood: how cloud-init knows it is a first boot"
+    cloud-init does not use a "has run" flag. Each datasource provides an **instance ID** (in a cloud, the VM's ID; in NoCloud, the `instance-id` in `meta-data`). cloud-init caches it in `/var/lib/cloud/data/instance-id`. Per-instance modules (users, SSH keys, `runcmd`, `packages`) run only when the current instance ID differs from the cached one. That is why a cloned VM with a new instance ID is personalised again, why editing user-data on an existing VM does nothing until you change `instance-id` or run `cloud-init clean`, and why `/var/lib/cloud/instances/<id>/` keeps a per-instance history you can read after the fact.
+
 **NoCloud** is the datasource for "no cloud at all": cloud-init reads `user-data` and `meta-data` from a small ISO or disk labelled `cidata`. It is perfect for testing cloud images on plain KVM.
 
 <div class="quiz" data-answer="4" markdown>
@@ -527,7 +541,7 @@ $ sudo bootc upgrade       # fetch and stage a newer image; applied at reboot
 $ sudo bootc rollback      # boot the previous image next time
 ```
 
-Red Hat supports image mode for RHEL 10, and CentOS Stream publishes bootc base images. For Rocky Linux, check the current status before planning around it: at the time of writing, community and SIG projects publish Rocky 10 bootc images and build recipes, and commercial vendors offer supported ones, but treat availability of an official RESF base image as something to verify on Rocky's site.
+Red Hat supports image mode for RHEL 10, and CentOS Stream publishes bootc base images. For Rocky Linux, check the current status before planning around it. At the time of writing, Rocky's **SIG/Containers** publishes `rocky-bootc` images for 10 in the container registry on git.resf.org (some tags still marked test), community projects publish their own, and commercial vendors (for example CIQ) offer supported bootc images. Until a Rocky release announcement calls one official, treat bootc images as SIG content, not part of the core distribution.
 
 ```mermaid
 flowchart LR
@@ -679,7 +693,7 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
         grep -vE '^#|^$' ~/ks/base.ks
         ```
 
-    2. Validate it as-is, then edit it toward the example in "Kickstart, line by line": switch to `text`, add `reboot`, replace `graphical`, set `rootpw --lock`, add a user with a hash from `openssl passwd -6`, set `ignoredisk --only-use=vda`, and add a `%post --log=/root/ks-post.log` section.
+    2. Validate it as-is, then edit it toward the example in "Kickstart, line by line": replace `graphical` with `text`, add `reboot`, set `rootpw --lock`, add a user with a hash from `openssl passwd -6`, and add a `%post --log=/root/ks-post.log` section. Replace the storage lines (which describe *this* machine's disks) with the storage block from the example, so the file installs onto a blank 20 GB `vda`.
 
         ```bash
         sudo dnf install -y pykickstart
@@ -760,7 +774,7 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
         sudo virsh attach-interface pxe-server network pxenet --model virtio --config --live
         ```
 
-    2. On `pxe-server`, give the new NIC a static address (find its name with `nmcli device`), and install the services:
+    2. On `pxe-server`, give the new NIC a static address and install the services. Find the new NIC's name with `nmcli device` (it shows as `disconnected`); the commands below assume `enp7s0`, so substitute yours here and in the dnsmasq config:
 
         ```bash
         sudo nmcli con add type ethernet ifname enp7s0 con-name pxenet ipv4.method manual ipv4.addresses 192.168.100.1/24
@@ -772,7 +786,7 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
 
         ```bash
         sudo mkdir -p /var/www/html/rocky10 /var/www/html/ks /var/lib/tftpboot/rocky /var/lib/tftpboot/rocky10
-        sudo mount -o loop,ro ~/Rocky-10.2-x86_64-dvd.iso /var/www/html/rocky10
+        sudo mount -o loop,ro,context=system_u:object_r:httpd_sys_content_t:s0 ~/Rocky-10.2-x86_64-dvd.iso /var/www/html/rocky10
         sudo cp -r /var/www/html/rocky10/EFI /var/lib/tftpboot/rocky/
         sudo cp /var/www/html/rocky10/images/pxeboot/{vmlinuz,initrd.img} /var/lib/tftpboot/rocky10/
         sudo chmod -R a+rX /var/lib/tftpboot
@@ -798,13 +812,14 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
         bind-interfaces
         dhcp-range=192.168.100.100,192.168.100.150,1h
         dhcp-match=set:efi-x86_64,option:client-arch,7
+        dhcp-match=set:efi-x86_64,option:client-arch,9
         dhcp-boot=tag:efi-x86_64,rocky/EFI/BOOT/BOOTX64.EFI,,192.168.100.1
         enable-tftp
         tftp-root=/var/lib/tftpboot
         log-dhcp
         ```
 
-        `port=0` turns off dnsmasq's DNS server, so it only does DHCP and TFTP.
+        `port=0` turns off dnsmasq's DNS server, so it only does DHCP and TFTP. The two `dhcp-match` lines tag x86-64 UEFI clients whichever architecture code (7 or 9) their firmware sends.
 
     6. Open the firewall, fix SELinux labels, and start everything:
 
@@ -823,6 +838,8 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
         ```
 
         On the server, follow along: `sudo journalctl -fu dnsmasq` and `sudo tail -f /var/log/httpd/access_log`.
+
+    The `context=` mount option matters: files on an ISO 9660 filesystem have no SELinux labels of their own, and `restorecon` cannot relabel a read-only ISO, so without it httpd gets `Permission denied` on the install tree.
 
     **Check your work:** the dnsmasq log shows `DHCPACK` and TFTP `sent …/BOOTX64.EFI`, `grubx64.efi`, `vmlinuz`, `initrd.img`; the httpd log shows `GET /ks/pxe.ks` and package downloads; the client installs and reboots.
 
@@ -953,7 +970,7 @@ All labs use KVM with libvirt on a Rocky 10 host (see [module 27](27-virtualizat
 | Symptom | Cause | Fix |
 |---|---|---|
 | Installer stops and waits at a screen | Kickstart is incomplete (missing a required answer) or has no `reboot` | Check `/tmp/anaconda.log` from the tmux shell; add the missing command |
-| Kickstart worked on Rocky 8/9, fails on 10 | Removed commands (`auth`, `vnc`, `timezone --ntpservers`) | `ksvalidator -v RHEL10` and update the syntax |
+| Kickstart worked on Rocky 8/9, fails on 10 | Removed commands and options (`auth`, `pwpolicy`, `timezone --ntpservers`) | `ksvalidator -v RHEL10` and update the syntax |
 | A data disk was wiped | `clearpart --all` without `ignoredisk --only-use` | Always restrict disks; test on VMs first |
 | `%post` silently did nothing | Errors only in a log nobody read; no network or repo in the chroot | `%post --log=…`; add packages to `%packages` instead |
 | PXE client gets no IP | DHCP blocked by the firewall, wrong interface in dnsmasq, or libvirt's own DHCP on the network | `firewall-cmd --add-service=dhcp`; check `interface=`; use an isolated network without `<dhcp>` |
@@ -1059,7 +1076,7 @@ Which command validates kickstart syntax, and from which package?
 !!! recap "Key takeaways"
     - Two paths: install with Anaconda (kickstart automates it) or deploy a pre-built image (Image Builder, cloud images) personalised by cloud-init.
     - Start kickstarts from `/root/anaconda-ks.cfg`, always restrict disks with `ignoredisk`, end with `reboot`, and log `%post`.
-    - Validate with `ksvalidator -v RHEL10`; Rocky 10 removed `auth`, `vnc` and `timezone --ntpservers`.
+    - Validate with `ksvalidator -v RHEL10`; Rocky 10 removed `auth`, `pwpolicy` and `timezone --ntpservers`, and deprecated `vnc` in favour of RDP.
     - Deliver kickstarts with `inst.ks=` (HTTP, NFS, labelled volume), an `OEMDRV` volume, or an ISO built with `mkksiso`.
     - PXE: DHCP (with architecture option 93) → shim → GRUB → kernel and initrd → `inst.repo` and `inst.ks` over HTTP. Only ever on an isolated or provisioning network.
     - Image Builder turns a TOML blueprint into qcow2, AMI, VHD or installer images; cloud-init applies per-instance settings at first boot, with NoCloud for local testing.
