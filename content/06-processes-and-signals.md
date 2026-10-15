@@ -7,7 +7,7 @@ description: What a process really is on Rocky Linux, how processes are born, li
 
 <ul class="module-meta">
   <li>⏱ ~2.5 hours</li>
-  <li>5 labs</li>
+  <li>4 labs</li>
   <li>Builds on: 02 · The Shell and the Filesystem, 03 · Users, Groups and sudo</li>
 </ul>
 
@@ -181,32 +181,31 @@ never knows a file is involved.
     PID 3012 started life as bash and became `sleep`, because `exec` swaps
     the program in place.
 
-### Prove it: watch fork and exec with strace
+??? question "Prove it: watch fork and exec with strace"
+    You don't have to take this on faith. `strace` (install it with
+    `sudo dnf install strace`) prints the system calls a program makes. `-f`
+    follows children, and `-e trace=` limits the output to the calls we care
+    about:
 
-You don't have to take this on faith. `strace` (install it with
-`sudo dnf install strace`) prints the system calls a program makes. `-f`
-follows children, and `-e trace=` limits the output to the calls we care
-about:
+    ```console
+    $ strace -f -e trace=clone,clone3,execve,wait4 bash -c 'ls /tmp > /dev/null; echo done'
+    execve("/usr/bin/bash", ["bash", "-c", "ls /tmp > /dev/null; echo done"], 0x7ffd… /* 25 vars */) = 0
+    clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7f…) = 3120
+    strace: Process 3120 attached
+    [pid  3120] execve("/usr/bin/ls", ["ls", "/tmp"], 0x55… /* 25 vars */) = 0
+    [pid  3120] +++ exited with 0 +++
+    wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 3120
+    --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=3120, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+    done
+    +++ exited with 0 +++
+    ```
 
-```console
-$ strace -f -e trace=clone,clone3,execve,wait4 bash -c 'ls /tmp > /dev/null; echo done'
-execve("/usr/bin/bash", ["bash", "-c", "ls /tmp > /dev/null; echo done"], 0x7ffd… /* 25 vars */) = 0
-clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7f…) = 3120
-strace: Process 3120 attached
-[pid  3120] execve("/usr/bin/ls", ["ls", "/tmp"], 0x55… /* 25 vars */) = 0
-[pid  3120] +++ exited with 0 +++
-wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 3120
---- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=3120, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
-done
-+++ exited with 0 +++
-```
-
-Read it top to bottom and you see the whole life cycle. Bash is `execve`'d.
-It calls `clone` (the system call behind `fork()` on Linux) and gets back the
-child's PID, 3120. The child `execve`s `ls` and exits. The kernel sends the
-parent `SIGCHLD`, and the parent collects the exit status with `wait4`.
-Notice that `echo done` caused no `clone` at all: `echo` is a bash
-**builtin**, so bash runs it itself without creating a process.
+    Read it top to bottom and you see the whole life cycle. Bash is `execve`'d.
+    It calls `clone` (the system call behind `fork()` on Linux) and gets back the
+    child's PID, 3120. The child `execve`s `ls` and exits. The kernel sends the
+    parent `SIGCHLD`, and the parent collects the exit status with `wait4`.
+    Notice that `echo done` caused no `clone` at all: `echo` is a bash
+    **builtin**, so bash runs it itself without creating a process.
 
 ### Exit status and waiting
 
@@ -322,13 +321,14 @@ machine whose CPUs are 99% idle. So a high load average means "lots of tasks
 want something", not necessarily "the CPU is busy". Check which:
 
 ```console
-$ ps -eo pid,stat,wchan:20,cmd | awk '$2 ~ /^D/'
-   4120 D    nfs_wait_bit_killab ls /mnt/share
-   4133 D    nfs_wait_bit_killab df -h
+$ ps -eo pid,stat,wchan:32,cmd | awk '$2 ~ /^D/'
+   4120 D    rpc_wait_bit_killable            ls /mnt/share
+   4133 D    rpc_wait_bit_killable            df -h
 ```
 
 `wchan` ("wait channel") names the kernel function the task is sleeping in,
-which is often enough to tell you *what* it's waiting on. Here, NFS.
+which is often enough to tell you *what* it's waiting on. Here, an NFS
+(RPC) reply that never comes.
 
 !!! note "Why can't you kill a D-state process?"
     Signals are delivered when a process returns from the kernel to its own
@@ -337,6 +337,30 @@ which is often enough to tell you *what* it's waiting on. Here, NFS.
     on (bring the NFS server back, replace the dying disk). Many modern
     network filesystem waits are "killable", which lets `SIGKILL` through,
     but you can't rely on it.
+
+??? question "Under the hood: what exactly is a D-state task stuck on?"
+    `wchan` gives you one function name. Root can see the whole kernel call
+    stack of a stuck task, which usually names the filesystem or driver:
+
+    ```console
+    $ sudo cat /proc/4120/stack
+    [<0>] rpc_wait_bit_killable+0x1e/0xa0 [sunrpc]
+    [<0>] __rpc_execute+0x10d/0x3a0 [sunrpc]
+    [<0>] rpc_execute+0xa5/0xc0 [sunrpc]
+    [<0>] nfs4_call_sync_sequence+0x75/0xb0 [nfsv4]
+    …
+    ```
+
+    Two more tools seasoned support engineers reach for:
+
+    - The kernel's **hung task detector** logs any task stuck in `D` for longer
+      than `/proc/sys/kernel/hung_task_timeout_secs` (120 seconds by default),
+      with a stack trace. Search for it with
+      `journalctl -k -g 'blocked for more than'`.
+    - `echo w | sudo tee /proc/sysrq-trigger` asks the kernel to dump the
+      stack of *every* blocked task into the kernel log at once. It's
+      read-only and safe, and it is often the single most useful thing to
+      attach to a support case about a "hung" server.
 
 ### Zombies and orphans
 
@@ -358,10 +382,12 @@ automatically.
 
 That adoption is the other half of the story. An **orphan** is a process
 whose parent died while it was still running. Linux doesn't leave orphans
-parentless: it re-parents them to PID 1 (or to a nearer process that has
-registered as a **subreaper**, which your systemd user manager does for your
-session). systemd calls `wait()` for its adopted children, so orphans never
-become permanent zombies.
+parentless: it re-parents them to the nearest ancestor that has registered as
+a **subreaper**, or to PID 1 if there is none. For a shell you reached over
+SSH, that is systemd itself. (Your systemd user manager is a subreaper too,
+but only for what *it* started, such as `systemctl --user` services; your SSH
+session isn't its child.) systemd calls `wait()` for its adopted children,
+so orphans never become permanent zombies.
 
 ```mermaid
 flowchart LR
@@ -372,6 +398,28 @@ flowchart LR
     P -. "parent dies first" .-> O["child re-parented to systemd"]
     O -->|"systemd calls wait()"| G
 ```
+
+??? question "Under the hood: when do zombies actually hurt?"
+    A zombie costs a process-table slot and a PID, nothing else. On paper you
+    can have as many as `kernel.pid_max` allows (`cat /proc/sys/kernel/pid_max`;
+    on a 64-bit system it's at least 32768 and is often set to 4194304).
+
+    In practice a leaking parent hits a smaller ceiling first. Every systemd
+    service has a `TasksMax=` limit (a cgroup `pids.max`), and so does every
+    user's slice. The symptom is a service that suddenly can't start anything,
+    with `fork: retry: Resource temporarily unavailable` or `EAGAIN` in its
+    log, while the rest of the machine is fine:
+
+    ```console
+    $ systemctl show httpd -p TasksCurrent -p TasksMax
+    TasksCurrent=4915
+    TasksMax=4915
+    $ ps -eo stat,ppid | awk '$1 ~ /^Z/ {print $2}' | sort | uniq -c | sort -rn | head -3
+       4890 1822
+    ```
+
+    The second command counts zombies per parent: here one parent (PID 1822)
+    owns almost all of them, so that's the process to restart.
 
 <div class="quiz" data-answer="3" markdown>
 
@@ -494,7 +542,7 @@ stuck.
 
 <div class="terminal-sim" data-title="Find that process" markdown>
 
-<div class="task" data-expect="echo $$" data-hint="The special variable $$ holds the current shell's PID. Print it with echo." markdown>
+<div class="task" data-expect="echo $$||echo \"$$\"" data-hint="The special variable $$ holds the current shell's PID. Print it with echo." markdown>
 
 **Step 1.** Print your shell's own PID.
 
@@ -907,10 +955,12 @@ it doesn't, and RAM plus swap are truly exhausted, the kernel has to free
 memory *now*. Its last resort is the **OOM killer** (Out Of Memory): it picks
 one process and sends it `SIGKILL`.
 
-How does it pick? Each process has an **`oom_score`** (0 to 1000), mostly
-based on how much memory it uses. The biggest consumer usually loses. You can
-bias the choice with **`oom_score_adj`** (-1000 to +1000): `-1000` means
-"never kill this", `+1000` means "kill this first".
+How does it pick? The kernel gives each process a **badness** score, mostly
+the share of RAM and swap it uses, and you can read it in
+**`/proc/<pid>/oom_score`**: higher means more likely to be killed. The
+biggest consumer usually loses. You can bias the choice with
+**`oom_score_adj`** (-1000 to +1000): `-1000` means "never kill this",
+`+1000` means "kill this first".
 
 ```console
 $ cat /proc/810/oom_score /proc/810/oom_score_adj
@@ -919,6 +969,17 @@ $ cat /proc/810/oom_score /proc/810/oom_score_adj
 $ echo -500 | sudo tee /proc/810/oom_score_adj
 -500
 ```
+
+??? question "Under the hood: why is nearly every oom_score 666 or 667?"
+    Run `cat /proc/*/oom_score | sort | uniq -c | sort -rn | head` and most
+    processes show `666` or `667`. That isn't a bug. Since kernel 5.9 the file
+    reports the badness *including* `oom_score_adj`, rescaled so the old
+    range is kept: the value is roughly `(1000 + badness) × 2/3`, where
+    badness is the process's memory share in thousandths plus its
+    `oom_score_adj`. A tiny process with `oom_score_adj` 0 therefore lands on
+    666 or 667, a process with `-1000` reads `0`, and only real memory hogs
+    climb much higher. Compare scores with each other, not against a fixed
+    "danger" number.
 
 For a service, set it permanently in the unit file with `OOMScoreAdjust=`
 (module 07). Protecting the processes you need to *recover* the machine, such
@@ -939,9 +1000,10 @@ considers processes in that service, so the rest of the machine is safe.
 `systemctl status` then reports `Result: oom-kill`.
 
 !!! note "systemd-oomd"
-    systemd also ships `systemd-oomd`, a userspace daemon that watches memory
+    systemd also has `systemd-oomd`, a userspace daemon that watches memory
     *pressure* and kills a whole cgroup before the kernel OOM killer has to
-    act. Check whether it runs on your system with
+    act. On Rocky it is a separate package (`systemd-oomd`), so check before
+    you rely on it: `rpm -q systemd-oomd` and
     `systemctl is-enabled systemd-oomd`.
 
 !!! danger "Don't set -1000 everywhere"
@@ -967,25 +1029,31 @@ $ ulimit -n            # soft limit on open files
 1024
 $ ulimit -Hn           # hard limit
 524288
-$ ulimit -a
-real-time non-blocking time  (microseconds, -R) unlimited
-core file size              (blocks, -c) unlimited
-data seg size               (kbytes, -d) unlimited
-scheduling priority                 (-e) 0
-file size                   (blocks, -f) unlimited
-pending signals                     (-i) 14421
-max locked memory           (kbytes, -l) 8192
-max memory size             (kbytes, -m) unlimited
-open files                          (-n) 1024
-pipe size                (512 bytes, -p) 8
-POSIX message queues         (bytes, -q) 819200
-real-time priority                  (-r) 0
-stack size                  (kbytes, -s) 8192
-cpu time                   (seconds, -t) unlimited
-max user processes                  (-u) 14421
-virtual memory              (kbytes, -v) unlimited
-file locks                          (-x) unlimited
 ```
+
+`ulimit -a` lists every limit with the option letter that changes it.
+
+??? example "Sample `ulimit -a` output on Rocky 10"
+    ```console
+    $ ulimit -a
+    real-time non-blocking time  (microseconds, -R) unlimited
+    core file size              (blocks, -c) unlimited
+    data seg size               (kbytes, -d) unlimited
+    scheduling priority                 (-e) 0
+    file size                   (blocks, -f) unlimited
+    pending signals                     (-i) 14421
+    max locked memory           (kbytes, -l) 8192
+    max memory size             (kbytes, -m) unlimited
+    open files                          (-n) 1024
+    pipe size                (512 bytes, -p) 8
+    POSIX message queues         (bytes, -q) 819200
+    real-time priority                  (-r) 0
+    stack size                  (kbytes, -s) 8192
+    cpu time                   (seconds, -t) unlimited
+    max user processes                  (-u) 14421
+    virtual memory              (kbytes, -v) unlimited
+    file locks                          (-x) unlimited
+    ```
 
 Where limits come from depends on how the process was started:
 
@@ -1114,7 +1182,7 @@ Services started by systemd use `LimitNOFILE=` (set it with
            4101 Z
         ```
 
-    4. Kill the *parent*. The zombie is re-parented to a subreaper, which
+    4. Kill the *parent*. The zombie is re-parented to PID 1 (systemd), which
        reaps it at once:
 
         ```console
@@ -1131,7 +1199,8 @@ Services started by systemd use `LimitNOFILE=` (set it with
         The `sleep 2` child exited, but its parent (now running `sleep 300`)
         has no code that calls `wait()`, so the exit status sat in the process
         table. `SIGKILL` can't affect something already dead. When the parent
-        died, the orphaned zombie was adopted and reaped.
+        died, the orphaned zombie was adopted by systemd (PID 1), which
+        called `wait()` straight away.
 
     **Clean up:** nothing left; `jobs` should be empty.
 
@@ -1179,30 +1248,38 @@ Services started by systemd use `LimitNOFILE=` (set it with
 
         ```console
         $ bash
+        $ echo $$
+        4210
         $ ulimit -n 8
         $ ulimit -n
         8
         ```
 
-    2. Try to open many files at once with a here-loop:
+        Note the PID (4210 here): you'll need it in step 3.
+
+    2. Try to open many files at once with a loop:
 
         ```console
         $ for i in $(seq 3 12); do eval "exec $i</etc/hostname" || break; done
         bash: /etc/hostname: Too many open files
         ```
 
-    3. Inspect from the inside:
+    3. Inspect it from **outside**. Every descriptor below the limit is now
+       in use, so even starting `ls` or `grep` from this shell would fail
+       (the dynamic linker can't open the shared libraries). In a second
+       terminal, look at the subshell, using the PID from step 1:
 
         ```console
-        $ grep 'open files' /proc/$$/limits
+        $ grep 'open files' /proc/4210/limits
         Max open files            8                    8                    files
-        $ ls /proc/$$/fd
-        0  1  2  3  4  5  6  7
+        $ ls /proc/4210/fd
+        0  1  2  255  3  4  5  6  7
         ```
 
-        Note that the hard limit dropped too: `ulimit -n` sets both unless
-        you add `-S`. Try `ulimit -n 1024` now and it fails, because a normal
-        user can't raise the hard limit.
+        `255` is the copy of the terminal that interactive bash keeps for
+        itself. The hard limit dropped too: `ulimit -n` sets both unless you
+        add `-S`. Back in the subshell, `ulimit -n 1024` now fails, because a
+        normal user can't raise a hard limit.
 
     4. Leave the subshell with `exit`, and check your original shell still
        shows `ulimit -n` of 1024.

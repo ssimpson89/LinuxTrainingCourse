@@ -65,7 +65,7 @@ of that stage on a running system.
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. Firmware" markdown>
+<div class="step" data-title="Firmware" markdown>
 
 **What happens:** you press power. The **firmware** (code in a chip on the
 motherboard, or the hypervisor's virtual firmware) tests the hardware
@@ -93,7 +93,7 @@ The `Rocky Linux` entry points at `shimx64.efi` on the ESP.
 
 </div>
 
-<div class="step" data-title="2. shim and Secure Boot" markdown>
+<div class="step" data-title="shim and Secure Boot" markdown>
 
 **What happens:** with **Secure Boot** on, UEFI only runs programs signed by
 a key it trusts, which on most hardware means Microsoft's. Microsoft won't
@@ -117,7 +117,7 @@ so malware with root can't do it silently.
 
 </div>
 
-<div class="step" data-title="3. GRUB2 and BLS" markdown>
+<div class="step" data-title="GRUB2 and BLS" markdown>
 
 **What happens:** **GRUB2**, the bootloader, shows the menu, reads the
 chosen entry, and loads two files from `/boot` into memory: the kernel
@@ -146,7 +146,7 @@ The `options` line is the kernel command line. The real GRUB config,
 
 </div>
 
-<div class="step" data-title="4. The kernel" markdown>
+<div class="step" data-title="The kernel" markdown>
 
 **What happens:** the kernel decompresses itself, detects CPUs and memory,
 initialises built-in drivers, and reads its command line. It unpacks the
@@ -166,7 +166,7 @@ says mount it read-only at first (so it can be checked).
 
 </div>
 
-<div class="step" data-title="5. The initramfs" markdown>
+<div class="step" data-title="The initramfs" markdown>
 
 **What happens:** the **initramfs** is a compressed archive of a mini Linux
 system: systemd, udev, a few tools (`lvm`, `cryptsetup`, `fsck`), and just the
@@ -191,7 +191,7 @@ kernel-modules
 
 </div>
 
-<div class="step" data-title="6. switch_root" markdown>
+<div class="step" data-title="switch_root" markdown>
 
 **What happens:** with the real root mounted at `/sysroot`, the initramfs
 hands over. `switch_root` deletes the initramfs contents to free the RAM,
@@ -208,7 +208,7 @@ The `(initrd)` figure is how long step 5 took.
 
 </div>
 
-<div class="step" data-title="7. systemd and targets" markdown>
+<div class="step" data-title="systemd and targets" markdown>
 
 **What happens:** systemd on the real root reads `/etc/fstab` (turning each
 line into a `.mount` unit), remounts root read-write, and works toward
@@ -231,7 +231,7 @@ Units and targets are covered in
 
 </div>
 
-<div class="step" data-title="8. Login" markdown>
+<div class="step" data-title="Login" markdown>
 
 **What happens:** `getty@tty1.service` runs `agetty` on the console,
 which prints the login prompt and hands you to `login`. Over the network,
@@ -304,6 +304,33 @@ DNF keeps the last three kernels by default (`installonly_limit=3` in
 `/etc/dnf/dnf.conf`), so a bad kernel update can always be undone by booting
 the previous one.
 
+??? question "Under the hood: the rescue entry is frozen in time"
+    The `0-rescue` kernel and its generic initramfs are created **once**, when
+    the system is installed (by the `dracut-config-rescue` package's
+    `kernel-install` hook), and are not refreshed when you update the kernel.
+    On a server that has been patched for three years, the rescue entry is
+    still the install-day kernel. It still boots almost anything, but it may
+    lack drivers for hardware added since, and it won't match the modules in
+    `/lib/modules`. If you want a fresh one, delete the two `*-rescue-*`
+    files in `/boot` and the matching BLS entry, then run
+    `sudo kernel-install add $(uname -r) /lib/modules/$(uname -r)/vmlinuz`.
+
+??? question "Under the hood: where the default kernel choice is stored"
+    `grubby --set-default` doesn't edit any BLS file. It writes the chosen
+    entry's ID into GRUB's small environment block, `/boot/grub2/grubenv`:
+
+    ```console
+    $ sudo grub2-editenv list
+    saved_entry=2b1e…-6.12.0-55.9.1.el10_0.x86_64
+    boot_success=1
+    ```
+
+    `GRUB_DEFAULT=saved` in `/etc/default/grub` tells GRUB to read it. When
+    the "default kernel" mysteriously ignores what you set, look here. A
+    `saved_entry` that names a kernel you've since removed makes GRUB fall
+    back to the first entry. `boot_success` is part of the logic that shows
+    the menu automatically after a failed boot.
+
 ### Change kernel arguments
 
 ```console
@@ -330,9 +357,10 @@ The default is /boot/loader/entries/2b1e…-6.12.0-55.9.1.el10_0.x86_64.conf wit
 At the GRUB menu, highlight an entry and press ++e++. Find the line starting
 `linux` and add or remove words at its end, then press ++ctrl+x++ to boot.
 Nothing is saved: the next boot is back to normal. This is how you reach
-rescue modes and reset passwords. (If the menu is hidden, hold ++shift++ on
-BIOS or press ++esc++ repeatedly on UEFI while booting; Rocky shows the menu
-anyway after a failed boot.)
+rescue modes and reset passwords. A Rocky server shows the menu for five
+seconds (`GRUB_TIMEOUT=5` in `/etc/default/grub`); press an arrow key to stop
+the countdown. If someone has hidden the menu, hold ++shift++ (BIOS) or press
+++esc++ repeatedly (UEFI) while the machine starts.
 
 !!! tip "Useful one-boot kernel arguments"
     | Argument | Effect |
@@ -495,7 +523,7 @@ in `/etc/dracut.conf.d/`.
 ## Rescue and emergency targets
 
 When the system boots but something in the normal startup is broken, systemd
-offers two minimal modes. Both need the **root password**.
+offers two minimal modes. Both ask for the **root password** (see the locked-root pitfall below).
 
 | Mode | Kernel argument | You get | Use it when |
 |---|---|---|---|
@@ -508,8 +536,8 @@ required in `/etc/fstab` fails to mount:
 
 ```text
 You are in emergency mode. After logging in, type "journalctl -xb" to view
-system logs, "systemctl reboot" to reboot, "systemctl default" or "exit"
-to boot into default mode.
+system logs, "systemctl reboot" to reboot, or "exit"
+to continue bootup.
 Give root password for maintenance
 (or press Control-D to continue):
 ```
@@ -531,12 +559,32 @@ The fix workflow, once you've logged in:
     instead of stopping in emergency mode. Always run `sudo mount -a` and
     `sudo findmnt --verify` after editing fstab, *before* you reboot.
 
-!!! pitfall "Cannot open access to console: the root account is locked"
-    If root has no password (common when you created an admin user at
-    install and left root locked), rescue and emergency mode can't give you
-    a shell. You'll need the `init=/bin/bash` method below, or boot from the
-    installation media. Setting a strong root password on servers you
-    maintain at the console avoids the problem.
+!!! pitfall "Cannot open access to console, the root account is locked"
+    If root has no password (the Rocky installer's default when you create
+    an admin user and don't set one for root), rescue and emergency mode
+    print this message and give you no shell. Your options: `rd.break` (next
+    section), which doesn't ask for the root password at all; booting the
+    installation media in rescue mode; or the opt-in override below. Setting
+    a strong root password on servers you maintain at the console avoids the
+    problem.
+
+??? question "Under the hood: who asks for the root password, and how to skip it"
+    `emergency.service` and `rescue.service` run
+    `systemd-sulogin-shell`, which runs `sulogin`. `sulogin` reads the root
+    hash from `/etc/shadow`; a locked hash (`!` or `*`) means it refuses.
+    systemd has an escape hatch: if the environment variable
+    `SYSTEMD_SULOGIN_FORCE=1` is set, it calls `sulogin --force`, which
+    gives a root shell without a password when root is locked. You can set
+    it for one boot from the GRUB editor:
+
+    ```text
+    systemd.unit=emergency.target systemd.setenv=SYSTEMD_SULOGIN_FORCE=1
+    ```
+
+    or permanently with a drop-in for `emergency.service` and
+    `rescue.service`. That second option means anyone at the console gets
+    root, so treat it as a deliberate policy decision (protect GRUB with a
+    password if you use it).
 
 ## Resetting a lost root password
 
@@ -546,7 +594,7 @@ before the real system starts, and change the password from there.
 
 <div class="stepper" markdown>
 
-<div class="step" data-title="1. Interrupt GRUB" markdown>
+<div class="step" data-title="Interrupt GRUB" markdown>
 
 Reboot. At the GRUB menu press ++e++ on the default entry. Go to the end of
 the line starting with `linux` and add:
@@ -560,7 +608,7 @@ asked for the LUKS passphrase: this method doesn't bypass encryption.)
 
 </div>
 
-<div class="step" data-title="2. You're in the initramfs" markdown>
+<div class="step" data-title="You're in the initramfs" markdown>
 
 You land at a `switch_root:/#` prompt. This is the initramfs. The real root
 filesystem is mounted, read-only, at `/sysroot`:
@@ -572,7 +620,7 @@ switch_root:/# mount | grep sysroot
 
 </div>
 
-<div class="step" data-title="3. Make it writable, enter it" markdown>
+<div class="step" data-title="Make it writable, enter it" markdown>
 
 ```console
 switch_root:/# mount -o remount,rw /sysroot
@@ -585,7 +633,7 @@ the real `/etc/shadow`.
 
 </div>
 
-<div class="step" data-title="4. Change the password" markdown>
+<div class="step" data-title="Change the password" markdown>
 
 ```console
 sh-5.2# passwd root
@@ -596,7 +644,7 @@ passwd: all authentication tokens updated successfully.
 
 </div>
 
-<div class="step" data-title="5. Schedule an SELinux relabel" markdown>
+<div class="step" data-title="Schedule an SELinux relabel" markdown>
 
 ```console
 sh-5.2# touch /.autorelabel
@@ -610,7 +658,7 @@ filesystem (this takes a few minutes and reboots once more on its own).
 
 </div>
 
-<div class="step" data-title="6. Leave and continue" markdown>
+<div class="step" data-title="Leave and continue" markdown>
 
 ```console
 sh-5.2# exit
@@ -625,13 +673,28 @@ password.
 
 </div>
 
-!!! note "If root is locked: `init=/bin/bash`"
-    When `rd.break` refuses to give a shell because the root account is
-    locked, use `init=/bin/bash` instead of `rd.break` on the `linux` line.
-    The kernel then runs bash instead of systemd, on the real root. Run
-    `mount -o remount,rw /`, `passwd root`, `touch /.autorelabel`, then
-    `/usr/sbin/reboot -f` (there's no systemd to do a clean reboot, so run
-    `sync` first).
+!!! note "Plan B: `init=/bin/bash`"
+    `rd.break` normally gives you a shell with no password prompt, because
+    the initramfs carries no copy of `/etc/shadow` to check against. Some
+    builds have asked for the root password here anyway (early RHEL 9.0 did,
+    and showed `Cannot open access to console, the root account is locked`
+    when root had none). If that happens, replace `rd.break` with
+    `init=/bin/bash` on the `linux` line. The initramfs still mounts the
+    real root, but then runs bash instead of systemd. Run
+    `mount -o remount,rw /`, `passwd root`, `touch /.autorelabel`, and
+    `sync`. Then `exec /sbin/init` to continue a normal boot (which runs the
+    relabel), or `/usr/sbin/reboot -f`.
+
+??? question "Under the hood: a faster alternative to a full relabel"
+    `/.autorelabel` relabels **every** file. On a multi-terabyte root
+    filesystem that can take a long time, during which the machine is down.
+    Only one file actually needs fixing, so on big systems some admins skip
+    the full relabel: they boot once with `enforcing=0` added at the GRUB
+    menu, log in, run `sudo restorecon -v /etc/shadow`, check
+    `ls -Z /etc/shadow` shows `shadow_t`, and reboot. If you changed other
+    files from the chroot (for example `/etc/passwd` with `usermod`), run
+    `restorecon` on those too. When in doubt, the full relabel is the safe
+    choice.
 
 !!! danger "Console access is root access"
     Anyone at the console can do this. Protect servers with physical
@@ -681,8 +744,13 @@ start.
     `kdump.service` loads a second, small "crash kernel" into reserved memory
     (that's the `crashkernel=` argument). If the main kernel panics, the
     crash kernel boots and saves a memory dump to `/var/crash` for analysis.
-    It has its own initramfs, built by `kdumpctl`, not `dracut -f`. Covered in
-    [15 · The Kernel](15-the-kernel.md).
+    It has its own initramfs (`initramfs-<version>kdump.img`, in `/boot` or,
+    on some layouts, `/var/lib/kdump/`), built by `kdumpctl`, not
+    `dracut -f`. At boot, `kdump.service` loads the crash kernel with
+    `kexec`, and first rebuilds that image if the kernel or
+    `/etc/kdump.conf` changed, which is why it sometimes shows up in
+    `critical-chain`.
+    Covered in [15 · The Kernel](15-the-kernel.md).
 
 ## Common boot failures
 
@@ -955,9 +1023,9 @@ it's a data disk, fix `/etc/fstab` (add `nofail` or
         `rd.break` paused the boot right before `switch_root`, with the real
         root at `/sysroot`. You changed `/etc/shadow` through a chroot.
         Because SELinux wasn't loaded yet, the relabel on the next boot put
-        back the right label. If you see the "root account is locked"
-        message at step 2, use the `init=/bin/bash` method from the note
-        above.
+        back the right label. If you were asked for a root password at
+        step 2 instead of getting a prompt, use the `init=/bin/bash` method
+        from the note above.
 
     **Clean up:** set the root password back to what you want (or lock it
     again with `sudo passwd -l root`), or revert the snapshot.
@@ -974,7 +1042,7 @@ it's a data disk, fix `/etc/fstab` (add `nofail` or
 | Kernel panic "Unable to mount root fs" after update | Missing/incomplete initramfs (often full `/boot`) | Boot previous kernel, free space, `dracut -f --kver …` |
 | Third-party module won't load, "Key was rejected" | Secure Boot, unsigned module | Sign it and enroll the key with `mokutil --import` |
 | `dracut -f` fixed only one kernel | It rebuilds only the running kernel by default | `dracut -f --regenerate-all` |
-| Rescue mode says root account is locked | No root password | `init=/bin/bash`, or installation media rescue |
+| Rescue mode says root account is locked | No root password, so `sulogin` refuses | `rd.break` (no password needed), installation media rescue, or `systemd.setenv=SYSTEMD_SULOGIN_FORCE=1` |
 
 ## Cheat sheet
 

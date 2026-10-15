@@ -93,6 +93,25 @@ automatically and tagged with the unit name. You learned in
 [07 · systemd and Services](07-systemd-and-services.md) that a service
 shouldn't manage its own log files; this is why.
 
+??? question "Under the hood: two stdout surprises"
+    **Buffering.** When stdout is a pipe instead of a terminal, most runtimes
+    buffer output in blocks of several KiB. A Python service that prints one
+    line a minute can look silent in `journalctl -f` for an hour, then dump
+    everything at once (or lose it in a crash). Set
+    `Environment=PYTHONUNBUFFERED=1` in the unit, or flush explicitly.
+
+    **Priority.** Every stdout line arrives at priority `info` (stderr too),
+    so `journalctl -p err` won't find your app's errors. But systemd honours
+    a kernel-style prefix: a line that starts with `<3>` is stored as
+    priority 3 (`err`) with the prefix removed (`SyslogLevelPrefix=`, on by
+    default). Try it:
+
+    ```console
+    $ sudo systemd-run --unit=prio-demo bash -c 'echo "<3>disk on fire"; echo "all good"'
+    $ journalctl -u prio-demo -p err -o cat
+    disk on fire
+    ```
+
 ### The syslog socket
 
 The traditional Unix logging API, `syslog()`, sends messages to the socket
@@ -134,7 +153,10 @@ Thu 2026-10-15 10:31:07.118204 UTC [s=3c1f…;i=1a2b;b=8e4c…;m=…;t=…;x=…
 ```
 
 Because entries are fields, you can filter on any of them precisely, without
-fragile `grep` patterns. And because the journal is indexed, those filters are
+fragile `grep` patterns. One trusted field worth knowing is **`_TRANSPORT`**:
+how the message arrived (`kernel`, `stdout`, `syslog`, `journal`, `audit`,
+or `driver` for journald's own notes). `journalctl _TRANSPORT=stdout -b`
+shows only what services printed. And because the journal is indexed, those filters are
 fast even on gigabytes of logs.
 
 ### Priorities
@@ -174,7 +196,7 @@ $ journalctl -f                       # follow new messages live (like tail -f)
 $ journalctl -e                       # jump to the end
 $ journalctl -n 50                    # last 50 entries
 $ journalctl -r                       # newest first
-$ journalctl -g 'timed out'           # grep the MESSAGE field (regex)
+$ journalctl -g 'timed out'           # grep MESSAGE (regex; all-lowercase = case-insensitive)
 $ journalctl -x                       # add explanation text where available
 ```
 
@@ -350,8 +372,9 @@ The `Storage=` setting decides:
 | `none` | Don't store (still forwards to rsyslog etc.) |
 
 Whether your machine keeps old boots therefore depends on whether that
-directory exists, which varies with how the system was installed. Check it
-rather than guess:
+directory exists. Many Rocky installs have it, but cloud images, containers,
+kickstarts that trim `/var/log`, and "cleaned up" golden images often don't.
+Check it rather than guess. This is what a volatile journal looks like:
 
 ```console
 $ ls -ld /var/log/journal
@@ -376,31 +399,30 @@ flowchart TD
     E --> F["lost at reboot"]
 ```
 
-### Prove it: where the journal really is
+??? question "Prove it: where the journal really is"
+    Ask journald itself which files it's using and how big they are:
 
-Ask journald itself which files it's using and how big they are:
+    ```console
+    $ sudo ls -l /var/log/journal/$(cat /etc/machine-id)/
+    -rw-r-----+ 1 root systemd-journal 16777216 Oct 15 09:02 system@8f1d…-0000000000000001-00063f….journal
+    -rw-r-----+ 1 root systemd-journal  8388608 Oct 15 13:40 system.journal
+    -rw-r-----+ 1 root systemd-journal  8388608 Oct 15 13:38 user-1000.journal
+    $ journalctl --header --file /var/log/journal/$(cat /etc/machine-id)/system.journal | head -4
+    File path: /var/log/journal/2b1e…/system.journal
+    File ID: 51c0…
+    Machine ID: 2b1e…
+    Boot ID: 8e4c2f0d6a7b4e1c9d3f5a6b7c8d9e0f
+    ```
 
-```console
-$ sudo ls -l /var/log/journal/$(cat /etc/machine-id)/
--rw-r-----+ 1 root systemd-journal 16777216 Oct 15 09:02 system@8f1d…-0000000000000001-00063f….journal
--rw-r-----+ 1 root systemd-journal  8388608 Oct 15 13:40 system.journal
--rw-r-----+ 1 root systemd-journal  8388608 Oct 15 13:38 user-1000.journal
-$ journalctl --header --file /var/log/journal/$(cat /etc/machine-id)/system.journal | head -4
-File path: /var/log/journal/2b1e…/system.journal
-File ID: 51c0…
-Machine ID: 2b1e…
-Boot ID: 8e4c2f0d6a7b4e1c9d3f5a6b7c8d9e0f
-```
-
-The directory is named after the **machine ID** (`/etc/machine-id`), a
-unique ID generated at install. `system.journal` is the active file;
-names with `@` are archived (rotated) files that are never modified again.
-`user-1000.journal` holds messages from UID 1000's own processes, which is how
-normal users can read their own logs. The `+` after the permissions means an
-ACL grants read access to groups like `wheel` and `adm`. Journal files are
-binary, so read them with `journalctl` (`--file` or `-D <dir>` reads
-copies, for example from a dead server's disk), and check them for corruption
-with `journalctl --verify`.
+    The directory is named after the **machine ID** (`/etc/machine-id`), a
+    unique ID generated at install. `system.journal` is the active file;
+    names with `@` are archived (rotated) files that are never modified again.
+    `user-1000.journal` holds messages from UID 1000's own processes, which is how
+    normal users can read their own logs. The `+` after the permissions means an
+    ACL grants read access to groups like `wheel` and `adm`. Journal files are
+    binary, so read them with `journalctl` (`--file` or `-D <dir>` reads
+    copies, for example from a dead server's disk), and check them for corruption
+    with `journalctl --verify`.
 
 ### Configuring journald
 
@@ -429,10 +451,13 @@ $ sudo journalctl --vacuum-time=2weeks    # or delete by age
 
 !!! version "Rocky 9 vs 10"
     On Rocky 9 the default settings live in `/etc/systemd/journald.conf`
-    (all commented out). On Rocky 10 the shipped defaults moved to
-    `/usr/lib/systemd/journald.conf`, and `/etc/systemd/journald.conf` may
-    not exist. A drop-in in `/etc/systemd/journald.conf.d/` works on both and
-    survives updates, so always use that.
+    (all commented out). Newer systemd packaging ships the commented
+    defaults as `/usr/lib/systemd/journald.conf` instead, so on Rocky 10 the
+    `/etc` copy may not exist. Find out with
+    `ls /etc/systemd/journald.conf /usr/lib/systemd/journald.conf`. A drop-in
+    in `/etc/systemd/journald.conf.d/` works on both and survives updates,
+    so always use that, and check the merged result with
+    `systemd-analyze cat-config systemd/journald.conf`.
 
 ### Rate limiting
 
@@ -445,7 +470,17 @@ systemd-journald[611]: Suppressed 48213 messages from chatty.service
 ```
 
 If you see that, the service has a logging problem. Raise the limit only if
-you really need every line.
+you really need every line. For a single noisy unit, set
+`LogRateLimitIntervalSec=` / `LogRateLimitBurst=` in that unit instead of
+changing the global value.
+
+??? question "Under the hood: why the same flood is dropped on one box and not another"
+    The burst isn't a fixed number. journald scales it by the free space on
+    the filesystem holding the journal (roughly, the more free space, the
+    more it lets through), so the documented 10,000 is a base value. Two
+    "identical" servers with different free space will suppress different
+    amounts of the same flood. When you compare, look at the actual
+    `Suppressed N messages` lines, not the config.
 
 ## rsyslog and the classic /var/log files
 
@@ -604,11 +639,19 @@ If an attacker gets root, or the disk dies, local logs are gone or
 untrustworthy. Sending a copy to a central log host fixes both. The simplest
 route on Rocky is rsyslog over TCP.
 
+Which port? Classic syslog is 514/**udp**. For TCP, use **601**, the
+registered syslog-over-TCP port. On Rocky this matters because of SELinux:
+601/tcp is already labelled `syslogd_port_t`, so rsyslog may listen on it,
+while 514/tcp is labelled for the old `rsh` service, which rsyslog isn't allowed to bind
+(check with `sudo semanage port -l | grep -E 'syslog|rsh'`). Many guides
+say "TCP 514"; on an enforcing Rocky box that fails with an AVC denial
+unless you relabel the port.
+
 ```mermaid
 sequenceDiagram
     participant C as client (rsyslog)
-    participant S as loghost (rsyslog, port 514/tcp)
-    C->>C: journald → imjournal → rule *.* @@loghost:514
+    participant S as loghost (rsyslog, port 601/tcp)
+    C->>C: journald → imjournal → rule *.* @@loghost:601
     C->>S: TCP: syslog message
     S->>S: write /var/log/remote/client/…
     Note over C: if loghost is down, the action queue buffers to disk
@@ -618,7 +661,7 @@ On the **log server**, enable the TCP input and open the firewall:
 
 ```text title="/etc/rsyslog.d/10-receive.conf (server)"
 module(load="imtcp")
-input(type="imtcp" port="514")
+input(type="imtcp" port="601")
 template(name="PerHost" type="string" string="/var/log/remote/%HOSTNAME%/messages.log")
 if $fromhost-ip != '127.0.0.1' then {
     action(type="omfile" dynaFile="PerHost")
@@ -628,7 +671,7 @@ if $fromhost-ip != '127.0.0.1' then {
 
 ```console
 $ sudo systemctl restart rsyslog
-$ sudo firewall-cmd --add-port=514/tcp --permanent && sudo firewall-cmd --reload
+$ sudo firewall-cmd --add-port=601/tcp --permanent && sudo firewall-cmd --reload
 ```
 
 On each **client**, forward everything. `@@` means TCP (a single `@` is UDP),
@@ -636,7 +679,7 @@ and the queue settings make rsyslog buffer to disk while the server is
 unreachable:
 
 ```text title="/etc/rsyslog.d/90-forward.conf (client)"
-*.* action(type="omfwd" target="loghost.example.com" port="514" protocol="tcp"
+*.* action(type="omfwd" target="loghost.example.com" port="601" protocol="tcp"
            queue.type="LinkedList" queue.filename="fwd" queue.saveOnShutdown="on"
            action.resumeRetryCount="-1")
 ```
@@ -770,8 +813,9 @@ from this module. Pick the noisiest or earliest source and go back to
     4. Which units logged errors this boot?
        `journalctl -b -p err -o json | jq -r '._SYSTEMD_UNIT // .SYSLOG_IDENTIFIER' | sort | uniq -c`
        (install `jq` with `sudo dnf install jq` if needed)
-    5. Make a failure and find it. Run `sudo systemctl start nosuchthing`,
-       then find the message with `journalctl -b -n 20 -p notice`.
+    5. Make a failure and find it. Run a transient service that fails at once,
+       `sudo systemd-run --unit=lab1-fail /bin/false`, then find out why
+       with `journalctl -u lab1-fail -p notice`.
     6. Find every message from one PID: pick a PID from step 3 output and run
        `journalctl _PID=<pid>`.
 
@@ -784,7 +828,8 @@ from this module. Pick the noisiest or earliest source and go back to
         scan the whole log. `-g` then searched only inside the matching
         entries.
 
-    **Clean up:** nothing to clean up.
+    **Clean up:** `sudo systemctl reset-failed lab1-fail` removes the failed
+    transient unit.
 
 !!! lab "Lab 2: Make the journal survive reboots"
 
@@ -794,6 +839,8 @@ from this module. Pick the noisiest or earliest source and go back to
     **You'll need:** a Rocky 10 VM, sudo, permission to reboot.
 
     1. Check the current state: `ls -ld /var/log/journal; journalctl --list-boots | wc -l`.
+       If the directory already exists, your journal is already persistent:
+       do the lab anyway to add the size cap and see the proof in step 5.
     2. Create a drop-in:
 
         ```bash
@@ -886,10 +933,18 @@ from this module. Pick the noisiest or earliest source and go back to
         $ sudo logrotate -d /etc/logrotate.d/myapp
         $ sudo logrotate -f /etc/logrotate.d/myapp
         $ ls /var/log/myapp*
-        /var/log/myapp.log  /var/log/myapp.log.1.gz
+        /var/log/myapp.log.1.gz
         ```
 
-    6. Log again and confirm the new message lands in the fresh file.
+        There's no `myapp.log` yet: rsyslog creates it on the next message.
+
+    6. Log again and confirm the new message lands in a fresh file:
+
+        ```console
+        $ logger -p local5.info -t myapp "order 1235 created"
+        $ ls /var/log/myapp*
+        /var/log/myapp.log  /var/log/myapp.log.1.gz
+        ```
 
     **Check your work:** the message is in `myapp.log` but not in `messages`,
     and after rotation a `.1.gz` exists and new messages go to the new file.
@@ -897,9 +952,16 @@ from this module. Pick the noisiest or earliest source and go back to
     ??? success "What just happened?"
         rsyslog matched the `local5` facility and wrote to your file. The
         `HUP` in `postrotate` told rsyslog to reopen its files, so it stopped
-        writing into the rotated copy. The rotated file is named `.1` here
-        because this rule doesn't use `dateext` (the global default in
-        `/etc/logrotate.conf` does; per-file settings override it).
+        writing into the rotated copy.
+
+        The rotated file is named `.1.gz`, not `-20261015.gz`, for a subtle
+        reason: when you pass logrotate a single file, it reads **only that
+        file**, so the global defaults in `/etc/logrotate.conf` (including
+        `dateext`) never applied. The daily `logrotate.timer` runs
+        `logrotate /etc/logrotate.conf`, which sets the globals first and then
+        includes `/etc/logrotate.d/`, so tonight's rotation would be date
+        named. To test a rule exactly as the timer will run it, use
+        `sudo logrotate -d /etc/logrotate.conf`.
 
     **Clean up:** `sudo rm /etc/rsyslog.d/40-myapp.conf /etc/logrotate.d/myapp /var/log/myapp.log*; sudo systemctl restart rsyslog`
 
@@ -915,15 +977,15 @@ from this module. Pick the noisiest or earliest source and go back to
 
         ```console
         $ sudo systemctl restart rsyslog
-        $ sudo firewall-cmd --add-port=514/tcp
-        $ ss -ltn 'sport = :514'
+        $ sudo firewall-cmd --add-port=601/tcp
+        $ ss -ltn 'sport = :601'
         ```
 
     2. On **client**, create the forwarding rule:
 
         ```bash
         sudo tee /etc/rsyslog.d/90-forward.conf <<'EOF'
-        *.* action(type="omfwd" target="192.168.122.50" port="514" protocol="tcp"
+        *.* action(type="omfwd" target="192.168.122.50" port="601" protocol="tcp"
                    queue.type="LinkedList" queue.filename="fwd" action.resumeRetryCount="-1")
         EOF
         sudo systemctl restart rsyslog
@@ -937,7 +999,7 @@ from this module. Pick the noisiest or earliest source and go back to
 
     ??? success "What just happened?"
         journald handed the message to rsyslog on the client, which forwarded
-        it over TCP to port 514. The server's `imtcp` input received it and
+        it over TCP to port 601. The server's `imtcp` input received it and
         the `PerHost` template wrote it into a per-client file. The firewall
         rule here is runtime only (no `--permanent`), so it disappears at the
         next reload.

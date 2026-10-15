@@ -138,30 +138,29 @@ Oct 13 09:12:50 rocky10 chronyd[806]: Selected source 162.159.200.1 (2.rocky.poo
   systemd can't lose track of a child process, even if it double-forks.
 - The last lines are the newest journal entries for this unit.
 
-### Prove it: how systemd keeps track
+??? question "Prove it: how systemd keeps track of every process"
+    The `CGroup:` line isn't decoration. Each service gets a directory in the
+    cgroup filesystem, and the kernel lists every process in it. A process can't
+    leave its cgroup by forking or detaching from a terminal, which is why systemd
+    never loses a child the way PID files used to:
 
-The `CGroup:` line isn't decoration. Each service gets a directory in the
-cgroup filesystem, and the kernel lists every process in it. A process can't
-leave its cgroup by forking or detaching from a terminal, which is why systemd
-never loses a child the way PID files used to:
+    ```console
+    $ systemctl show sshd -p MainPID -p ControlGroup -p NRestarts
+    MainPID=899
+    ControlGroup=/system.slice/sshd.service
+    NRestarts=0
+    $ cat /sys/fs/cgroup/system.slice/sshd.service/cgroup.procs
+    899
+    $ cat /proc/899/cgroup
+    0::/system.slice/sshd.service
+    ```
 
-```console
-$ systemctl show sshd -p MainPID -p ControlGroup -p NRestarts
-MainPID=899
-ControlGroup=/system.slice/sshd.service
-NRestarts=0
-$ cat /sys/fs/cgroup/system.slice/sshd.service/cgroup.procs
-899
-$ cat /proc/899/cgroup
-0::/system.slice/sshd.service
-```
-
-When you `systemctl stop` a service, systemd signals *every* PID in that
-cgroup (how it does so is set by `KillMode=`), not just the main one. That's
-how it cleans up stray children a SysV script would have left behind.
-`systemctl show <unit>` with no `-p` dumps every property systemd knows,
-hundreds of them; it's the authoritative "what is systemd actually using"
-view, after all files and drop-ins have been merged.
+    When you `systemctl stop` a service, systemd signals *every* PID in that
+    cgroup (how it does so is set by `KillMode=`), not just the main one. That's
+    how it cleans up stray children a SysV script would have left behind.
+    `systemctl show <unit>` with no `-p` dumps every property systemd knows,
+    hundreds of them; it's the authoritative "what is systemd actually using"
+    view, after all files and drop-ins have been merged.
 
 ### The everyday verbs
 
@@ -274,8 +273,9 @@ Failed to start cups.service: Unit cups.service is masked.
 $ sudo systemctl unmask cups
 ```
 
-Use masking when two services conflict (for example, keep `iptables` from ever
-fighting with `firewalld`).
+Use masking when two services conflict. For example, if you manage the
+firewall with your own `nftables.service` rules, mask `firewalld` so nothing
+can start it and wipe your ruleset.
 
 ## Where unit files live
 
@@ -330,33 +330,52 @@ Here is the shape of a typical service unit (trimmed; your copy of
 
 ```ini title="/usr/lib/systemd/system/sshd.service"
 [Unit]
-Description=OpenSSH server daemon               # (1)!
+Description=OpenSSH server daemon
 Documentation=man:sshd(8) man:sshd_config(5)
-After=network.target sshd-keygen.target         # (2)!
-Wants=sshd-keygen.target                        # (3)!
+After=network.target sshd-keygen.target
+Wants=sshd-keygen.target
 
 [Service]
-Type=notify                                     # (4)!
-EnvironmentFile=-/etc/sysconfig/sshd            # (5)!
-ExecStart=/usr/sbin/sshd -D $OPTIONS            # (6)!
-ExecReload=/bin/kill -HUP $MAINPID              # (7)!
+Type=notify
+EnvironmentFile=-/etc/sysconfig/sshd
+ExecStart=/usr/sbin/sshd -D $OPTIONS
+ExecReload=/bin/kill -HUP $MAINPID
 KillMode=process
-Restart=on-failure                              # (8)!
+Restart=on-failure
 RestartSec=42s
 
 [Install]
-WantedBy=multi-user.target                      # (9)!
+WantedBy=multi-user.target
 ```
 
-1. Human-readable name shown in `status` and boot messages.
-2. **Ordering:** if both are being started, start this one after those.
-3. **Requirement (soft):** also start `sshd-keygen.target` when this starts.
-4. When systemd should consider the service "started". See the `Type=` table below.
-5. Read variables from this file. The leading `-` means "fine if it doesn't exist".
-6. The command to run. Must be an absolute path. `-D` keeps sshd in the foreground.
-7. What `systemctl reload` does. `$MAINPID` is filled in by systemd. Note the `HUP` from module 06.
-8. Self-healing: restart if it exits with an error or is killed by a signal.
-9. Used only by `systemctl enable`: create a symlink in `multi-user.target.wants/`.
+Line by line:
+
+- `Description=`: the human-readable name shown in `status` and boot messages.
+- `After=`: **ordering**. If both are being started, start this one after those.
+- `Wants=`: a soft **requirement**. Also start `sshd-keygen.target` (which
+  creates host keys on first boot) when this starts.
+- `Type=notify`: when systemd should consider the service "started". See the
+  `Type=` table below.
+- `EnvironmentFile=`: read variables from this file. The leading `-` means
+  "fine if it doesn't exist".
+- `ExecStart=`: the command to run, with an absolute path. `-D` keeps sshd in
+  the foreground.
+- `ExecReload=`: what `systemctl reload` does. systemd fills in `$MAINPID`.
+  Note the `HUP` from module 06.
+- `KillMode=process`: on stop or restart, signal only the main `sshd`
+  process, not everything in its cgroup. This is why
+  `systemctl restart sshd` doesn't cut off the SSH session you typed it in:
+  the per-connection `sshd-session` processes are left alone.
+- `Restart=on-failure`: self-healing. Restart after an error exit or a crash.
+- `WantedBy=`: used only by `systemctl enable`, which creates a symlink in
+  `multi-user.target.wants/`.
+
+!!! warning "No comments at the end of a line"
+    systemd unit files (and `journald.conf`) only treat `#` or `;` as a
+    comment at the *start* of a line. `Restart=on-failure  # heal` sets the
+    value to the whole string, and systemd logs a parse error and ignores
+    the setting. That's why the explanations here are in a list, not in the
+    file.
 
 Three sections, always the same jobs:
 
@@ -404,7 +423,7 @@ wait for it.
 |---|---|---|
 | `simple` (default) | Immediately, as soon as systemd has forked the process | Legacy default. Even a typo'd binary path counts as "started". |
 | `exec` | The program has actually been executed successfully | **Your default for new services.** Catches a bad `ExecStart=` path at start. |
-| `notify` | The program sends `READY=1` to systemd when it's really ready | Daemons built for systemd (`sshd`, `chronyd` in some builds, many databases). Best ordering guarantee. |
+| `notify` | The program sends `READY=1` to systemd when it's really ready | Daemons built for systemd (`sshd` on Rocky 10, PostgreSQL, many others). Best ordering guarantee. |
 | `oneshot` | The program has **finished** successfully | Setup scripts and jobs. Add `RemainAfterExit=yes` to keep the unit "active" afterwards. |
 | `forking` | The parent process exits, leaving a forked child behind | Old-style daemons that background themselves. Pair with `PIDFile=`. Avoid for new code. |
 
@@ -423,12 +442,29 @@ sequenceDiagram
     Note over SD: Type=oneshot: "started" (finished)
 ```
 
-How does a `Type=notify` service "say" it's ready? systemd puts the path of a
-socket in the service's environment variable `$NOTIFY_SOCKET`, and the
-program sends a tiny text message, `READY=1`, to it (through the
-`sd_notify()` library call). Scripts can do the same with the
-`systemd-notify --ready` command. The same channel carries `STATUS=…` text,
-which `systemctl status` shows as a `Status:` line.
+??? question "Under the hood: how a `Type=notify` service says it's ready"
+    How does a `Type=notify` service "say" it's ready? systemd puts the path of a
+    socket in the service's environment variable `$NOTIFY_SOCKET`, and the
+    program sends a tiny text message, `READY=1`, to it (through the
+    `sd_notify()` library call). Scripts can do the same with the
+    `systemd-notify --ready` command. The same channel carries `STATUS=…` text,
+    which `systemctl status` shows as a `Status:` line.
+
+    You can watch the protocol from a shell. This transient service sleeps 3
+    seconds, reports a status line, then declares itself ready:
+
+    ```console
+    $ sudo systemd-run --unit=notify-demo -p Type=notify -p NotifyAccess=all \
+        bash -c 'sleep 3; systemd-notify --status="warming up"; systemd-notify --ready; sleep 60'
+    $ systemctl status notify-demo | grep -E 'Active|Status'
+         Active: active (running) since …
+         Status: "warming up"
+    ```
+
+    `systemd-run` blocks for those 3 seconds, because with `Type=notify` the
+    unit stays `activating` until `READY=1` arrives. `NotifyAccess=all` is
+    needed because the message comes from a child process (`systemd-notify`),
+    not the main PID. Stop it with `sudo systemctl stop notify-demo`.
 
 <div class="quiz" data-answer="3" markdown>
 
@@ -627,6 +663,31 @@ RestartSec=5s
 Once a unit hits the limit it stays down until you fix it and run
 `sudo systemctl reset-failed <unit>` (or start it manually).
 
+!!! pitfall "`kill <pid>` doesn't trigger `Restart=on-failure`"
+    systemd treats death by `SIGTERM`, `SIGINT`, `SIGHUP`, or `SIGPIPE` as a
+    **clean** exit, the same as exit code 0. So if someone (or a script, or
+    the OOM tooling in an app) sends a plain `kill` to the main PID, an
+    `on-failure` service stays down. To test self-healing, use
+    `systemctl kill --signal=KILL`, or `kill -SEGV`. And `systemctl stop`
+    never triggers a restart, whatever `Restart=` says.
+
+??? question "Under the hood: back off instead of hammering"
+    A fixed `RestartSec=5s` retries a dead database every 5 seconds forever.
+    Since systemd 254 you can make the delay grow instead:
+
+    ```ini
+    [Service]
+    Restart=on-failure
+    RestartSec=2s
+    RestartSteps=5
+    RestartMaxDelaySec=2min
+    ```
+
+    The delay climbs from 2 seconds to 2 minutes over five restarts. Combine
+    it with `StartLimitIntervalSec=0` (no rate limit) for a service that
+    should keep trying through a long outage of something it depends on.
+    `systemctl show <unit> -p NRestarts` tells you how often it has fired.
+
 ```console
 $ systemctl show flaky -p NRestarts -p Result
 NRestarts=3
@@ -657,11 +718,6 @@ WantedBy=timers.target
 - `RandomizedDelaySec=`: add up to 15 minutes of random delay so a fleet doesn't all fire at once.
 - `Persistent=true`: if the machine was off at 02:30, run the job as soon as it boots.
 
-!!! warning "No comments at the end of a line"
-    systemd unit files (and `journald.conf`) only treat `#` or `;` as a
-    comment at the *start* of a line. `Persistent=true  # catch up` sets the
-    value to the whole string and the setting is rejected.
-
 It activates `cleanup.service` (same name, `.service` extension). You
 **enable the timer**, not the service:
 
@@ -684,7 +740,6 @@ $ systemd-analyze calendar 'Mon..Fri *-*-* 08:00' --iterations=3
   Original form: Mon..Fri *-*-* 08:00
 Normalized form: Mon..Fri *-*-* 08:00:00
     Next elapse: Fri 2026-10-16 08:00:00 UTC
-       (in UTC): Fri 2026-10-16 08:00:00 UTC
        From now: 18h left
        Iter. #2: Mon 2026-10-19 08:00:00 UTC
        Iter. #3: Tue 2026-10-20 08:00:00 UTC
@@ -764,8 +819,8 @@ Control group /:
 $ systemd-cgtop          # live CPU/memory per cgroup
 ```
 
-Limits are just unit settings, applied live with `set-property` or
-permanently with a drop-in:
+Limits are just unit settings. `set-property` applies them live **and**
+saves them (add `--runtime` to make the change last only until reboot):
 
 ```console
 $ sudo systemctl set-property httpd.service MemoryMax=512M CPUQuota=50%
@@ -782,6 +837,24 @@ CPUQuotaPerSecUSec=500ms
 | `CPUWeight=` | Relative share when CPUs are contended (default 100) |
 | `TasksMax=` | Max number of processes and threads (stops fork bombs) |
 | `IOWeight=` | Relative disk I/O share |
+
+??? question "Under the hood: the drop-in directory nobody looks in"
+    `set-property` doesn't edit your `override.conf`. It writes its own
+    drop-ins to **`/etc/systemd/system.control/`**, a directory that ranks
+    *above* `/etc/systemd/system/`:
+
+    ```console
+    $ ls /etc/systemd/system.control/httpd.service.d/
+    50-CPUQuota.conf  50-MemoryMax.conf
+    ```
+
+    This bites in production: someone sets `MemoryMax=` in a drop-in with
+    `systemctl edit`, restarts, and the old value from a forgotten
+    `set-property` still wins. `systemctl cat` and
+    `systemctl show -p DropInPaths` list every file that applies, including
+    these. Remove a `set-property` value by deleting its file (or
+    `systemctl revert`, which clears both kinds) and running
+    `daemon-reload`.
 
 How cgroups work underneath, and how containers use the same mechanism, is
 in [18 · Containers from the Ground Up](18-containers.md).
@@ -851,21 +924,27 @@ gated reaching the target: optimise that. More in
 
 ## Soft reboot
 
-A **soft reboot** (`systemctl soft-reboot`) restarts all of user space,
-every service, without restarting the kernel or the firmware. It's much
-faster than a full reboot because hardware isn't re-initialised. It's useful
-after updating everything *except* the kernel. systemd has offered it since
-version 254; Red Hat announced soft reboots as supported starting with RHEL
-10.1, aimed mainly at **image mode** systems (where the whole OS image is
-swapped as a unit), so expect it on Rocky 10.1 and later.
+A **soft reboot** (`systemctl soft-reboot`) stops all of user space, every
+service and session, then starts it again from the top, **without**
+restarting the kernel or the firmware. Because hardware isn't
+re-initialised, it takes seconds instead of minutes. It's useful after
+updating everything *except* the kernel (glibc, systemd, OpenSSL).
 
 ```console
 $ sudo systemctl soft-reboot
 ```
 
+systemd has offered it since version 254, so the command exists on Rocky 10
+(systemd 257). Red Hat lists soft reboots as a supported feature starting
+with RHEL 10.1 and documents them mainly for **image mode** systems, where a
+new OS image is staged and then switched to with a soft reboot. Check what
+the Rocky 10.x release notes say before you build a patching process on it.
+
 !!! warning
     A soft reboot does **not** load a new kernel. After a kernel update you
-    still need a real `reboot`.
+    still need a real `reboot`. `systemctl show -p SoftRebootsCount` (on the
+    system manager) tells you how many soft reboots happened since the last
+    real boot.
 
 ## User services
 
@@ -1059,11 +1138,11 @@ execution from that location (scripts in a home directory often hit this).
         ActiveState=active
         ```
 
-    3. Kill it three more times quickly (wait 3 seconds between each).
-       Eventually:
+    3. Kill it two or three more times (wait 3 seconds between each). On
+       the fourth start inside 60 seconds, systemd gives up:
 
         ```console
-        $ systemctl status hello | head -3
+        $ systemctl status hello | head -5
         × hello.service - Hello demo service
              Loaded: loaded (/etc/systemd/system/hello.service; enabled; preset: disabled)
             Drop-In: /etc/systemd/system/hello.service.d
@@ -1214,8 +1293,10 @@ execution from that location (scripts in a home directory often hit this).
         → Overall exposure level for hello.service: 5.4 MEDIUM 😐
         ```
 
-        Your number may differ. (`DynamicUser=yes` already switched on
-        several protections.)
+        Your number may differ. `DynamicUser=yes` already switched on
+        several protections: it implies `ProtectSystem=strict`,
+        `ProtectHome=read-only`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
+        and `RemoveIPC=yes`. `systemctl show hello -p ProtectSystem` proves it.
 
     2. Harden it with a drop-in (`sudo systemctl edit hello`):
 
