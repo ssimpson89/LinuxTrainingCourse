@@ -139,6 +139,9 @@ $ rpm -q --changelog iputils | grep CVE-2025-47268
 
 ## What is a package?
 
+!!! tip "Go deeper in the series"
+    [Module 41](41-anatomy-of-a-package.md) takes one RPM apart byte by byte.
+
 An **RPM package** is a single file, named like `bash-5.2.26-6.el10.x86_64.rpm`, that contains four things:
 
 1. **A payload**: a compressed archive of the files to install, with their owners, permissions, and SELinux-relevant paths.
@@ -162,12 +165,14 @@ The **epoch** is a rarely used number (usually 0, and hidden) that overrides ver
 
 <div class="layer" data-label="Signature" data-tag="who built it" markdown>
 
-A GPG signature over the header and payload. RPM checks it against keys you have imported. If the package was changed after signing, the check fails.
+A GPG signature over the package's **header**. RPM checks it against keys you have imported. The header records a digest of the payload, so a good signature plus a good payload digest vouches for every byte. If the package was changed after signing, the check fails.
 
 ```console
-$ rpm -qi bash | grep Signature
-Signature   : RSA/SHA256, Tue 11 Feb 2026 09:14:02 AM UTC, Key ID 5b106c736fedfc85
+$ rpm -q --qf '%{RSAHEADER:pgpsig}\n' bash
+RSA/SHA256, Wed 21 May 2025 01:19:52 PM UTC, Key ID 5b106c736fedfc85
 ```
+
+`rpm -qi` shows the same value, but on Rocky 10 it puts it on the line *after* the `Signature` label, so `rpm -qi bash | grep Signature` prints only the label. The `--qf` form above gives you one clean line you can use in scripts.
 
 </div>
 
@@ -179,9 +184,12 @@ Name        : bash
 Version     : 5.2.26
 Release     : 6.el10
 Architecture: x86_64
-Install Date: Tue 14 Oct 2026 06:01:12 PM UTC
-Size        : 8452049
+Install Date: Tue 26 May 2026 12:10:06 AM UTC
+Group       : Unspecified
+Size        : 8542584
 License     : GPL-3.0-or-later
+Signature   :
+              RSA/SHA256, Wed 21 May 2025 01:19:52 PM UTC, Key ID 5b106c736fedfc85
 Source RPM  : bash-5.2.26-6.el10.src.rpm
 Vendor      : Rocky Enterprise Software Foundation
 Packager    : Rocky Linux Build System (Peridot) <releng@rockylinux.org>
@@ -189,6 +197,8 @@ URL         : https://www.gnu.org/software/bash
 Summary     : The GNU Bourne Again shell
 …
 ```
+
+The `Packager` line names the build system that produced the package, and three strings exist on Rocky 10. `Rocky Linux Build System (Peridot)` marks a package built by Peridot, Rocky's earlier build system (`bash` here was built in 2024). `Rocky Linux Build System` marks a recent Koji build. `Release Engineering` marks the kernel and the Secure Boot packages, which are built on separate, isolated hosts. A freshly built package such as `rocky-release` shows the plain form, so your own output may differ from this sample.
 
 </div>
 
@@ -444,6 +454,9 @@ $ dnf --disablerepo='*' --enablerepo=baseos list available 'kernel*'
 
 ### GPG keys and trust
 
+!!! tip "Go deeper in the series"
+    [Module 47](47-trust-signatures-and-keys.md) shows what a green `rpm -K` proves and what it never did.
+
 Rocky signs every package with its private key. Your system has the matching public key in `/etc/pki/rpm-gpg/`. The first time DNF installs from a repo, it imports the key named in `gpgkey=` and asks you to confirm (or imports silently with `-y`). After that, RPM verifies every package before installing it.
 
 ```console
@@ -456,6 +469,11 @@ tree-2.1.0-8.el10.x86_64.rpm: digests signatures OK
 ```
 
 `rpm -K` (`--checksig`) checks a package file's signature by hand.
+
+There are two separate switches. `gpgcheck=1` verifies each **package** signature, and it is on in Rocky's stock repo files. `repo_gpgcheck=1` would also verify a signature on the repository **metadata** (`repomd.xml.asc`), and Rocky's stock repo files do not set it. If a hardening profile or tool turns it on, metadata-signature errors can appear even though `gpgcheck` is fine.
+
+!!! note "The key file can hold more than one key"
+    After the `rocky-gpg-keys-10.2-1.2` update, `/etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-10` contains two certificates (the RSA release key and a newer post-quantum key), and GnuPG 2.4 refuses to read the whole file. Module [21 · Inside Rocky Linux](21-inside-rocky-linux.md#signatures-trusting-what-you-install) shows how to inspect it safely. Packages are still signed with the RSA key.
 
 !!! danger "Never set gpgcheck=0 on a real repo"
     Turning off signature checks means anyone who can tamper with a mirror, a proxy, or your DNS can install code that runs as root on your servers through package scriptlets. If a key is missing, import the right key; do not disable the check. The only reasonable exception is a local test repo of packages you built yourself.
@@ -1073,7 +1091,7 @@ ID     | Command line              | Date and time    | Action(s)      | Altered
         sudo dnf config-manager --set-enabled crb
         sudo dnf install -y epel-release
         sudo dnf install -y htop
-        rpm -qi htop | grep -E '^(Vendor|Signature)'
+        rpm -qi htop | grep -E -A1 '^(Vendor|Signature)'
         ```
 
     3. Find the transaction IDs for the two installs:
@@ -1091,7 +1109,7 @@ ID     | Command line              | Date and time    | Action(s)      | Altered
         sudo dnf config-manager --set-disabled crb
         ```
 
-    **Check your work:** `htop`'s Vendor is "Fedora Project". After the undos, `rpm -q htop epel-release` reports both as not installed, and `dnf repolist` no longer shows `epel` or `crb`.
+    **Check your work:** `htop`'s Vendor is "Fedora Project", and the line after `Signature   :` shows a key ID that is not Rocky's (it is EPEL's). After the undos, `rpm -q htop epel-release` reports both as not installed, and `dnf repolist` no longer shows `epel` or `crb`.
 
     ??? success "Why use IDs instead of `undo last` twice?"
         Each undo is itself a new transaction. After the first `undo last`, the "last" transaction is that removal, so a second `undo last` would *reinstall* htop. Referring to transactions by ID avoids the trap.

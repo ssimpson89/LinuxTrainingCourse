@@ -155,7 +155,8 @@ A table of the commands from this module: command | what it does.
 **Next:** [08 · Logging and the Journal](08-logging-and-the-journal.md)
 ````
 
-Target length: 500 to 900 lines of Markdown per module. Aim for at least
+Target length: 900 to 1,300 lines of Markdown per module, hard stop at
+1,500, labs included. Split only at the module's marked break point. Aim for at least
 **3 diagrams** (mermaid and/or `.layers`/`.stepper`), **3 to 5 quizzes**,
 **1 practice terminal**, a **flashcards** set, and **3 or more labs** per module. More examples beat more prose.
 
@@ -505,6 +506,48 @@ Links the unit to `/dev/null` so nothing, not even a dependency, can start it.
 - Link to other modules with relative Markdown links:
   `[systemd](07-systemd-and-services.md#units)`.
 - Only link to external URLs you are confident are real and stable.
+
+## Series conventions: How Rocky Gets Built (modules 40 to 53)
+
+These additions apply only to the series in the "How Rocky Gets Built" nav
+section. Everything above still applies. The complete copy-paste template and
+the pre-publish check (`scripts/check-series.sh`) live in the series
+authoring reference kept by the series lead; the rules are summarised here.
+
+- **Pipeline strip.** Directly under the opening hook, before "What you'll
+  learn". A CSS-only strip of six stages (Source, Build, Sign, Compose,
+  Publish, Install), written as an ordered list in a `div` with the
+  `markdown` attribute. `data-here` takes one or more stage names and lights
+  them. A one-line italic text equivalent follows it: "You are here: Sign
+  (stage 3 of 6). Before: Build. After: Compose." Never use a Mermaid strip.
+- **Meta bar.** Add `Environment: Tier A` to `D` and `Verified: Rocky 10.2,
+  YYYY-MM-DD` as `<li>` items.
+- **Evidence box.** `!!! evidence "Observed: <claim>"` for a claim that
+  carries weight or can surprise. The title starts with `Observed:`, `Stated by
+  the project:`, `Our reading:` or `Reported, not confirmed:`. Body: a
+  `**Seen on:**` line (version, architecture, date) and a `**Check it
+  yourself:**` line. Put `<!-- ev: SOURCE ID | strength | where and when -->`
+  on the line directly above it. Never show internal evidence tags on the page.
+- **Freshness box.** `!!! freshness "As of YYYY-MM-DD on Rocky 10.N"` under
+  any volatile fact (count, date, version, expiry, percentage), with a volatility
+  word and a `**Re-check:**` line holding one command. Same `ev:` comment rule.
+- **Unknown box.** Exactly one `!!! unknown "What nobody outside the project can
+  tell you"` per module. "Not public" is about the project, "not tested" is
+  about us; never swap them.
+- **Dated volatile numbers.** Mechanism first (stable), then the dated value
+  ("as of 2026-11, Rocky 10.2"), then a `Re-check:` command. State the
+  denominator of every percentage.
+- **Lab status line.** The first content of every `!!! lab` is a five-item
+  bullet list (Tier, Status, Time, Hardware, Tested on). Status is `Tested`,
+  `Tested partly` or `Read-along`. Labs still end with `**Check your work:**`
+  and `**Clean up:**`.
+- **Comparison lens.** Other distributions appear only in collapsed
+  `??? version "Comparison lens: <name>"` folds or in short tables, never in
+  the main line.
+- **Dossier entry.** Modules 40 to 52 end the teaching with one
+  `!!! example "Dossier entry"` block, in the same shape every time.
+- **Diagram text.** Every diagram has a sentence or two beneath it that states
+  the same relationships in words.
 
 ## Checklist before you finish a module
 

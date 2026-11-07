@@ -603,6 +603,9 @@ WantedBy=multi-user.target
 
 ## Rebuilding an existing Rocky package
 
+!!! tip "Go deeper in the series"
+    [Module 45](45-pipeline-source-to-build.md) explains why a rebuild does not match the shipped package, and [module 49](49-build-your-own-packages-and-repo.md) does an exact rebuild of `which`.
+
 Sometimes you need Rocky's package with one change: a backported fix, a compile option, a patch from upstream that is not shipped yet. You do not start from scratch; you rebuild Rocky's own source RPM.
 
 ```mermaid
@@ -622,10 +625,18 @@ The two rules that matter:
 !!! pitfall "The old `%patch1` syntax"
     Old specs apply patches with `%patch1 -p1`. RPM 4.19 (on Rocky 10) deprecates that form and warns; newer RPM removes it. Use `%patch -P 1 -p1`, which works everywhere, or `%autosetup -p1`.
 
+!!! pitfall "A rebuild is not the same build"
+    If you rebuild a Rocky source RPM whose name ends in `.el10_2` with the current `rocky-10-x86_64` mock config, the result is named `...el10`, not `...el10_2`. The dist tag is worked out again inside the build environment, so the name (the NVR: name, version, release) changes. The build environment also differs from the one Rocky used (a newer compiler, for example), so the binaries differ too, even though the source is the same. In a test on Rocky 10.2 (x86_64, 2026-11), a rebuild of `which` with the current config had a different NVR, a different `/usr/bin/which` and a different build ID.
+
+    Rebuilding against a **pinned** buildroot gets closer. Pointing mock at the older minor release's tree in the vault and passing the original dist tag (`--define 'dist .el10_0'`) gave an identical payload for that one small package on x86_64. Treat that as one observed result, not a promise: it was one package on one architecture, and nobody outside Rocky can say how Rocky's own build environment was assembled. So "same source" does not mean "same bits", and a package you rebuilt is a different artifact from the one on the mirror even before you change anything.
+
 !!! warning "Forking a core package is a commitment"
     The moment you replace a Rocky package with your own build, you own its security updates. Watch for every RLSA touching it, and rebuild promptly, or use `excludepkgs=` and versionlock deliberately. Prefer getting the fix upstream.
 
 ## Building cleanly with mock
+
+!!! tip "Go deeper in the series"
+    [Module 49](49-build-your-own-packages-and-repo.md) sets up `mock` on Rocky 10 and builds a dependent chain, and [module 45](45-pipeline-source-to-build.md) rebuilds `which` in a current and in a pinned buildroot.
 
 `rpmbuild` on your workstation uses whatever happens to be installed there. That has two problems: a missing `BuildRequires` goes unnoticed because the package was installed anyway, and the result may link against libraries from EPEL or your own experiments. **mock** fixes this by building inside a fresh chroot containing only a minimal base and the declared build dependencies, exactly what Rocky's build system does ([module 21](21-inside-rocky-linux.md#the-build-system)).
 
@@ -696,6 +707,9 @@ Exactly the bug mock exists to catch. Add the missing BuildRequires and the buil
 </div>
 
 ## Signing packages and publishing a repository
+
+!!! tip "Go deeper in the series"
+    [Module 49](49-build-your-own-packages-and-repo.md) signs your packages, serves a repository and shows a consumer refusing it, and [module 47](47-trust-signatures-and-keys.md) explains what a signature does and does not prove.
 
 ### Signing with rpmsign
 

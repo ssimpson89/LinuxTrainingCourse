@@ -484,6 +484,85 @@ $ journalctl -u sshd | grep -i 'invalid user' | wc -l
 | `sudo cyclictest -m -S -p95 -i200 -D 60 -q` | Measure scheduling latency on every CPU | [37](37-real-time-and-low-latency.md) |
 | `sudo hwlatdetect --duration=60 --threshold=10` | Detect firmware or hypervisor stalls | [37](37-real-time-and-low-latency.md) |
 
+## How Rocky gets built
+
+Commands from the "How Rocky Gets Built" series, [start here](series-how-rocky-gets-built.md). Most are read-only and work against Rocky's public services.
+
+| Command | What it does | Module |
+|---------|--------------|--------|
+| `dnf -y --installroot=DIR --releasever=10 install PKG...` | Install packages into a directory as if it were a disk (never pipe the output into `head`) | [40](40-how-an-os-gets-built.md) |
+| `rpm --root DIR -qa \| wc -l` | Count the packages in a tree | [40](40-how-an-os-gets-built.md) |
+| `rpm --root DIR -V bash` | Verify a tree's package files | [40](40-how-an-os-gets-built.md) |
+| `chroot DIR /bin/bash` | Enter a tree as if it were `/` | [40](40-how-an-os-gets-built.md) |
+| `rpm --define 'with_bootstrap 1' -E '%{dist}'` | Show the `~bootstrap` dist form | [40](40-how-an-os-gets-built.md) |
+| `git ls-remote --heads URL` | List a repository's branches without cloning | [40](40-how-an-os-gets-built.md) |
+| `rpm -q --qf '%{NVRA} %{PAYLOADDIGEST}\n' bash` | Package label plus payload digest | [40](40-how-an-os-gets-built.md) |
+| `rpm -q bash --qf '[%{FILEDIGESTS} %{FILENAMES}\n]' \| sort` | One digest per file, sorted for diffing across machines | [40](40-how-an-os-gets-built.md) |
+| `rpm -qp --qf '%{BUILDHOST} %{BUILDTIME:date}\n' f.rpm` | Who built a package file and when | [41](41-anatomy-of-a-package.md) |
+| `rpm -q --qf '%{RSAHEADER:pgpsig}\n' PKG` | The signature on one clean line | [41](41-anatomy-of-a-package.md) |
+| `rpm --querytags` | List the header tag names `--qf` accepts | [41](41-anatomy-of-a-package.md) |
+| `rpm2cpio f.rpm \| cpio -t` | List a package's payload without installing | [41](41-anatomy-of-a-package.md) |
+| `rpm2cpio f.src.rpm \| cpio -idm` | Extract a source RPM into the current directory | [41](41-anatomy-of-a-package.md) |
+| `rpm -qpR f.src.rpm` | Build requirements of a source RPM | [41](41-anatomy-of-a-package.md) |
+| `rpm -qp --scripts f.rpm`, `rpm -qp --filetriggers f.rpm` | Show a package's install-time code | [41](41-anatomy-of-a-package.md) |
+| `rpm -qa --qf '%{SOURCERPM}\n' \| grep 'rocky\.0\.' \| sort -u` | Installed source packages Rocky changed (`.rocky.0.N`) | [41](41-anatomy-of-a-package.md) |
+| `rpm -qf PATH` | Name the package that owns a file | [42](42-what-is-inside-an-os.md) |
+| `rpm -q --whatprovides CAPABILITY` | Name the installed package that provides a capability | [42](42-what-is-inside-an-os.md) |
+| `readelf -n FILE` | ELF notes: build ID, ISA level needed, CET features | [42](42-what-is-inside-an-os.md) |
+| `grep -ow abm /proc/cpuinfo` | Check the CPU flag behind the x86-64-v3 level | [42](42-what-is-inside-an-os.md) |
+| `xorriso -indev X.iso -pvd_info` | Show an ISO's volume ID and preparer | [43](43-installer-and-install-media.md) |
+| `xorriso -indev X.iso -report_el_torito plain` | List the BIOS and UEFI boot images | [43](43-installer-and-install-media.md) |
+| `xorriso -osirrox on -indev X.iso -extract /PATH ./out` | Copy one file out of an ISO without root | [43](43-installer-and-install-media.md) |
+| `checkisomd5 X.iso` | Run the ISO's built-in media check | [43](43-installer-and-install-media.md) |
+| `sha256sum -c X.iso.CHECKSUM` | Compare your download with the published hash | [43](43-installer-and-install-media.md) |
+| `gpg --verify X.iso.CHECKSUM.asc X.iso.CHECKSUM` | Check who signed the checksum file | [43](43-installer-and-install-media.md) |
+| `unsquashfs -no-xattrs -d root install.img` | Unpack the installer image | [43](43-installer-and-install-media.md) |
+| `ksvalidator -v RHEL10 FILE.ks` | Validate a kickstart against the RHEL 10 syntax | [43](43-installer-and-install-media.md) |
+| `skopeo inspect --no-tags docker://IMAGE` | Read an image's digest, creation time and labels without pulling | [44](44-images-cloud-container-bootc.md) |
+| `podman run --rm IMAGE rpm -q kernel systemd grub2-common shim-x64` | See which machine parts an image carries | [44](44-images-cloud-container-bootc.md) |
+| `qemu-img info X.qcow2` | Size and format of a disk image | [44](44-images-cloud-container-bootc.md) |
+| `mokutil --sb-state` | Whether Secure Boot is enforced | [44](44-images-cloud-container-bootc.md) |
+| `git ls-remote --heads https://git.rockylinux.org/staging/src-rhel/rpms/PKG.git` | Landing-zone branches for a package | [45](45-pipeline-source-to-build.md) |
+| `git ls-remote --heads https://git.rockylinux.org/staging/rpms/PKG.git` | Rocky's result branches for a package | [45](45-pipeline-source-to-build.md) |
+| `rpm -q --qf '%{BUILDHOST} %{PACKAGER}\n' PKG` | Build fingerprint: Peridot, Koji or Release Engineering | [45](45-pipeline-source-to-build.md) |
+| `mock -r ~/mockcfg/rocky-10.0-vault-x86_64.cfg --define 'dist .el10_0' --rebuild X.src.rpm` | Pinned rebuild (needs both the vault config and the define) | [45](45-pipeline-source-to-build.md) |
+| `curl -s https://dl.rockylinux.org/pub/rocky/10/metadata/composeinfo.json` | Compose ID, type and date from the shared metadata | [46](46-pipeline-compose-to-your-server.md) |
+| `curl -sI URL` | Show `Last-Modified` for a file or for `repomd.xml` | [46](46-pipeline-compose-to-your-server.md) |
+| `curl -s 'https://mirrors.rockylinux.org/metalink?repo=rocky-BaseOS-10.2&arch=x86_64'` | The expected hash of `repomd.xml` | [46](46-pipeline-compose-to-your-server.md) |
+| `dnf clean expire-cache` | Make DNF re-read repository metadata | [46](46-pipeline-compose-to-your-server.md) |
+| `rpm -Kv FILE.rpm` | Check the signature and digests line by line | [47](47-trust-signatures-and-keys.md) |
+| `rpm --dbpath /tmp/emptydb -Kv FILE.rpm` | Check with no keys loaded (shows NOKEY) | [47](47-trust-signatures-and-keys.md) |
+| `gpg --quiet --show-keys --with-fingerprint FILE` | Read a key's fingerprint without importing it | [47](47-trust-signatures-and-keys.md) |
+| `sq inspect FILE` | Read every certificate in a key file, including v6 | [47](47-trust-signatures-and-keys.md) |
+| `gpg --verify repomd.xml.asc repomd.xml` | Verify repository metadata by hand | [47](47-trust-signatures-and-keys.md) |
+| `rpm -qp --qf '[%{FILESIGNATURES}\n]' FILE.rpm \| grep -c .` | Count a package's IMA file signatures | [47](47-trust-signatures-and-keys.md) |
+| `sudo pesign -S -i FILE` | List the signers of a boot file ("Content is detached" is normal) | [48](48-trust-secure-boot-and-reproducibility.md) |
+| `openssl x509 -inform DER -in FILE -noout -subject -dates` | Certificate name and validity | [48](48-trust-secure-boot-and-reproducibility.md) |
+| `sudo keyctl list %:.builtin_trusted_keys` | Keys built into the running kernel | [48](48-trust-secure-boot-and-reproducibility.md) |
+| `modinfo -k KERNEL xfs` | Module signer and key for one kernel (filter with `grep -E '^(signer\|sig_key)'`) | [48](48-trust-secure-boot-and-reproducibility.md) |
+| `skopeo inspect --no-tags --format '{{.Digest}}' docker://IMAGE` | An image's manifest digest | [48](48-trust-secure-boot-and-reproducibility.md) |
+| `mock -r CFG --chain --localrepo=DIR A.src.rpm B.src.rpm` | Build in order, with a local repo between builds | [49](49-build-your-own-packages-and-repo.md) |
+| `mock -r CFG --define 'dist .el10_0' --rebuild X.src.rpm` | Rebuild with the dist tag set | [49](49-build-your-own-packages-and-repo.md) |
+| `rpmsign --addsign *.rpm` | Sign with the key named by `%_gpg_name` | [49](49-build-your-own-packages-and-repo.md) |
+| `createrepo_c DIR` | Write `repodata/` for a directory of RPMs | [49](49-build-your-own-packages-and-repo.md) |
+| `rpmdev-vercmp 0 V R1 0 V R2` | Which release sorts higher (exit 12 means the second) | [49](49-build-your-own-packages-and-repo.md) |
+| `koji list-targets` | Each target with its build tag and destination tag | [50](50-build-your-own-koji.md) |
+| `koji list-tag-inheritance TAG` | A tag's parents | [50](50-build-your-own-koji.md) |
+| `koji list-external-repos --tag TAG` | External repos a tag borrows from | [50](50-build-your-own-koji.md) |
+| `koji taginfo TAG` | Groups, arches, options and inheritance of a tag | [50](50-build-your-own-koji.md) |
+| `koji edit-tag -x mock.use_bootstrap=False TAG` | Set a tag option (applies at the next repo) | [50](50-build-your-own-koji.md) |
+| `koji regen-repo TAG --wait` | Ask for a new build repo and wait until it is ready | [50](50-build-your-own-koji.md) |
+| `koji build TARGET X.src.rpm --nowait`, `koji watch-task N` | Submit without blocking, then follow the task tree | [50](50-build-your-own-koji.md) |
+| `koji list-tasks --all --after=2000-01-01` | List tasks as a tree (`--after` is required) | [50](50-build-your-own-koji.md) |
+| `koji buildinfo NVR` | State, task, tags and files of a build | [50](50-build-your-own-koji.md) |
+| `ksflatten -c FILE.ks -o OUT.ks` | Rewrite a kickstart in canonical form | [51](51-build-your-own-install-media.md) |
+| `ksverdiff -f RHEL9 -t RHEL10` | Commands removed, added or deprecated between syntax versions | [51](51-build-your-own-install-media.md) |
+| `mkksiso --ks FILE.ks IN.iso OUT.iso` | Write a kickstart onto an ISO (needs root; optional `-c`, `-r`, `-R` edit the boot entries) | [51](51-build-your-own-install-media.md) |
+| `rpm --root TREE -q --whatprovides system-release` | Name the identity package of a tree (expect one) | [52](52-capstone-myorg-lab.md) |
+| `dnf swap rocky-release myorg-release` | Replace the seed's release package in one transaction | [52](52-capstone-myorg-lab.md) |
+| `rpmsign --define "_gpg_name NAME" --addsign *.rpm` | Sign without touching `~/.rpmmacros` | [52](52-capstone-myorg-lab.md) |
+| `M=$HOME/m2 bash capstone-check.sh` | Run the 28 capstone checks | [52](52-capstone-myorg-lab.md) |
+
 ## Troubleshooting first five minutes
 
 ```console

@@ -1,0 +1,219 @@
+/* "How Rocky Gets Built" series components: evidence, freshness and unknown
+   boxes, the CSS-only pipeline strip, and the lab status line. Follows the
+   conventions in widgets.css (dark theme, custom properties from extra.css).
+   No JavaScript. Exact markup is documented in STYLE.md ("Series conventions"). */
+
+/* ------------------------------------------------------ series admonitions */
+/* Icons come from theme.icon.admonition in mkdocs.yml, which defines
+   --md-admonition-icon--evidence, --unknown and --freshness. */
+
+.md-typeset .admonition.evidence,
+.md-typeset details.evidence { border-color: #14b8a6; }
+.md-typeset .evidence > .admonition-title,
+.md-typeset .evidence > summary { background-color: rgba(20, 184, 166, 0.1); }
+.md-typeset .evidence > .admonition-title::before,
+.md-typeset .evidence > summary::before {
+  background-color: #14b8a6;
+  -webkit-mask-image: var(--md-admonition-icon--evidence);
+  mask-image: var(--md-admonition-icon--evidence);
+}
+
+/* Dashed border: "this edge of the map is unmapped". The title text carries
+   the meaning too, so colour is never the only signal. */
+.md-typeset .admonition.unknown,
+.md-typeset details.unknown { border-color: #94a3b8; border-style: dashed; }
+.md-typeset .unknown > .admonition-title,
+.md-typeset .unknown > summary { background-color: rgba(148, 163, 184, 0.12); }
+.md-typeset .unknown > .admonition-title::before,
+.md-typeset .unknown > summary::before {
+  background-color: #94a3b8;
+  -webkit-mask-image: var(--md-admonition-icon--unknown);
+  mask-image: var(--md-admonition-icon--unknown);
+}
+
+.md-typeset .admonition.freshness,
+.md-typeset details.freshness { border-color: #f59e0b; }
+.md-typeset .freshness > .admonition-title,
+.md-typeset .freshness > summary { background-color: rgba(245, 158, 11, 0.1); }
+.md-typeset .freshness > .admonition-title::before,
+.md-typeset .freshness > summary::before {
+  background-color: #f59e0b;
+  -webkit-mask-image: var(--md-admonition-icon--freshness);
+  mask-image: var(--md-admonition-icon--freshness);
+}
+
+/* ---------------------------------------------------------- pipeline strip */
+/* Markup (md_in_html, an ordered list inside a div):
+
+   <div class="pipeline-strip" data-here="sign" role="group"
+        aria-label="Rocky build pipeline, six stages" markdown>
+
+   1. Source
+   2. Build
+   3. Sign
+   4. Compose
+   5. Publish
+   6. Install
+
+   </div>
+
+   data-here takes one or more stage names separated by spaces (source build
+   sign compose publish install). It lights those nodes. Leave it off, or use
+   data-here="none", to light nothing. A text equivalent line goes under the
+   strip, so the position is also stated in words. */
+
+[dir] .md-typeset .pipeline-strip {
+  margin: 1.2rem 0 0.5rem;
+  padding: 0.6rem;
+  border: var(--course-border-width) solid var(--course-border);
+  border-radius: var(--course-radius);
+  background-color: var(--course-surface);
+  box-shadow: var(--course-shadow-sm);
+}
+
+[dir] .md-typeset .pipeline-strip > ol {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: pipeline-stage;
+}
+
+[dir] .md-typeset .pipeline-strip > ol > li {
+  position: relative;
+  min-width: 0;
+  margin: 0;
+  padding: 0.3rem 0.25rem 0.4rem;
+  border: var(--course-border-width) solid var(--course-border);
+  border-radius: var(--course-radius-sm);
+  background-color: var(--course-surface-soft);
+  color: var(--course-muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: anywhere;
+  counter-increment: pipeline-stage;
+}
+
+[dir] .md-typeset .pipeline-strip > ol > li::marker {
+  content: none;
+}
+
+/* Stage number above the name. The lit node also says "here" in words. */
+[dir] .md-typeset .pipeline-strip > ol > li::before {
+  content: counter(pipeline-stage);
+  display: block;
+  color: var(--course-muted);
+  font-family: var(--md-code-font-family);
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+/* Small arrow between nodes on the single-row layout only. */
+@media (min-width: 44.01em) {
+  [dir] .md-typeset .pipeline-strip > ol > li:not(:last-child)::after {
+    content: "\203A";
+    content: "\203A" / "";
+    position: absolute;
+    top: 50%;
+    right: -0.33rem;
+    transform: translateY(-50%);
+    color: var(--course-muted);
+    font-size: 0.8rem;
+    line-height: 1;
+  }
+}
+
+/* "You are here": accent border, tint and heavier weight, plus the word. */
+[dir] .md-typeset .pipeline-strip[data-here~="source"] > ol > li:nth-child(1),
+[dir] .md-typeset .pipeline-strip[data-here~="build"] > ol > li:nth-child(2),
+[dir] .md-typeset .pipeline-strip[data-here~="sign"] > ol > li:nth-child(3),
+[dir] .md-typeset .pipeline-strip[data-here~="compose"] > ol > li:nth-child(4),
+[dir] .md-typeset .pipeline-strip[data-here~="publish"] > ol > li:nth-child(5),
+[dir] .md-typeset .pipeline-strip[data-here~="install"] > ol > li:nth-child(6) {
+  border-color: var(--md-accent-fg-color);
+  background-color: color-mix(in srgb, var(--md-accent-fg-color) 14%, var(--course-surface-soft));
+  box-shadow: inset 0 -0.18rem 0 var(--md-accent-fg-color);
+  color: var(--course-ink);
+  font-weight: 750;
+}
+
+[dir] .md-typeset .pipeline-strip[data-here~="source"] > ol > li:nth-child(1)::before,
+[dir] .md-typeset .pipeline-strip[data-here~="build"] > ol > li:nth-child(2)::before,
+[dir] .md-typeset .pipeline-strip[data-here~="sign"] > ol > li:nth-child(3)::before,
+[dir] .md-typeset .pipeline-strip[data-here~="compose"] > ol > li:nth-child(4)::before,
+[dir] .md-typeset .pipeline-strip[data-here~="publish"] > ol > li:nth-child(5)::before,
+[dir] .md-typeset .pipeline-strip[data-here~="install"] > ol > li:nth-child(6)::before {
+  content: counter(pipeline-stage) " \00B7  here";
+  color: var(--md-accent-fg-color);
+}
+
+/* The text equivalent paragraph sits right under the strip. */
+[dir] .md-typeset .pipeline-strip + p {
+  margin-top: 0.4rem;
+  color: var(--course-muted);
+  font-size: 0.72rem;
+}
+
+/* Tablet and phone: two rows of three, then three rows of two. No scrolling. */
+@media (max-width: 44em) {
+  [dir] .md-typeset .pipeline-strip > ol { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 30em) {
+  [dir] .md-typeset .pipeline-strip > ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ------------------------------------------------------- lab status line */
+/* Markup: the first content of every `!!! lab` is a bullet list. A list that
+   directly follows the lab title renders as a row of chips. With CSS off it
+   is still a readable bullet list, and no extra attribute is needed.
+
+   !!! lab "Lab 3: Title"
+
+       - **Tier** B: build tools
+       - **Status** Tested
+       - **Time** about 10 minutes
+       - **Hardware** 2 vCPU, 4 GiB RAM, 30 GiB disk
+       - **Tested on** Rocky 10.2 x86_64 VM, 2026-11-06
+
+       **Goal:** ...
+*/
+
+[dir] .md-typeset .lab > :is(.admonition-title, summary) + ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.2rem 0 0.9rem;
+  padding: 0;
+  list-style: none;
+}
+
+[dir] .md-typeset .lab > :is(.admonition-title, summary) + ul > li {
+  margin: 0;
+  padding: 0.15rem 0.6rem;
+  border: var(--course-border-width) solid rgba(47, 125, 225, 0.35);
+  border-radius: 999px;
+  background-color: rgba(47, 125, 225, 0.08);
+  color: var(--course-ink);
+  font-size: 0.66rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+[dir] .md-typeset .lab > :is(.admonition-title, summary) + ul > li::marker {
+  content: none;
+}
+
+[dir] .md-typeset .lab > :is(.admonition-title, summary) + ul > li > strong:first-child {
+  margin-right: 0.3em;
+  color: var(--course-muted);
+  font-size: 0.9em;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}

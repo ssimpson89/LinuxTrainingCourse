@@ -1,0 +1,13 @@
+# myorg.repo: the repository MyOrg publishes (your own builds).
+# $myorg_baseurl comes from /etc/dnf/vars/myorg_baseurl so you change one
+# word, not this file, when the repo moves from localhost to a real server.
+[myorg]
+name=MyOrg $releasever - $basearch
+baseurl=$myorg_baseurl/myorg/$releasever/$basearch/
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-myorg
+# Lower number wins regardless of version: our rebuild of a package must beat
+# the seed's copy even if the seed's NVR compares higher.
+priority=10
+metadata_expire=1m

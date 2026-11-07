@@ -7,7 +7,7 @@ description: Plain-English definitions of the Linux and Rocky Linux terms used i
 
 Plain-English definitions of the terms used across the course, in alphabetical order. Each entry links to the module that explains it in depth. Use your browser's find (++ctrl+f++) or the site search to jump to a term.
 
-This glossary has 246 terms.
+This glossary has 344 terms.
 
 ## A
 
@@ -24,7 +24,10 @@ This glossary has 246 terms.
 :   The NVMe equivalent of ALUA: each path to an NVMe namespace reports whether it is optimized, non-optimized or inaccessible. Used by native NVMe multipath. See [module 35](35-enterprise-storage.md).
 
 **Anaconda**
-:   The Rocky Linux installer (shared with RHEL and Fedora). It runs from a small live environment in RAM and can be driven interactively or by a kickstart file. See [module 23](23-automated-installs.md).
+:   The Rocky Linux installer (shared with RHEL and Fedora). It runs from a small live environment in RAM and can be driven interactively or by a kickstart file. See [module 23](23-automated-installs.md). More in [module 43](43-installer-and-install-media.md).
+
+**Anaconda profile**
+:   A config file inside the installer image (`profile.d/rocky.conf`), picked by the OS ID in `os-release`, that tells the installer how to behave on this distribution. See [module 43](43-installer-and-install-media.md).
 
 **Ansible**
 :   An agentless configuration management tool: it connects over SSH, runs small Python modules on each machine, and brings it to the state you describe in YAML. Rocky ships `ansible-core` in AppStream. See [module 32](32-ansible-and-system-roles.md).
@@ -32,11 +35,17 @@ This glossary has 246 terms.
 **Ansible Vault**
 :   Ansible's built-in encryption for variable files and strings, so passwords and keys can live in Git safely. Managed with `ansible-vault`. See [module 32](32-ansible-and-system-roles.md).
 
+**Apollo**
+:   Rocky's errata service. It copies Red Hat's advisory data, matches it to the packages Rocky actually built, and supplies the `updateinfo` metadata that `dnf updateinfo` reads. You can browse the same data at errata.rockylinux.org. An advisory can appear hours after the package it describes. See [module 21](21-inside-rocky-linux.md). More in [module 46](46-pipeline-compose-to-your-server.md).
+
 **AppStream**
 :   The Rocky Linux repository holding applications, languages and tools, alongside BaseOS. It is updated alongside BaseOS with every minor release. See [module 05](05-software-rpm-and-dnf.md).
 
 **Audit log**
 :   The kernel audit system's record of security events, including SELinux denials, logins and `sudo` use, in `/var/log/audit/audit.log`. Searched with `ausearch`. See [module 16](16-selinux.md).
+
+**Authenticode**
+:   The signature format inside a PE file (a UEFI boot file). One file can carry several signatures, which is how a shim carries signatures under more than one Microsoft CA. See [module 48](48-trust-secure-boot-and-reproducibility.md).
 
 **authselect**
 :   The Rocky tool that writes the NSS and PAM configuration from a named profile (`sssd`, `winbind`, `local`) plus features such as `with-mkhomedir`, so you never hand-edit `/etc/pam.d`. See [module 26](26-centralized-identity.md).
@@ -62,13 +71,31 @@ This glossary has 246 terms.
 :   A standard where each boot menu entry is a small file in `/boot/loader/entries/`. Rocky's GRUB reads these, and `grubby` edits them. See [module 14](14-the-boot-process.md).
 
 **bootc (image mode)**
-:   A way to run Rocky where the whole operating system is a bootable container image built from a `Containerfile`. `bootc` installs the image and later updates the host by pulling a newer one, keeping the previous version for rollback. See [module 23](23-automated-installs.md).
+:   A way to run Rocky where the whole operating system is a bootable container image built from a `Containerfile`. `bootc` installs the image and later updates the host by pulling a newer one, keeping the previous version for rollback. See [module 23](23-automated-installs.md). More in [module 44](44-images-cloud-container-bootc.md).
+
+**Bootstrap**
+:   Getting a self-hosting system started when its build tools need the system to exist already. Every distribution starts from a **seed** of ready-made tools from outside the loop. In Rocky 10 the dist suffix `~bootstrap` sorts before the normal release because of rpm's tilde rule. See [module 40](40-how-an-os-gets-built.md) and [module 42](42-what-is-inside-an-os.md).
+
+**Bootstrap chroot**
+:   The small first chroot that `mock` (version 6.9 by default) uses to run `dnf` and create the real buildroot. See [module 49](49-build-your-own-packages-and-repo.md).
 
 **bpftrace**
 :   A small scripting language for writing eBPF tracing one-liners, such as counting system calls per process. See [module 19](19-performance-and-observability.md).
 
 **Build ID**
-:   A unique hash the linker embeds in every ELF binary and library. Debuggers use it to match a core dump with exactly the right debuginfo. Shown by `readelf -n`. See [module 24](24-debugging-crashes.md).
+:   A unique hash the linker embeds in every ELF binary and library. Debuggers use it to match a core dump with exactly the right debuginfo. Shown by `readelf -n`. See [module 24](24-debugging-crashes.md). More in [module 48](48-trust-secure-boot-and-reproducibility.md).
+
+**Builder (kojid)**
+:   The Koji daemon that takes tasks from the hub and runs `mock` to do the work. See [module 50](50-build-your-own-koji.md).
+
+**BUILDHOST and PACKAGER**
+:   Two fields in an RPM header that show where a package was built: a `pb-` host name and a Peridot packager string mean Peridot, other host names and packager strings map to Koji builders and to Release Engineering hosts. Read with `rpm -q --qf '%{BUILDHOST} %{PACKAGER}\n' PKG`. See [module 41](41-anatomy-of-a-package.md) and [module 45](45-pipeline-source-to-build.md).
+
+**Buildroot**
+:   A clean, disposable directory holding only the packages a build is allowed to see. Koji assembles one from a tag and records its exact package list, which Rocky's public hub lets anyone read anonymously. See [module 40](40-how-an-os-gets-built.md), [module 45](45-pipeline-source-to-build.md) and [module 49](49-build-your-own-packages-and-repo.md).
+
+**.buildstamp**
+:   A file `lorax` writes inside the installer image recording the product, the version and the lorax version used. See [module 43](43-installer-and-install-media.md).
 
 ## C
 
@@ -81,11 +108,20 @@ This glossary has 246 terms.
 **cgroup (control group)**
 :   A kernel feature that groups processes so their CPU, memory, I/O and process count can be measured and limited together. Rocky 10 uses only cgroup v2, a single tree under `/sys/fs/cgroup`. See [module 18](18-containers.md).
 
+**Chain build**
+:   `mock --chain`: build several source RPMs in the order given, each able to use the results of the earlier ones through a local repo. See [module 49](49-build-your-own-packages-and-repo.md).
+
+**Channel (Koji)**
+:   A pool of Koji builders that accepts certain kinds of tasks. See [module 50](50-build-your-own-koji.md).
+
+**CHECKSUM and CHECKSUM.asc**
+:   The text file beside an ISO holding its SHA-256, and the detached signature over that file. The ISO itself has no signature of its own. See [module 43](43-installer-and-install-media.md) and [module 47](47-trust-signatures-and-keys.md).
+
 **chrony**
 :   Rocky's NTP implementation: the `chronyd` daemon keeps the clock synchronised, and `chronyc` inspects and controls it. It can also serve time and NTS to other machines. See [module 36](36-time-synchronization.md).
 
 **chroot**
-:   Changing a process's idea of the root directory `/`. Used in recovery (`chroot /sysroot`) and as one of the ideas behind containers. See [module 20](20-troubleshooting-playbook.md).
+:   Changing a process's idea of the root directory `/`. Used in recovery (`chroot /sysroot`) and as one of the ideas behind containers. See [module 20](20-troubleshooting-playbook.md). `mock` builds inside one, and an installroot is a tree you can chroot into. More in [module 40](40-how-an-os-gets-built.md).
 
 **CIB (Cluster Information Base)**
 :   Pacemaker's configuration and state, an XML document replicated to every cluster node. `pcs` edits it for you. See [module 28](28-high-availability.md).
@@ -94,13 +130,22 @@ This glossary has 246 terms.
 :   A framework that unlocks LUKS volumes automatically using a policy ("pin"): `tang` (a network server), `tpm2` (the machine's TPM) or `sss` (a threshold combination of others). It adds its own keyslot and keeps your passphrase working. See [module 30](30-network-bound-encryption.md).
 
 **cloud-init**
-:   The first-boot agent in cloud images. It reads **user-data** from a **datasource** (the cloud's metadata service, or a NoCloud seed ISO) and sets the hostname, users, SSH keys, packages and more. See [module 23](23-automated-installs.md).
+:   The first-boot agent in cloud images. It reads **user-data** from a **datasource** (the cloud's metadata service, or a NoCloud seed ISO) and sets the hostname, users, SSH keys, packages and more. See [module 23](23-automated-installs.md). More in [module 44](44-images-cloud-container-bootc.md).
 
 **Cockpit**
 :   A web-based admin console for Rocky (port 9090) showing metrics, services, logs, storage and more. See [module 19](19-performance-and-observability.md).
 
 **Collection (Ansible)**
 :   A distributable bundle of Ansible modules, roles and plugins with a namespace, such as `ansible.posix` or `redhat.rhel_system_roles`. Installed with `ansible-galaxy collection install`. See [module 32](32-ansible-and-system-roles.md).
+
+**Compose**
+:   A dated, self-describing release tree: the newest signed builds of one Koji tag laid out as repositories, installers and images, plus inventory files in the productmd format. See [module 40](40-how-an-os-gets-built.md) and [module 46](46-pipeline-compose-to-your-server.md).
+
+**Compose ID**
+:   The name of one compose, in the form `<short>-<version>-<YYYYMMDD>[.<type letter>].<respin>`, for example `Rocky-10.2-20260525.0`. See [module 46](46-pipeline-compose-to-your-server.md).
+
+**Composefs and ostree**
+:   The pieces under `bootc`. ostree is the object store the operating system's files live in, and composefs presents them as a read-only layer for `/usr`. See [module 44](44-images-cloud-container-bootc.md).
 
 **Configuration drift**
 :   The slow divergence of servers that should be identical, through manual fixes and one-off changes. Configuration management tools detect and correct it. See [module 32](32-ansible-and-system-roles.md).
@@ -109,7 +154,7 @@ This glossary has 246 terms.
 :   The kernel's table of every network flow it has seen, with both directions recorded. It makes stateful rules (`ct state established`) and NAT work. Inspected with the `conntrack` tool. See [module 34](34-nftables-and-traffic-control.md).
 
 **Container**
-:   A normal process isolated with namespaces, limited with cgroups, given its own filesystem image and restricted by SELinux, seccomp and capabilities. It shares the host's kernel. See [module 18](18-containers.md).
+:   A normal process isolated with namespaces, limited with cgroups, given its own filesystem image and restricted by SELinux, seccomp and capabilities. It shares the host's kernel. See [module 18](18-containers.md). More in [module 44](44-images-cloud-container-bootc.md).
 
 **Context (SELinux)**
 :   The label on every process and file, written `user:role:type:level`, e.g. `system_u:object_r:httpd_sys_content_t:s0`. The type part drives most decisions. See [module 16](16-selinux.md).
@@ -124,7 +169,7 @@ This glossary has 246 terms.
 :   Splitting CPUs into **housekeeping** CPUs (the OS, daemons, interrupts) and **isolated** CPUs reserved for latency-critical work, using kernel arguments such as `isolcpus`, `nohz_full` and `rcu_nocbs`, usually set by a tuned profile. See [module 37](37-real-time-and-low-latency.md).
 
 **CRB (CodeReady Builder)**
-:   A Rocky repository of extra development packages, disabled by default, that many EPEL packages depend on. See [module 05](05-software-rpm-and-dnf.md).
+:   A Rocky repository of extra development packages, disabled by default, that many EPEL packages depend on. See [module 05](05-software-rpm-and-dnf.md). More in [module 42](42-what-is-inside-an-os.md).
 
 **crun**
 :   The low-level OCI container runtime Podman uses on Rocky. It creates the namespaces and cgroups and starts the container's first process. See [module 18](18-containers.md).
@@ -147,13 +192,25 @@ This glossary has 246 terms.
 :   A background program with no terminal, usually started by systemd, such as `sshd` or `chronyd`. See [module 07](07-systemd-and-services.md).
 
 **Debranding**
-:   Replacing Red Hat trademarks (logos, names, URLs) in RHEL's sources while changing nothing functional, which lets Rocky redistribute the result. See [module 21](21-inside-rocky-linux.md).
+:   Replacing Red Hat trademarks (logos, names, URLs) in RHEL's sources while changing nothing functional, which lets Rocky redistribute the result. Rocky records the changes as YAML actions in a per-package patch repository and keeps them to the smallest set of exact strings (names, URLs, identities). See [module 21](21-inside-rocky-linux.md) and [module 45](45-pipeline-source-to-build.md).
 
 **debuginfo**
 :   Separate packages (`foo-debuginfo`, `foo-debugsource`) holding the symbols and source that were stripped from a binary, needed for readable backtraces. They come from Rocky's debug repositories, which are disabled by default. See [module 24](24-debugging-crashes.md).
 
+**Dependency generator**
+:   A build-time script, with its rules in `/usr/lib/rpm/fileattrs/`, that reads the built files and writes the package's `Requires` and `Provides` for you. See [module 41](41-anatomy-of-a-package.md).
+
 **Direct reclaim**
 :   When a process needing memory has to free pages itself, because the background reclaimer (`kswapd`) couldn't keep up. It shows up as latency spikes and `allocstall` counts in `/proc/vmstat`. See [module 25](25-memory-deep-dive.md).
+
+**.discinfo**
+:   A tiny file on an install ISO with a timestamp, the release name and the architecture. See [module 43](43-installer-and-install-media.md).
+
+**Dist tag**
+:   The `.el10` or `.el10_0` text at the end of a package's release, produced by the `%dist` macro that the `rocky-release` package owns. Rocky and Alma ship `el10_0` builds where CentOS Stream ships `el10`, so an NVR comparison needs the qualifier. See [module 41](41-anatomy-of-a-package.md) and [module 42](42-what-is-inside-an-os.md).
+
+**Dist-git**
+:   A Git repository holding one package's spec file and patches. Rocky's is `staging/rpms/PKG`, and Koji builds from it. See [module 45](45-pipeline-source-to-build.md).
 
 **DKMS (Dynamic Kernel Module Support)**
 :   A framework that keeps the source of an out-of-tree kernel module and rebuilds it automatically for each new kernel you install. Under Secure Boot the result must be signed with a key you enrolled as a MOK. See [module 29](29-secure-boot-and-drivers.md).
@@ -163,6 +220,9 @@ This glossary has 246 terms.
 
 **DNS (Domain Name System)**
 :   The service that turns names like `rockylinux.org` into IP addresses. Rocky's resolver settings are written to `/etc/resolv.conf` by NetworkManager. See [module 11](11-networking.md).
+
+**Dossier**
+:   The evidence file (`~/dossier/which.md`) that a learner of the series appends command output to as the modules go along. See [module 40](40-how-an-os-gets-built.md).
 
 **dracut**
 :   The tool that builds the initramfs, the small early-boot filesystem that finds and mounts the real root filesystem. See [module 14](14-the-boot-process.md).
@@ -175,20 +235,35 @@ This glossary has 246 terms.
 **eBPF**
 :   A kernel feature that runs small, verified programs on kernel events, used for safe low-overhead tracing (bcc-tools, bpftrace) and networking. See [module 19](19-performance-and-observability.md).
 
+**El Torito**
+:   The standard that lets firmware boot from a disc image. A boot catalog on the ISO lists one boot image per firmware type (BIOS, UEFI). See [module 43](43-installer-and-install-media.md) and [module 51](51-build-your-own-install-media.md).
+
+**ELF note**
+:   A labelled record inside a program file, such as the build ID, the instruction set level it needs or its CET features. Read with `readelf -n`. See [module 42](42-what-is-inside-an-os.md).
+
 **Emergency mode**
 :   A minimal systemd target with only a root shell, entered when boot fails badly, most often because of a bad `/etc/fstab` entry. See [module 20](20-troubleshooting-playbook.md).
 
 **EPEL**
 :   Extra Packages for Enterprise Linux: a community repository of additional software built for Rocky and RHEL. Install with `dnf install epel-release`. See [module 05](05-software-rpm-and-dnf.md).
 
+**Ephemeral key**
+:   A key made for one build and not kept as a standing key. Rocky's kernel module-signing key is of this kind: it differs from one kernel build to the next. See [module 29](29-secure-boot-and-drivers.md) and [module 48](48-trust-secure-boot-and-reproducibility.md).
+
 **Errata (advisories)**
-:   Rocky's published update notices: **RLSA** (security), **RLBA** (bug fix) and **RLEA** (enhancement), each listing CVEs and fixed packages. Queried with `dnf updateinfo`. See [module 21](21-inside-rocky-linux.md).
+:   Rocky's published update notices: **RLSA** (security), **RLBA** (bug fix) and **RLEA** (enhancement), each listing CVEs and fixed packages. Queried with `dnf updateinfo`. See [module 21](21-inside-rocky-linux.md). More in [module 46](46-pipeline-compose-to-your-server.md).
+
+**ESP (EFI System Partition)**
+:   The small FAT partition that UEFI firmware reads to find a boot loader. An install ISO carries a hidden one as its UEFI boot image. See [module 14](14-the-boot-process.md) and [module 43](43-installer-and-install-media.md).
 
 **EVR (Epoch, Version, Release)**
-:   The three parts RPM compares to decide which package is newer, written `epoch:version-release`. See [module 22](22-building-rpms.md).
+:   The three parts RPM compares to decide which package is newer, written `epoch:version-release`. See [module 22](22-building-rpms.md). More in [module 41](41-anatomy-of-a-package.md).
 
 **Exit code**
 :   The number a program returns when it ends: 0 for success, anything else for failure. systemd also reports its own codes such as `203/EXEC`. See [module 07](07-systemd-and-services.md).
+
+**External repository (Koji)**
+:   A URL a Koji build tag borrows packages from. An empty Koji needs one to get its first buildroot. See [module 45](45-pipeline-source-to-build.md) and [module 50](50-build-your-own-koji.md).
 
 ## F
 
@@ -200,6 +275,15 @@ This glossary has 246 terms.
 
 **File descriptor**
 :   A small number a process uses to refer to an open file, socket or pipe. 0, 1 and 2 are standard input, output and error. See [module 01](01-how-linux-works.md).
+
+**File list (fullfiletimelist)**
+:   A tab-separated list of every file's modification time, type, size and path in Rocky's production tree, readable by anyone, mirrors included, to see what changed. See [module 46](46-pipeline-compose-to-your-server.md).
+
+**File trigger**
+:   A script that runs once per transaction when any package installs or removes files under a watched path. See [module 41](41-anatomy-of-a-package.md).
+
+**Fingerprint (key)**
+:   The full 40-hex-digit identity of an OpenPGP v4 key. It is the thing to compare, as opposed to the short key ID. See [module 47](47-trust-signatures-and-keys.md).
 
 **firewalld**
 :   Rocky's firewall service. It organises rules into zones and services and programs the kernel's nftables underneath. See [module 12](12-firewalld.md).
@@ -215,11 +299,20 @@ This glossary has 246 terms.
 
 ## G
 
+**GenericCloud**
+:   Rocky's cloud image for any cloud or hypervisor that supports cloud-init. See [module 44](44-images-cloud-container-bootc.md).
+
 **GID (Group ID)**
 :   The number that identifies a group. Files store GIDs, not names. See [module 03](03-users-groups-and-sudo.md).
 
+**glibc-hwcaps**
+:   Subdirectories the loader searches for libraries tuned to a CPU level. See [module 42](42-what-is-inside-an-os.md).
+
 **GPG key**
-:   A public key used to verify that packages were signed by a trusted publisher. DNF refuses unsigned or wrongly signed packages. See [module 05](05-software-rpm-and-dnf.md).
+:   A public key used to verify that packages were signed by a trusted publisher. DNF refuses unsigned or wrongly signed packages. See [module 05](05-software-rpm-and-dnf.md). More in [module 47](47-trust-signatures-and-keys.md).
+
+**gpg-pubkey**
+:   The pseudo-package rpm creates for each imported key. Its version is the short key ID and its release is the key's creation time in hex. `rpm -qa 'gpg-pubkey*'` lists the keys rpm trusts. See [module 47](47-trust-signatures-and-keys.md).
 
 **GRUB2**
 :   The boot loader on Rocky. It shows the boot menu, loads the kernel and initramfs, and passes kernel arguments. See [module 14](14-the-boot-process.md).
@@ -232,6 +325,9 @@ This glossary has 246 terms.
 **HBAC (Host-Based Access Control)**
 :   FreeIPA rules saying which users may log in to which hosts through which services. SSSD enforces them on each client; `ipa hbactest` simulates them. See [module 26](26-centralized-identity.md).
 
+**Hub (Koji)**
+:   The Koji web service (httpd plus `kojihub`) that holds the API and talks to the database. Builders, `kojira` and the command line all go through it. See [module 50](50-build-your-own-koji.md).
+
 **Huge pages**
 :   Memory pages larger than the normal 4 KiB (usually 2 MiB or 1 GiB), which cut TLB misses for large-memory workloads. Reserved explicitly (HugeTLB) or used automatically (THP). See [module 25](25-memory-deep-dive.md).
 
@@ -240,17 +336,35 @@ This glossary has 246 terms.
 **Idempotence**
 :   Running the same automation twice gives the same result, and the second run changes nothing. In Ansible a clean second run reports `changed=0`. See [module 32](32-ansible-and-system-roles.md).
 
+**Identity package**
+:   A package whose job is to say which distribution this is. On Rocky the three installed ones are `rocky-release`, `rocky-repos` and `rocky-gpg-keys`, all built from one source package that also builds a fourth, `rocky-sb-certs`. See [module 21](21-inside-rocky-linux.md), [module 42](42-what-is-inside-an-os.md) and [module 52](52-capstone-myorg-lab.md).
+
+**ID_LIKE**
+:   The ordered list in `os-release` of the distributions yours is built like. See [module 52](52-capstone-myorg-lab.md).
+
+**IMA (Integrity Measurement Architecture)**
+:   A Linux kernel feature that can measure files and, if you load an appraisal policy, refuse files that lack a valid per-file signature. Rocky signed per-file IMA signatures into its packages (stored in the RPM header's `FILESIGNATURES` tag) up to 2026-03-17; packages signed from 2026-03-25 carry none, and no IMA policy is active by default. See [module 21](21-inside-rocky-linux.md). More in [module 47](47-trust-signatures-and-keys.md).
+
 **Image Builder**
 :   Rocky's tool (`osbuild-composer`, driven by `composer-cli` or Cockpit) for building disk images (qcow2, ISO, cloud formats) from a blueprint. See [module 23](23-automated-installs.md).
+
+**Import service account**
+:   The service account that records imported builds in Rocky's Koji, so those builds show no task id. Older documentation describes an early build-orchestration tool with a similar name as part of the import flow; treat that as history. See [module 21](21-inside-rocky-linux.md) and [module 45](45-pipeline-source-to-build.md).
 
 **Initiator**
 :   The client side of a SAN protocol such as iSCSI or NVMe-oF: the host that sends storage commands to a target. See [module 35](35-enterprise-storage.md).
 
 **Initramfs**
-:   A compressed temporary root filesystem loaded with the kernel. It contains just enough tools and drivers to find, unlock and mount the real root. See [module 14](14-the-boot-process.md).
+:   A compressed temporary root filesystem loaded with the kernel. It contains just enough tools and drivers to find, unlock and mount the real root. See [module 14](14-the-boot-process.md). More in [module 42](42-what-is-inside-an-os.md).
 
 **Inode**
 :   The filesystem record that holds a file's metadata (owner, mode, size, block locations) but not its name. A filesystem can run out of inodes before it runs out of space. See [module 09](09-disks-and-filesystems.md).
+
+**install.img**
+:   The installer's own root filesystem, a plain xz squashfs with Anaconda inside. It is stage 2 of an installation. See [module 43](43-installer-and-install-media.md).
+
+**Installroot**
+:   A directory that `dnf --installroot` fills as if it were a disk's root, without touching the host. The same idea as an OS image before it is put on a disk. See [module 40](40-how-an-os-gets-built.md) and [module 52](52-capstone-myorg-lab.md).
 
 **Inventory (Ansible)**
 :   The list of machines Ansible manages, organised into groups, with per-group and per-host variables. See [module 32](32-ansible-and-system-roles.md).
@@ -260,6 +374,9 @@ This glossary has 246 terms.
 
 **IQN (iSCSI Qualified Name)**
 :   The unique name of an iSCSI initiator or target, such as `iqn.2026-10.test.lab:storage1`. See [module 35](35-enterprise-storage.md).
+
+**ISA level (microarchitecture level)**
+:   A named set of CPU instructions (`x86-64-v2`, `v3`, `v4`). A program can record the level it needs, and Rocky 10 on x86 is built for v3. See [module 42](42-what-is-inside-an-os.md).
 
 **iSCSI**
 :   A protocol that carries SCSI disk commands over TCP/IP, so a server can use remote block storage as if it were a local disk. Managed with `iscsiadm` on the client. See [module 35](35-enterprise-storage.md).
@@ -273,6 +390,9 @@ This glossary has 246 terms.
 :   systemd's structured, indexed log store, read with `journalctl`. Persistent under `/var/log/journal/`. See [module 08](08-logging-and-the-journal.md).
 
 ## K
+
+**kABI**
+:   The list of kernel symbols that modules may depend on, kept stable within a release so third-party modules keep loading. See [module 29](29-secure-boot-and-drivers.md) and [module 42](42-what-is-inside-an-os.md).
 
 **KDC (Key Distribution Center)**
 :   The Kerberos server that checks your password once and issues tickets. FreeIPA servers and AD domain controllers are KDCs. See [module 26](26-centralized-identity.md).
@@ -295,14 +415,29 @@ This glossary has 246 terms.
 **kexec**
 :   A mechanism for booting a new kernel directly from a running one, skipping firmware. kdump uses it to start the capture kernel after a crash. See [module 24](24-debugging-crashes.md).
 
+**Key ID**
+:   The last 32 or 64 bits of a key's fingerprint. It is a database label, not an identity. See [module 47](47-trust-signatures-and-keys.md).
+
 **Keytab**
 :   A file holding a Kerberos principal's long-term keys, so a host or service can authenticate without a typed password. The host's keytab is `/etc/krb5.keytab`; protect it like a password. See [module 26](26-centralized-identity.md).
 
 **Kickstart**
-:   A text file that answers every installer question, so Rocky can be installed automatically and identically on many machines. See [module 23](23-automated-installs.md).
+:   A text file that answers every installer question, so Rocky can be installed automatically and identically on many machines. See [module 23](23-automated-installs.md). More in [module 51](51-build-your-own-install-media.md).
+
+**Kickstart ISO**
+:   A boot ISO with a kickstart written onto it and every boot entry pointed at it, made by `mkksiso`. See [module 51](51-build-your-own-install-media.md).
+
+**KIWI**
+:   The tool that builds Rocky's cloud, container, WSL, Vagrant and Raspberry Pi images from an XML description. See [module 44](44-images-cloud-container-bootc.md).
+
+**kiwibuild**
+:   The compose phase that asks Koji to run KIWI for the image set. See [module 44](44-images-cloud-container-bootc.md).
 
 **Koji**
-:   The RPM build system used by Fedora and CentOS, which schedules builds in clean `mock` buildroots and tracks every build's inputs. Rocky has used both Koji and its own Peridot. See [module 21](21-inside-rocky-linux.md).
+:   The RPM build system used by Fedora and CentOS, which schedules builds in clean `mock` buildroots and tracks every build's inputs. Rocky builds with Koji for Rocky 8, for Rocky 10 since 2025-05-16 and for Rocky 9 from 9.7; its own Peridot built the rest. See [module 21](21-inside-rocky-linux.md). More in [module 50](50-build-your-own-koji.md).
+
+**kojira**
+:   The Koji daemon that notices stale build repositories and asks for new ones. See [module 50](50-build-your-own-koji.md).
 
 **KSM (Kernel Samepage Merging)**
 :   A kernel feature that finds identical memory pages in different processes (typically VMs) and keeps one shared copy. See [module 25](25-memory-deep-dive.md).
@@ -311,6 +446,12 @@ This glossary has 246 terms.
 :   The Linux kernel's built-in hypervisor, which turns Rocky into a host for virtual machines, managed with libvirt and `virsh`. See [module 27](27-virtualization-kvm.md).
 
 ## L
+
+**Landing zone**
+:   The public repository `staging/src-rhel/rpms/PKG` where Red Hat's source arrives unmodified before Rocky changes it. See [module 45](45-pipeline-source-to-build.md).
+
+**Lead (RPM file)**
+:   The first 96 bytes of an RPM file: a magic number (`edabeedb`), the format version, a type and the name. It is the first of an RPM's four parts. See [module 41](41-anatomy-of-a-package.md).
 
 **Leap second**
 :   An extra second occasionally inserted into UTC. chrony can step, slew or "smear" it; a mismatched approach across machines causes brief clock disagreements. See [module 36](36-time-synchronization.md).
@@ -327,11 +468,20 @@ This glossary has 246 terms.
 **Load average**
 :   The average number of tasks running, waiting for a CPU, or in uninterruptible sleep over about 1, 5 and 15 minutes. Compare it with the number of CPUs. See [module 19](19-performance-and-observability.md).
 
+**Local repo (mock)**
+:   A directory `mock` fills with each build's output so the next buildroot can install from it. See [module 49](49-build-your-own-packages-and-repo.md).
+
 **Lockdown (kernel)**
 :   A kernel mode, enabled automatically under Secure Boot, that stops even root from modifying the running kernel: no unsigned modules, no raw `/dev/mem` writes, no hibernation. Shown in `/sys/kernel/security/lockdown`. See [module 29](29-secure-boot-and-drivers.md).
 
 **Logical volume (LV)**
 :   A flexible virtual partition carved from an LVM volume group. It can be resized, snapshotted and moved between disks. See [module 10](10-lvm-raid-and-encryption.md).
+
+**Lookaside**
+:   A separate store for the large source tarballs of a package, addressed by their checksum, so the Git repository holds only the spec file and patches. Rocky's lookaside is a web store keyed by SHA-256. See [module 21](21-inside-rocky-linux.md). More in [module 45](45-pipeline-source-to-build.md).
+
+**lorax**
+:   The tool that builds the installer pieces and packs them into `boot.iso`. `mkksiso` ships in the same package. See [module 43](43-installer-and-install-media.md) and [module 51](51-build-your-own-install-media.md).
 
 **LUKS**
 :   Linux Unified Key Setup, the standard for full-disk encryption on Linux, managed with `cryptsetup`. See [module 10](10-lvm-raid-and-encryption.md).
@@ -344,20 +494,35 @@ This glossary has 246 terms.
 
 ## M
 
+**machine-id**
+:   The unique ID in `/etc/machine-id`. It is empty in a shipped image and filled in on first boot. See [module 44](44-images-cloud-container-bootc.md).
+
 **Magic SysRq**
 :   Kernel key combinations (or writes to `/proc/sysrq-trigger`) that act even when the system is hung: dump blocked tasks (`w`), sync, reboot, or force a crash (`c`) for kdump. See [module 24](24-debugging-crashes.md).
+
+**Main header**
+:   The third part of an RPM file: all the metadata `rpm -q` reads (name, files, dependencies, scriptlets, build host), including the payload digest. The package signature covers this header. See [module 41](41-anatomy-of-a-package.md).
 
 **MCS (Multi-Category Security)**
 :   The category part of an SELinux label (`s0:c214,c739`). Podman gives each container different categories so containers cannot read each other's files. See [module 18](18-containers.md).
 
+**Mirrorlist and metalink**
+:   Two services that answer `dnf` for your location. A mirrorlist returns plain mirror URLs. A metalink returns XML with the expected hash, size and timestamp of `repomd.xml` plus mirror URLs. See [module 46](46-pipeline-compose-to-your-server.md).
+
+**MirrorManager**
+:   The software that keeps Rocky's mirror list and serves the mirrorlist and metalink answers. See [module 46](46-pipeline-compose-to-your-server.md).
+
+**mkksiso**
+:   A tool in the `lorax` package that copies a kickstart onto an ISO and appends `inst.ks=` to each boot entry. See [module 51](51-build-your-own-install-media.md).
+
 **ML-DSA**
-:   A post-quantum digital signature algorithm (FIPS 204, formerly Dilithium) that can replace RSA and ECDSA in certificates. See [module 33](33-tls-and-crypto-policies.md).
+:   A post-quantum digital signature algorithm (FIPS 204, formerly Dilithium) that can replace RSA and ECDSA in certificates. Rocky's `RPM-GPG-KEY-Rocky-10` file gained a second, post-quantum key (ML-DSA-87 plus Ed448) in August 2026, though packages are still signed with the RSA key. See [module 33](33-tls-and-crypto-policies.md). More in [module 47](47-trust-signatures-and-keys.md).
 
 **ML-KEM**
 :   A post-quantum key encapsulation mechanism (FIPS 203, formerly Kyber). TLS uses it as a hybrid with X25519 (`X25519MLKEM768`), so the connection stays safe if either algorithm holds. See [module 33](33-tls-and-crypto-policies.md).
 
 **mock**
-:   A tool that builds RPMs inside a clean, throwaway chroot containing only the declared build dependencies, so builds are reproducible. From EPEL. See [module 22](22-building-rpms.md).
+:   A tool that builds RPMs inside a clean, throwaway chroot containing only the declared build dependencies, so builds are reproducible. From EPEL. See [module 22](22-building-rpms.md). More in [module 49](49-build-your-own-packages-and-repo.md).
 
 **MOK (Machine Owner Key)**
 :   A key you enroll yourself (with `mokutil` and a confirmation at the console on next boot) so shim and the kernel trust modules or boot files you signed. See [module 29](29-secure-boot-and-drivers.md).
@@ -394,6 +559,9 @@ This glossary has 246 terms.
 **nohz_full**
 :   A kernel boot argument that stops the periodic scheduler tick on the listed CPUs when only one task runs there, removing a source of jitter. See [module 37](37-real-time-and-low-latency.md).
 
+**NOKEY and BAD**
+:   The two rpm verdicts that are easy to confuse. NOKEY means the signature is well formed but no key with that ID is in the rpm database. BAD means a key was found and the check failed. See [module 47](47-trust-signatures-and-keys.md) and [module 49](49-build-your-own-packages-and-repo.md).
+
 **NQN (NVMe Qualified Name)**
 :   The unique name of an NVMe subsystem or host, the NVMe-oF counterpart of an iSCSI IQN. See [module 35](35-enterprise-storage.md).
 
@@ -412,13 +580,25 @@ This glossary has 246 terms.
 **NVMe-oF (NVMe over Fabrics)**
 :   The NVMe protocol carried over a network (TCP, RDMA or Fibre Channel) instead of PCIe, giving remote flash storage with low overhead. Managed with `nvme-cli`. See [module 35](35-enterprise-storage.md).
 
+**NVR and NVRA**
+:   The name, version and release (and architecture) label of a package, such as `which-2.21-44.el10_0` or `which-2.21-44.el10_0.x86_64`. See [module 40](40-how-an-os-gets-built.md).
+
+**NVR collapse**
+:   What happens when a rebuild's release loses its point-release marker (`el10_0` becomes `el10`), so the name no longer identifies which build you have. See [module 49](49-build-your-own-packages-and-repo.md).
+
 ## O
+
+**OCI image**
+:   The standard container image format: layers plus a manifest, named by a SHA-256 digest. A manifest list holds one image per architecture. See [module 44](44-images-cloud-container-bootc.md).
 
 **OOM killer**
 :   The kernel mechanism that kills a process when memory runs out completely, leaving an `Out of memory: Killed process` message in the kernel log. See [module 25](25-memory-deep-dive.md).
 
 **Oops**
 :   The kernel detecting a serious error in itself and printing a report (registers, call trace, taint flags). It may kill the offending task and keep running, or escalate to a panic. See [module 24](24-debugging-crashes.md).
+
+**openQA**
+:   Automated install and desktop tests. Rocky runs a public instance with a read API. See [module 46](46-pipeline-compose-to-your-server.md).
 
 **Overcommit**
 :   The kernel promising processes more virtual memory than physically exists, betting that not all of it will be used. Controlled by `vm.overcommit_memory`; when the bet fails, the OOM killer acts. See [module 25](25-memory-deep-dive.md).
@@ -446,11 +626,23 @@ This glossary has 246 terms.
 **Partition**
 :   A slice of a disk with its own filesystem or purpose, recorded in a partition table (GPT on modern systems). See [module 09](09-disks-and-filesystems.md).
 
+**Patch repo**
+:   `staging/patch/PKG`: YAML files listing the debranding actions `pv2` applies to one package. A package with no patch repo has no debranding actions. See [module 45](45-pipeline-source-to-build.md).
+
+**Payload digest (PAYLOADDIGEST)**
+:   The checksum of a package's files, recorded in its signed header and read with `%{PAYLOADDIGEST}`. It is the working test for "same content", because file timestamps and build IDs can differ. See [module 40](40-how-an-os-gets-built.md), [module 48](48-trust-secure-boot-and-reproducibility.md) and [module 49](49-build-your-own-packages-and-repo.md).
+
+**Payload (RPM)**
+:   The last part of an RPM file: a compressed cpio archive of the files. Most Rocky 10.2 packages use zstd, `kernel-core` uses xz and source RPMs use gzip. See [module 41](41-anatomy-of-a-package.md).
+
 **PCR (Platform Configuration Register)**
 :   A TPM register that accumulates hashes of what booted (firmware, Secure Boot state, boot loader). A secret sealed to PCR values is released only if the boot measured the same. PCR 7 (Secure Boot policy) is the common choice. See [module 30](30-network-bound-encryption.md).
 
+**PE file**
+:   The executable format UEFI boot files use (`shimx64.efi`, `grubx64.efi`, `vmlinuz`). See [module 48](48-trust-secure-boot-and-reproducibility.md).
+
 **Peridot**
-:   A cloud-native RPM build system written by the Rocky community, used to build Rocky Linux 9. See [module 21](21-inside-rocky-linux.md).
+:   A cloud-native RPM build system written in Go by the Rocky community. It built Rocky Linux 9.0 to 9.6 and the early Rocky 10 content (until 2025-05-16). Rocky now builds with Koji, but many installed packages still carry Peridot build hosts, and Peridot's code base also holds Apollo, the errata service. See [module 21](21-inside-rocky-linux.md). More in [module 45](45-pipeline-source-to-build.md).
 
 **Permissive mode**
 :   An SELinux mode where denials are logged but not enforced. Useful for brief testing, never as a fix. See [module 16](16-selinux.md).
@@ -485,6 +677,12 @@ This glossary has 246 terms.
 **procfs (/proc)**
 :   A virtual filesystem where the kernel exposes information about processes and itself as files, such as `/proc/meminfo` and `/proc/PID/status`. See [module 01](01-how-linux-works.md).
 
+**productmd**
+:   A metadata format that describes a compose: which packages, images and trees it contains, with checksums, in files such as `composeinfo.json` and `images.json`. Pungi writes it, and Rocky publishes the JSON under `metadata/` on its download server. See [module 21](21-inside-rocky-linux.md). More in [module 46](46-pipeline-compose-to-your-server.md).
+
+**Provenance**
+:   The record of what built an artifact, from what source, and where. See [module 48](48-trust-secure-boot-and-reproducibility.md).
+
 **PSI (Pressure Stall Information)**
 :   Kernel statistics in `/proc/pressure/` showing what percentage of time tasks were stalled waiting for CPU, memory or I/O. See [module 19](19-performance-and-observability.md) and [module 25](25-memory-deep-dive.md).
 
@@ -494,13 +692,19 @@ This glossary has 246 terms.
 **PTP (Precision Time Protocol)**
 :   IEEE 1588 time synchronisation using hardware timestamps in NICs and switches, reaching sub-microsecond accuracy on a LAN. Provided by `linuxptp` (`ptp4l`, `phc2sys`). See [module 36](36-time-synchronization.md).
 
+**Pungi**
+:   The tool that turns a set of signed packages in a Koji tag into a compose: repositories, installer images and metadata. Rocky uses it as of 2026-11 (a compose takes about an hour), and Rocky's release engineers have an open request to replace it with something that scales better. See [module 21](21-inside-rocky-linux.md). More in [module 46](46-pipeline-compose-to-your-server.md).
+
+**pv2**
+:   Rocky's import and debranding tool, written in Python. It takes Red Hat's source from a public landing-zone repository, applies YAML patch instructions (replace a file, apply a patch, add a release suffix) and commits the result to the Git repository Koji builds from. It replaced the earlier Go tool srpmproc, which was archived in June 2025. See [module 21](21-inside-rocky-linux.md). More in [module 45](45-pipeline-source-to-build.md).
+
 **PXE (Preboot Execution Environment)**
 :   Network booting: firmware gets an address and a boot file name from DHCP, downloads the boot loader over TFTP, and starts the installer without any local media. UEFI HTTP boot is the modern variant. See [module 23](23-automated-installs.md).
 
 ## Q
 
 **qcow2**
-:   QEMU's copy-on-write disk image format, supporting thin provisioning, backing files and internal snapshots. See [module 27](27-virtualization-kvm.md).
+:   QEMU's copy-on-write disk image format, supporting thin provisioning, backing files and internal snapshots. See [module 27](27-virtualization-kvm.md). More in [module 44](44-images-cloud-container-bootc.md).
 
 **qdisc (queueing discipline)**
 :   The algorithm that decides how packets queue and leave a network interface: `fq_codel` by default, or `tbf`, `htb`, `netem` and others set with `tc`. See [module 34](34-nftables-and-traffic-control.md).
@@ -510,6 +714,9 @@ This glossary has 246 terms.
 
 **Quadlet**
 :   Podman's way to run containers as systemd services: a short `.container` file that a systemd generator turns into a full unit. See [module 18](18-containers.md).
+
+**Query format (--qf)**
+:   The `rpm` option that prints chosen header tags, for example `rpm -q --qf '%{NAME} %{VERSION}\n' bash`. See [module 41](41-anatomy-of-a-package.md).
 
 **Quorum**
 :   The rule that a cluster partition may run resources only if it holds a majority of votes, which stops two halves from both acting. Two-node clusters need special handling or a quorum device. See [module 28](28-high-availability.md).
@@ -528,6 +735,15 @@ This glossary has 246 terms.
 **ReaR (Relax-and-Recover)**
 :   A bare-metal disaster recovery tool that builds a bootable rescue image of a system, recreates its disk layout on new hardware, and restores the backup. See [module 31](31-disaster-recovery-and-migration.md).
 
+**RELR (packed relocations)**
+:   A smaller relocation format in program files. Using it adds a `GLIBC_ABI_DT_RELR` requirement, which is why an EL10 binary can refuse to start on an older glibc. See [module 42](42-what-is-inside-an-os.md).
+
+**Repo priority**
+:   A per-repository number in which the lower value wins, even over a higher package version. See [module 52](52-capstone-myorg-lab.md).
+
+**repo_gpgcheck**
+:   A DNF repo option that makes DNF verify the detached signature on the repository metadata (`repomd.xml.asc`). It is separate from `gpgcheck`, which verifies each package. Rocky publishes the `.asc` file, but its stock repo files do not set `repo_gpgcheck`. See [module 21](21-inside-rocky-linux.md) and [module 05](05-software-rpm-and-dnf.md). More in [module 47](47-trust-signatures-and-keys.md).
+
 **Repository (repo)**
 :   A server directory of RPM packages plus metadata that DNF downloads from. Configured in `/etc/yum.repos.d/`. See [module 05](05-software-rpm-and-dnf.md).
 
@@ -537,11 +753,20 @@ This glossary has 246 terms.
 **Resource (Pacemaker)**
 :   Anything a cluster starts, stops and monitors: an IP address, a filesystem, a service. Each is driven by a resource agent (OCF script or systemd unit). See [module 28](28-high-availability.md).
 
+**Respin**
+:   The last number of a compose ID: 0 is the first compose of that day, 1 the second. See [module 46](46-pipeline-compose-to-your-server.md).
+
 **Rocky Linux**
 :   A free, community enterprise Linux distribution, compatible with Red Hat Enterprise Linux, governed by the Rocky Enterprise Software Foundation. See [module 21](21-inside-rocky-linux.md).
 
+**.rocky.0.N (release suffix)**
+:   A suffix on a package's `Release`, as in `dnf-4.20.0-22.el10_2.rocky.0.1`, meaning Rocky itself changed the package (a debranding patch or local change). A package without it is a straight rebuild of the upstream source. See [module 21](21-inside-rocky-linux.md). More in [module 41](41-anatomy-of-a-package.md) and [module 42](42-what-is-inside-an-os.md).
+
 **Role (Ansible)**
 :   A reusable bundle of tasks, handlers, templates and default variables with a standard directory layout. See [module 32](32-ansible-and-system-roles.md).
+
+**Root CA and leaf certificate**
+:   A long-lived root certificate authority and the short-lived signing certificates issued under it. Rocky's Secure Boot root runs 2021-06-20 to 2031-06-18, and its leaf certificates last one year. See [module 29](29-secure-boot-and-drivers.md) and [module 48](48-trust-secure-boot-and-reproducibility.md).
 
 **Rootless container**
 :   A container run by an ordinary user, with no root privileges anywhere. Root inside maps to the user's own UID on the host through a user namespace. See [module 18](18-containers.md).
@@ -561,6 +786,9 @@ This glossary has 246 terms.
 **Run queue**
 :   The list of tasks ready to run and waiting for a CPU. A long run queue means CPU saturation. See [module 19](19-performance-and-observability.md).
 
+**runroot**
+:   A Koji task type that runs one command inside a build environment. Rocky's compose uses it to run `lorax`. See [module 51](51-build-your-own-install-media.md).
+
 ## S
 
 **Samba**
@@ -573,7 +801,7 @@ This glossary has 246 terms.
 :   The sysstat tool that reports current and historical system activity from data in `/var/log/sa/`. See [module 19](19-performance-and-observability.md).
 
 **SBAT (Secure Boot Advanced Targeting)**
-:   Version metadata embedded in shim and GRUB that lets whole generations of vulnerable boot components be revoked by number instead of by hash, so the firmware's `dbx` doesn't overflow. See [module 29](29-secure-boot-and-drivers.md).
+:   Version metadata embedded in shim and GRUB that lets whole generations of vulnerable boot components be revoked by number instead of by hash, so the firmware's `dbx` doesn't overflow. See [module 29](29-secure-boot-and-drivers.md). More in [module 48](48-trust-secure-boot-and-reproducibility.md).
 
 **SCHED_FIFO**
 :   A real-time scheduling policy: the highest-priority runnable task runs until it blocks or yields, ahead of every normal task. Set with `chrt -f`. See [module 37](37-real-time-and-low-latency.md).
@@ -581,14 +809,20 @@ This glossary has 246 terms.
 **Scope (systemd)**
 :   A unit that groups processes systemd did not start itself, such as a login session or a container, so they get their own cgroup. See [module 18](18-containers.md).
 
+**Scratch build**
+:   A Koji build that never lands in a tag. Used to test whether a source builds. See [module 50](50-build-your-own-koji.md).
+
 **Scriptlet**
-:   A small shell script inside an RPM that runs on the target machine at install, upgrade or removal (`%pre`, `%post`, `%preun`, `%postun`). See [module 22](22-building-rpms.md).
+:   A small shell script inside an RPM that runs on the target machine at install, upgrade or removal (`%pre`, `%post`, `%preun`, `%postun`). See [module 22](22-building-rpms.md). More in [module 41](41-anatomy-of-a-package.md).
 
 **seccomp**
 :   A kernel filter that limits which system calls a process may make. Containers use a default seccomp profile to block dangerous calls. See [module 18](18-containers.md).
 
 **Secure Boot**
-:   A UEFI feature where firmware runs only boot code signed by a trusted key, and each stage verifies the next: firmware, shim, GRUB, kernel, modules. See [module 29](29-secure-boot-and-drivers.md).
+:   A UEFI feature where firmware runs only boot code signed by a trusted key, and each stage verifies the next: firmware, shim, GRUB, kernel, modules. See [module 29](29-secure-boot-and-drivers.md). More in [module 48](48-trust-secure-boot-and-reproducibility.md).
+
+**Seed**
+:   The ready-made packages from outside a build loop that a bootstrap starts from (a seed buildroot). In the capstone, the seed repositories are the upstream repos a derivative takes every package from that it did not rebuild. See [module 40](40-how-an-os-gets-built.md) and [module 52](52-capstone-myorg-lab.md).
 
 **SELinux**
 :   Security-Enhanced Linux: mandatory access control that labels every process and file and allows only what the policy permits, even for root. See [module 16](16-selinux.md).
@@ -603,13 +837,16 @@ This glossary has 246 terms.
 :   The program that reads your commands and runs them. Rocky's default is bash. See [module 02](02-shell-and-filesystem.md).
 
 **shim**
-:   A small first-stage boot loader signed by Microsoft's UEFI CA and carrying Rocky's certificate, so standard Secure Boot firmware can start Rocky's GRUB and kernel. It also manages MOKs. See [module 29](29-secure-boot-and-drivers.md).
+:   A small first-stage boot loader signed by Microsoft after review (for each shim release) and carrying Rocky's certificate, so standard Secure Boot firmware can start Rocky's GRUB and kernel. Rocky's current shims are dual-signed, under both Microsoft's 2011 and 2023 CAs. It also manages MOKs. See [module 29](29-secure-boot-and-drivers.md). More in [module 48](48-trust-secure-boot-and-reproducibility.md).
 
 **SIG (Special Interest Group)**
 :   A Rocky community team that maintains extra packages or builds beyond the core distribution, such as SIG/Cloud, SIG/Kernel and SIG/AltArch. See [module 21](21-inside-rocky-linux.md).
 
 **Signal**
 :   A short message the kernel delivers to a process, such as `SIGTERM` (please exit), `SIGKILL` (die now) or `SIGHUP` (reload). See [module 06](06-processes-and-signals.md).
+
+**Signature header**
+:   The second part of an RPM file. It holds the signature, the digests of the main header and any IMA file signatures, and sits outside the region the signature covers. See [module 41](41-anatomy-of-a-package.md) and [module 47](47-trust-signatures-and-keys.md).
 
 **Slew and step**
 :   The two ways to correct a clock: **slewing** runs it slightly fast or slow until the error is gone (time never jumps), **stepping** jumps it at once. chrony slews by default and steps only when told or at startup. See [module 36](36-time-synchronization.md).
@@ -630,19 +867,28 @@ This glossary has 246 terms.
 :   The hostname a TLS client sends in its first message, so one IP address can serve many sites with different certificates. See [module 33](33-tls-and-crypto-policies.md).
 
 **Spec file**
-:   The recipe for an RPM: where the source comes from, how to build and install it, which files belong to the package, its dependencies and scriptlets. Built with `rpmbuild`. See [module 22](22-building-rpms.md).
+:   The recipe for an RPM: where the source comes from, how to build and install it, which files belong to the package, its dependencies and scriptlets. Built with `rpmbuild`. See [module 22](22-building-rpms.md). More in [module 41](41-anatomy-of-a-package.md).
 
 **Split brain**
 :   When cluster nodes lose contact and more than one believes it should run the same resource, risking data corruption. Quorum and fencing prevent it. See [module 28](28-high-availability.md).
 
+**squashfs**
+:   A compressed read-only filesystem. The installer image is one. See [module 43](43-installer-and-install-media.md).
+
 **SRPM (source RPM)**
-:   A `.src.rpm` package holding a spec file plus the source tarballs and patches, from which binary RPMs are built. See [module 22](22-building-rpms.md).
+:   A `.src.rpm` package holding a spec file plus the source tarballs and patches, from which binary RPMs are built. See [module 22](22-building-rpms.md). More in [module 41](41-anatomy-of-a-package.md).
 
 **SSH**
 :   Secure Shell: an encrypted protocol for logging in and running commands on remote machines. The server is `sshd`. See [module 17](17-security-hardening.md).
 
 **SSSD**
 :   The System Security Services Daemon, which connects Rocky to central identity services like FreeIPA and Active Directory and caches logins. See [module 26](26-centralized-identity.md).
+
+**Stage 1 and stage 2 (installer)**
+:   Stage 1 is the kernel plus initrd, whose job is to find stage 2. Stage 2 is `images/install.img`, the installer's own small operating system. See [module 43](43-installer-and-install-media.md).
+
+**Staging tree**
+:   Rocky's public pre-release copy of a release under `stg/rocky/` on the download server, where it is tested before promotion to production. Beta and release-candidate trees live there too. See [module 46](46-pipeline-compose-to-your-server.md).
 
 **Sticky bit**
 :   A directory permission (`t`) that lets only a file's owner delete it, even if others can write to the directory. Set on `/tmp`. See [module 04](04-permissions-and-acls.md).
@@ -671,6 +917,9 @@ This glossary has 246 terms.
 **Symbolic link (symlink)**
 :   A small file that points to another path by name. If the target is removed, the link breaks. See [module 02](02-shell-and-filesystem.md).
 
+**syncv2**
+:   Rocky's containerised staging-sync tool. It merges a fresh compose with the packages already in the staging tree, adds errata from Apollo, signs the repository metadata and swaps the new tree in, before testing and promotion to production. See [module 21](21-inside-rocky-linux.md). More in [module 46](46-pipeline-compose-to-your-server.md).
+
 **sysctl**
 :   A kernel tunable under `/proc/sys`, read and set with the `sysctl` command and made permanent in `/etc/sysctl.d/`. See [module 15](15-the-kernel.md).
 
@@ -686,7 +935,13 @@ This glossary has 246 terms.
 **systemd**
 :   PID 1 on Rocky: the init system and service manager that boots the system, starts and supervises services, and manages logs, timers and cgroups. See [module 07](07-systemd-and-services.md).
 
+**system-release**
+:   A capability that the `setup` package requires. Any package that provides it satisfies the dependency, which is why a second release package conflicts with `rocky-release`. See [module 52](52-capstone-myorg-lab.md).
+
 ## T
+
+**Tag (Koji)**
+:   A named set of builds plus settings, which can inherit from a parent tag. A build tag decides what a build sees, a destination tag receives the result. See [module 45](45-pipeline-source-to-build.md) and [module 50](50-build-your-own-koji.md).
 
 **Taint (kernel)**
 :   Flags the kernel sets when something happened that may make bug reports unreliable, such as loading a proprietary or unsigned module or a previous oops. Read from `/proc/sys/kernel/tainted`; 0 means clean. See [module 24](24-debugging-crashes.md).
@@ -694,14 +949,26 @@ This glossary has 246 terms.
 **Tang**
 :   A tiny, stateless HTTP server that helps Clevis clients recover their disk keys without ever learning them. If a disk leaves the network, Tang is unreachable and the disk stays locked. See [module 30](30-network-bound-encryption.md).
 
+**Target (Koji)**
+:   A name that pairs two tags: build from one (the buildroot source), put the finished build in the other. See [module 45](45-pipeline-source-to-build.md) and [module 50](50-build-your-own-koji.md).
+
 **Target (storage)**
 :   The server side of a SAN protocol, which receives commands and serves disks (LUNs or namespaces). On Rocky, LIO provides iSCSI targets and `nvmet` NVMe targets. See [module 35](35-enterprise-storage.md).
 
 **Target (systemd)**
 :   A unit that groups others into a system state, such as `multi-user.target` or `graphical.target`. Replaces old runlevels. See [module 07](07-systemd-and-services.md).
 
+**Task (Koji)**
+:   A unit of work with an id. A build is a tree of tasks such as `build`, `buildArch`, `tagBuild` and `newRepo`. See [module 50](50-build-your-own-koji.md).
+
 **tc (traffic control)**
 :   The command that configures qdiscs, classes and filters on network interfaces, for shaping, policing, prioritising and emulating networks. See [module 34](34-nftables-and-traffic-control.md).
+
+**TCG**
+:   QEMU's software CPU emulation, used when the host has no KVM. Rocky 10 needs `-cpu max` under TCG for x86-64-v3. See [module 43](43-installer-and-install-media.md) and [module 51](51-build-your-own-install-media.md).
+
+**Testrarc**
+:   Rocky's tracker for manual test results on release candidates. The production instance went live on 2026-11-04. See [module 46](46-pipeline-compose-to-your-server.md).
 
 **TGT (Ticket-Granting Ticket)**
 :   The Kerberos ticket you get from the KDC when you log in (`kinit`). It proves who you are when you ask for service tickets, so you don't type your password again. See [module 26](26-centralized-identity.md).
@@ -715,8 +982,14 @@ This glossary has 246 terms.
 **TLS (Transport Layer Security)**
 :   The protocol that encrypts and authenticates network connections (HTTPS, SMTPS, LDAPS). Rocky's TLS libraries follow the system crypto policy. See [module 33](33-tls-and-crypto-policies.md).
 
+**Toolchain**
+:   The compiler, linker and C library that turn source into programs. See [module 42](42-what-is-inside-an-os.md).
+
 **TPM (Trusted Platform Module)**
 :   A security chip (or firmware equivalent) that stores keys and records boot measurements in PCRs, and can seal secrets so they are released only to an unmodified boot. See [module 30](30-network-bound-encryption.md).
+
+**.treeinfo**
+:   A table of contents beside a package tree (images, the stage 2 path, variants). `boot.iso` has none; the tree the installer files come from does. See [module 43](43-installer-and-install-media.md).
 
 **Trust store**
 :   The set of CA certificates the system trusts, managed by `ca-certificates` and `update-ca-trust`; add private CAs in `/etc/pki/ca-trust/source/anchors/`. See [module 33](33-tls-and-crypto-policies.md).
@@ -738,6 +1011,9 @@ This glossary has 246 terms.
 **Unit**
 :   Anything systemd manages, described by a unit file: services, sockets, timers, mounts, targets, slices, scopes. See [module 07](07-systemd-and-services.md).
 
+**updateinfo**
+:   The repository metadata that carries advisories to DNF. `dnf updateinfo` reads it. See [module 46](46-pipeline-compose-to-your-server.md).
+
 **USE method**
 :   A performance method: for every resource, check Utilization, Saturation and Errors. See [module 19](19-performance-and-observability.md).
 
@@ -747,13 +1023,22 @@ This glossary has 246 terms.
 **User space**
 :   Everything that runs outside the kernel: shells, services and applications. User programs must ask the kernel to touch hardware. See [module 01](01-how-linux-works.md).
 
+**Userland**
+:   The ordinary programs and libraries, as opposed to the kernel and the boot chain. See [module 42](42-what-is-inside-an-os.md).
+
 **UUID**
 :   A unique identifier for a filesystem or partition, used in `/etc/fstab` so mounts survive device name changes. See [module 09](09-disks-and-filesystems.md).
 
 ## V
 
+**v6 key**
+:   An OpenPGP version 6 key (RFC 9580). GnuPG 2.4 cannot read it, which is why the second certificate in Rocky 10's key file makes GnuPG 2.4 reject the whole file. See [module 47](47-trust-signatures-and-keys.md).
+
+**Variant (compose)**
+:   One repository family inside a compose: BaseOS, AppStream, CRB and so on. See [module 46](46-pipeline-compose-to-your-server.md).
+
 **Vault (Rocky)**
-:   The archive of older Rocky minor releases and their packages, kept at `dl.rockylinux.org/vault` after mirrors move on to the latest release. See [module 21](21-inside-rocky-linux.md).
+:   The archive of older Rocky minor releases and their packages, kept at `dl.rockylinux.org/vault` after mirrors move on to the latest release. See [module 21](21-inside-rocky-linux.md). More in [module 49](49-build-your-own-packages-and-repo.md).
 
 **vDSO**
 :   A tiny library the kernel maps into every process so that time calls like `clock_gettime()` run in user space without a real system call. See [module 01](01-how-linux-works.md).
@@ -767,7 +1052,13 @@ This glossary has 246 terms.
 **Volume group (VG)**
 :   An LVM pool made from one or more physical volumes, from which logical volumes are allocated. See [module 10](10-lvm-raid-and-encryption.md).
 
+**Volume ID (ISO label)**
+:   The short name stored in an ISO. GRUB (`search -l`) and the installer (`inst.stage2=hd:LABEL=`, `inst.ks=hd:LABEL=`) both find the media by it, so every one must match. See [module 43](43-installer-and-install-media.md) and [module 51](51-build-your-own-install-media.md).
+
 ## W
+
+**weak-updates and weak-modules**
+:   `weak-modules` (from the `kmod` package) links a module into `weak-updates/` of a compatible newer kernel, so a module built for an earlier kernel can still load. See [module 29](29-secure-boot-and-drivers.md), [module 42](42-what-is-inside-an-os.md) and [module 48](48-trust-secure-boot-and-reproducibility.md).
 
 **wheel**
 :   The administrative group on Rocky. Members may use `sudo`. See [module 03](03-users-groups-and-sudo.md).
@@ -781,7 +1072,10 @@ This glossary has 246 terms.
 :   The standard certificate format: a public key plus subject, issuer, validity dates and extensions, signed by a CA. Inspected with `openssl x509`. See [module 33](33-tls-and-crypto-policies.md).
 
 **x86-64-v3**
-:   A level of the x86-64 instruction set that includes AVX2, BMI2 and FMA. Rocky 10 on x86 is built for it, so older CPUs (and VMs with a generic CPU model) can't run it. See [module 00](00-start-here.md).
+:   A level of the x86-64 instruction set that includes AVX2, BMI2 and FMA. Rocky 10 on x86 is built for it, so older CPUs (and VMs with a generic CPU model) can't run it. See [module 00](00-start-here.md). More in [module 42](42-what-is-inside-an-os.md).
+
+**XBOOTLDR**
+:   The partition type for `/boot` beside the ESP, from the Boot Loader Specification. Rocky's cloud image uses it. See [module 44](44-images-cloud-container-bootc.md).
 
 **XFS**
 :   Rocky's default filesystem: fast and scalable. It can grow but cannot shrink. See [module 09](09-disks-and-filesystems.md).

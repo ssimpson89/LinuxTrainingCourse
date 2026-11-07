@@ -44,7 +44,7 @@ Here is the whole idea:
 
 Everything else in this module is detail around that sentence. Unpacked, it's three ideas:
 
-1. **Firmware trusts Microsoft, not Rocky.** PC vendors ship firmware that trusts Microsoft's certificates. Rocky gets in the door with **shim**, a tiny boot loader that Microsoft signs once after review.
+1. **Firmware trusts Microsoft, not Rocky.** PC vendors ship firmware that trusts Microsoft's certificates. Rocky gets in the door with **shim**, a tiny boot loader that Microsoft signs after review, again for each new shim release.
 2. **Shim carries Rocky's certificate.** From shim onward, Rocky's own key vouches for GRUB, the kernel and every module Rocky ships.
 3. **You can add your own key.** The **MOK list** is a key database *you* control. Enroll a key there and anything you sign with it (a driver you compiled, a DKMS-built NVIDIA module) is as trusted as Rocky's own code.
 
@@ -219,6 +219,9 @@ Code only runs if it is signed by a key in the allow lists. Root can't simply ad
 </div>
 
 ## Shim, GRUB and the kernel: passing trust down
+
+!!! tip "Go deeper in the series"
+    [Module 48](48-trust-secure-boot-and-reproducibility.md) reads each boot file's signers and SBAT row, and [module 43](43-installer-and-install-media.md) shows the same signed files on the install ISO.
 
 Microsoft won't sign GRUB or Linux kernels directly. Re-reviewing every kernel update would be impossible. **Shim** solves this: a small, stable boot loader that Rocky builds with **Rocky's CA certificate embedded**, which Microsoft reviews and signs. Shim rarely changes, so it rarely needs a new Microsoft signature, while GRUB and the kernel can update weekly under Rocky's own key.
 
@@ -727,6 +730,9 @@ input password again:
 
 ## The 2011 to 2023 Microsoft certificate transition
 
+!!! tip "Go deeper in the series"
+    [Module 48](48-trust-secure-boot-and-reproducibility.md) shows which signers Rocky's boot files carry today and how long Rocky's own certificates last.
+
 The Microsoft certificates that the whole PC ecosystem trusts were created in 2011, and the first ones reach their expiry dates in 2026. Microsoft created replacements in 2023 and split the old third-party role into separate CAs:
 
 | Old (2011) | Role | New (2023) |
@@ -735,13 +741,15 @@ The Microsoft certificates that the whole PC ecosystem trusts were created in 20
 | Microsoft Corporation UEFI CA 2011 | Signs third-party boot loaders (shim) and option ROMs | Microsoft UEFI CA 2023 (boot loaders), Microsoft Option ROM UEFI CA 2023 (add-in card firmware) |
 | Microsoft Windows Production PCA 2011 | Signs Windows' boot manager | Windows UEFI CA 2023 |
 
+Microsoft's own table gives the expiry days: the KEK CA 2011 on 24 June 2026, the UEFI CA 2011 on 27 June 2026, and the Windows Production PCA 2011 on 19 October 2026. Source: Microsoft Support, "Windows Secure Boot certificate expiration and CA updates" (the table was last updated 2026-05-18, checked 2026-11-06). Microsoft says a device that reaches these dates without the new certificates "will continue to start and operate normally" but can no longer receive new protections for the early boot process.
+
 **Secure Boot CA transition (simplified)**
 
 ```mermaid
 flowchart TB
     T0["<b>2011</b><br/>Original Microsoft KEK and UEFI CAs created"]
     T1["<b>2023</b><br/>Replacement 2023 CAs created"]
-    T2["<b>2024-2025</b><br/>Firmware and OS updates start adding 2023 CAs to KEK and db<br/>Microsoft starts dual-signing shims (late 2025)"]
+    T2["<b>2024-2025</b><br/>Firmware and OS updates start adding 2023 CAs to KEK and db"]
     T3["<b>June 2026</b><br/>2011 KEK and third-party UEFI CA reach expiry<br/>Rocky confirms dual-signed shims"]
     T4["<b>October 2026</b><br/>Windows Production PCA 2011 expires"]
     T5["<b>After 2026</b><br/>New shims and dbx updates signed only with 2023 keys"]
@@ -751,15 +759,22 @@ flowchart TB
 Two facts keep this from being scary:
 
 1. **Expiry doesn't stop existing binaries booting.** UEFI firmware generally doesn't check certificate dates (it has no trustworthy clock at boot). A shim signed in 2024 keeps booting after June 2026. What changes is that Microsoft *stops issuing new signatures* with the old CAs, so future shims and future `dbx` revocations will carry only 2023 signatures.
-2. **Rocky ships dual-signed shims.** Rocky Linux said in June 2026 that its shim carries signatures from both the old and the new Microsoft CA in one binary, so the same shim boots on older firmware that only trusts the 2011 CA and on newer firmware with the 2023 CA. (Red Hat did the same starting with RHEL 9.8 and 10.2.) This relies on the firmware handling a PE binary with two signatures correctly, which some old firmware gets wrong.
+2. **Rocky ships dual-signed shims.** Rocky Linux said in June 2026 that its shims are dual-signed: one binary carries signatures chaining to both the old (2011) and the new (2023) Microsoft CA. The idea is that the same shim can boot on firmware that trusts only the old CA and on firmware that trusts only the new one. You can see this on a real Rocky 10.2 x86_64 shim with `sudo pesign -S -i /boot/efi/EFI/rocky/shimx64.efi` (from the `pesign` package), which lists two signatures.
 
-??? question "For the curious: aarch64 is different"
-    Arm servers generally shipped with the 2023 Microsoft CA already in `db`, so other EL rebuilds sign their aarch64 shim (`shim-aa64`) with the 2023 CA only. On Arm hardware, run `sudo mokutil --db | grep 'UEFI CA 2023'` before you rely on a new shim, and check Rocky's release notes for the current aarch64 signing status.
+Rocky's own post is also clear about what can go wrong. Whether a dual-signed shim boots depends on the firmware correctly handling two signatures on one PE file. A shim signed only by the old CA fails on firmware where the old CA was removed. New OEM hardware ships with only the 2023 CAs. And Rocky warns against enrolling the new KEK or CAs by hand: "This can brick your system." The same post says Rocky will later evaluate moving to single-signing against the new CA.
+
+??? question "For the curious: other distributions sign differently"
+    Each distribution signs its own shim, so compare per binary, not per project. On 2026-11-06 an inspection found Rocky's x86_64 and aarch64 shims (`shim-x64` and `shim-aa64`, version 16.1-2) both dual-signed, while AlmaLinux says its aarch64 shim is signed with the 2023 CA only. On Arm hardware, run `sudo mokutil --db | grep 'UEFI CA 2023'` before you rely on a new shim, and check Rocky's release notes for the current signing status.
 
 What can still bite you:
 
 - **Firmware that never receives the 2023 CAs** will eventually be unable to boot a *2023-only* shim (a future Rocky release, or rescue media built later), and without the 2023 KEK it can't accept new revocations.
 - **Hardware with option ROMs** (GPUs, NICs, storage controllers whose firmware runs at boot) may be signed only with the new Option ROM CA. If `db` doesn't contain that CA, the card's firmware is refused at boot.
+
+??? question "How long Rocky's own certificates last"
+    Two layers of Rocky certificates sit under Microsoft's signature, and their lifetimes are different. The **Rocky Linux Secure Boot Root CA** embedded in shim is valid from 2021-06-20 to 2031-06-18 and has been reused for Rocky 8, 9 and 10. The **leaf signing certificates** under it (for shim, GRUB, the kernel, fwupd and others) are valid for one year: the current set, shipped in the `rocky-sb-certs` package (in the CRB repo), runs from 2026-03-31 to 2027-03-31. Rocky refreshes them by rebuilding the signed packages each spring. Re-check: with CRB enabled, `dnf download rocky-sb-certs`, unpack it with `rpm2cpio`, and read the dates with `openssl x509 -noout -dates` (add `-inform DER` for `.der` files).
+
+    Expiry does not stop a machine booting, because firmware does not check certificate dates (Rocky's 2024 Secure Boot refresh post explains there is no reliable clock at that point). Rocky has not published how it will rotate the root CA before 2031. Separately, the key that signs kernel modules is generated fresh for each kernel build, which is why out-of-tree modules are unsigned until you or the vendor sign them. And the Rocky 10 cloud image tested on AWS reported `SecureBoot disabled`, so on such images `mokutil --db` and the platform keyring are empty.
 
 Check where a machine stands:
 

@@ -99,7 +99,7 @@ Correct. Minor releases (10.0 → 10.1 → 10.2) are delivered as ordinary packa
 
 ## How this course works
 
-The course has 38 modules: a **core track** of 21 modules in five parts, where each part builds on the one before it, plus 17 **Deep Cuts** electives that go further than almost any other Linux course.
+The course has 38 modules: a **core track** of 21 modules in five parts, where each part builds on the one before it, plus 17 **Deep Cuts** electives that go further than almost any other Linux course. A separate series of 14 modules, [How Rocky Gets Built](series-how-rocky-gets-built.md) (modules 40 to 53), explains how the distribution you are learning is itself built, signed and shipped, and lets you build a small one of your own.
 
 ```mermaid
 flowchart TB

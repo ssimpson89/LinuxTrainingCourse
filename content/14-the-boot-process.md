@@ -110,6 +110,9 @@ flowchart TB
 
 ## The boot, step by step
 
+!!! tip "Go deeper in the series"
+    Install media boot through the same chain from an ISO: [module 43](43-installer-and-install-media.md) takes `boot.iso` apart.
+
 Click through each stage. The commands in each step show you the evidence
 of that stage on a running system.
 
@@ -148,10 +151,21 @@ The `Rocky Linux` entry points at `shimx64.efi` on the ESP.
 **What happens:** with **Secure Boot** on, UEFI only runs programs signed by
 a key it trusts, which on most hardware means Microsoft's. Microsoft won't
 sign every distribution's GRUB and kernel, so distributions use **shim**: a
-tiny loader that Microsoft signs once, carrying the distribution's own
-certificate inside it. Shim checks GRUB's signature against that certificate,
-GRUB asks shim to check the kernel, and the kernel checks every module it
-loads. That's the **chain of trust**.
+tiny loader that Microsoft signs after review (again for each new shim
+release), carrying the distribution's own certificate inside it. Shim checks
+GRUB's signature against that certificate, GRUB asks shim to check the kernel,
+and the kernel checks every module it loads. That's the **chain of trust**.
+
+Rocky's shim is currently **dual-signed**: it carries signatures from both
+Microsoft's older (2011) and newer (2023) third-party CA, so it can boot on
+firmware that knows either one. Whether a dual-signed shim boots still depends
+on the firmware reading two signatures on one file, and a shim signed only by
+the old CA fails on machines where the old CA was removed. Don't enroll
+Microsoft's keys by hand to "fix" this: update the firmware from your hardware
+vendor instead. Rocky's own root certificate inside shim is valid from
+2021-06-20 to 2031-06-18, and the yearly leaf certificates under it are
+refreshed each spring. The details are in
+[29 · Secure Boot and Drivers](29-secure-boot-and-drivers.md#the-2011-to-2023-microsoft-certificate-transition).
 
 ```console
 $ sudo ls /boot/efi/EFI/rocky/
@@ -354,6 +368,9 @@ Notice the pattern: each message proves that every runner *before* it
 worked. That alone rules out most of the chain.
 
 ## Firmware and Secure Boot in practice
+
+!!! tip "Go deeper in the series"
+    [Module 48](48-trust-secure-boot-and-reproducibility.md) names the signer of each boot file and reads the SBAT rows.
 
 Most of the time the firmware stage just works. Two things are worth
 knowing for troubleshooting:
@@ -1274,7 +1291,7 @@ The initramfs (stage 5). It was looking for the root device and never found it: 
 
 What is shim, and why does Rocky need it?
 
-A small first-stage bootloader signed by Microsoft that carries Rocky's own certificate, so Secure Boot firmware will run it, and it can then verify Rocky's GRUB and kernel.
+A small first-stage bootloader signed by Microsoft (after review, per shim release) that carries Rocky's own certificate, so Secure Boot firmware will run it, and it can then verify Rocky's GRUB and kernel.
 
 </div>
 

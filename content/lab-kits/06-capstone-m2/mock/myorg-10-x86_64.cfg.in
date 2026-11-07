@@ -1,0 +1,77 @@
+# MyOrg buildroot for mock (template: 01-fetch-and-keys.sh renders @M@ and @PORT@ into myorg-10-x86_64.cfg). Standalone (no include of the seed template) so
+# every line is visible. Use:
+#   mock -r $M/mock/myorg-10-x86_64.cfg --rebuild X.src.rpm
+#
+# What differs from the seed's own mock config:
+#   1. chroot_setup_cmd installs myorg-release instead of rocky-release. That one
+#      change is what puts macros.dist (dist = .myorg) into every buildroot.
+#   2. exclude=rocky-* keeps the seed's identity packages out of the buildroot.
+#      Without it dnf may pick rocky-release as the provider of system-release
+#      (measured in README, experiment D).
+#   3. gpgcheck=1 everywhere, with a key file per repo.
+#   4. use_bootstrap off: the bootstrap image is a Rocky container with a Rocky
+#      identity, and nothing in this lab needs it.
+config_opts['root'] = 'myorg-10-x86_64'
+config_opts['description'] = 'MyOrg Lab Linux 10'
+config_opts['target_arch'] = 'x86_64'
+config_opts['legal_host_arches'] = ('x86_64',)
+config_opts['package_manager'] = 'dnf'
+config_opts['use_bootstrap'] = False
+config_opts['releasever'] = '10'
+config_opts['releasever_major'] = '10'
+config_opts['dist'] = 'myorg'   # only used in --resultdir substitution, NOT the %dist macro
+config_opts['extra_chroot_dirs'] = [ '/run/lock', ]
+config_opts['chroot_setup_cmd'] = 'install bash bzip2 coreutils cpio diffutils findutils gawk glibc-minimal-langpack grep gzip info patch redhat-rpm-config myorg-release rpm-build sed tar unzip util-linux which xz'
+
+# A third way to set the tag, NOT tested in this lab (the two tested ways are --define and macros.dist from myorg-release):
+# config_opts['macros']['%dist'] = '.myorg'
+
+config_opts['dnf.conf'] = """
+[main]
+keepcache=1
+debuglevel=2
+reposdir=/dev/null
+logfile=/var/log/yum.log
+retries=20
+obsoletes=1
+gpgcheck=1
+assumeyes=1
+syslog_ident=mock
+syslog_device=
+metadata_expire=0
+best=1
+install_weak_deps=0
+protected_packages=
+skip_if_unavailable=False
+module_platform_id=platform:el10
+exclude=rocky-*
+
+[myorg]
+name=MyOrg
+baseurl=http://localhost:@PORT@/myorg/10/x86_64/
+enabled=1
+gpgcheck=1
+gpgkey=file://@M@/keys/RPM-GPG-KEY-myorg
+priority=10
+
+[seed-baseos]
+name=Seed BaseOS
+baseurl=https://dl.rockylinux.org/pub/rocky/10/BaseOS/x86_64/os/
+gpgcheck=1
+gpgkey=file://@M@/keys/RPM-GPG-KEY-upstream-seed
+priority=99
+
+[seed-appstream]
+name=Seed AppStream
+baseurl=https://dl.rockylinux.org/pub/rocky/10/AppStream/x86_64/os/
+gpgcheck=1
+gpgkey=file://@M@/keys/RPM-GPG-KEY-upstream-seed
+priority=99
+
+[seed-crb]
+name=Seed CRB
+baseurl=https://dl.rockylinux.org/pub/rocky/10/CRB/x86_64/os/
+gpgcheck=1
+gpgkey=file://@M@/keys/RPM-GPG-KEY-upstream-seed
+priority=99
+"""

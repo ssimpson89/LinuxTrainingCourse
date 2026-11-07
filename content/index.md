@@ -291,6 +291,83 @@ The topics most Linux guides skip. Take them after the core track, in any order.
   </a>
 </div>
 
+## How Rocky gets built (a series) { #how-rocky-gets-built }
+
+A second track for when you want to know how the system you run gets made. It follows one package from Red Hat's source to your server using only public tools, then has you build a small distribution of your own. It is long (about 43 hours end to end) and every lab says whether it was tested. Take it after the core track and modules 21 and 22.
+
+<div class="syllabus-grid">
+  <a class="syllabus-card syllabus-card--elective" href="series-how-rocky-gets-built/">
+    <span class="syllabus-card__index">Start</span>
+    <span class="syllabus-card__title">Start here</span>
+    <span class="syllabus-card__description">How the series works: four laps, four reading tracks, what every lab status means and what was and was not tested.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="40-how-an-os-gets-built/">
+    <span class="syllabus-card__index">40</span>
+    <span class="syllabus-card__title">How an OS Gets Built</span>
+    <span class="syllabus-card__description">The map: what an OS is made of, why nobody builds one from nothing, and the thirteen steps from source to server.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="41-anatomy-of-a-package/">
+    <span class="syllabus-card__index">41</span>
+    <span class="syllabus-card__title">Anatomy of a Package</span>
+    <span class="syllabus-card__description">Take one Rocky RPM apart byte by byte, then open the source RPM and spec behind it.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="42-what-is-inside-an-os/">
+    <span class="syllabus-card__index">42</span>
+    <span class="syllabus-card__title">What Is Inside an OS</span>
+    <span class="syllabus-card__description">Layers, the packages that make it Rocky, and the x86-64-v3 baseline read from a binary.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="43-installer-and-install-media/">
+    <span class="syllabus-card__index">43</span>
+    <span class="syllabus-card__title">Installer and Install Media</span>
+    <span class="syllabus-card__description">What is on boot.iso, how the installer runs, and how to prove your download is the real file.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="44-images-cloud-container-bootc/">
+    <span class="syllabus-card__index">44</span>
+    <span class="syllabus-card__title">Images: Cloud, Container and bootc</span>
+    <span class="syllabus-card__description">The same packages in four shapes, and what each shape leaves out.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="45-pipeline-source-to-build/">
+    <span class="syllabus-card__index">45</span>
+    <span class="syllabus-card__title">Rocky's Pipeline I: Source to Build</span>
+    <span class="syllabus-card__description">Follow one package from Red Hat source to a Koji build with public tools only.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="46-pipeline-compose-to-your-server/">
+    <span class="syllabus-card__index">46</span>
+    <span class="syllabus-card__title">Rocky's Pipeline II: Compose to Your Server</span>
+    <span class="syllabus-card__description">Compose, staging, mirrors and advisories, with the real timestamps.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="47-trust-signatures-and-keys/">
+    <span class="syllabus-card__index">47</span>
+    <span class="syllabus-card__title">Trust I: Signatures and Keys</span>
+    <span class="syllabus-card__description">What a green rpm -K proves, what it never did, and where the keys live.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="48-trust-secure-boot-and-reproducibility/">
+    <span class="syllabus-card__index">48</span>
+    <span class="syllabus-card__title">Trust II: Secure Boot and Reproducibility</span>
+    <span class="syllabus-card__description">Firmware to kernel module with real signers, then what "the same build" can prove.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="49-build-your-own-packages-and-repo/">
+    <span class="syllabus-card__index">49</span>
+    <span class="syllabus-card__title">Build Your Own Packages and Repository</span>
+    <span class="syllabus-card__description">A package chain, your own key, a signed repository, and an exact rebuild of Rocky's which.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="50-build-your-own-koji/">
+    <span class="syllabus-card__index">50</span>
+    <span class="syllabus-card__title">Build Your Own Koji</span>
+    <span class="syllabus-card__description">A one-VM Koji with a builder, tags and a target, compared with Rocky's public hub.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="51-build-your-own-install-media/">
+    <span class="syllabus-card__index">51</span>
+    <span class="syllabus-card__title">Build Your Own Install Media</span>
+    <span class="syllabus-card__description">A lorax boot ISO, a kickstart, a check against the official ISO, and a read-along boot test.</span>
+  </a>
+  <a class="syllabus-card syllabus-card--elective" href="52-capstone-myorg-lab/">
+    <span class="syllabus-card__index">52</span>
+    <span class="syllabus-card__title">Capstone: MyOrg Lab</span>
+    <span class="syllabus-card__description">Build a small distribution of your own on Rocky packages, checked by a script.</span>
+  </a>
+</div>
+
 ## Suggested paths
 
 Working straight through (00 → 20) is the best way to learn. If you have a specific goal, these shortcuts work too:

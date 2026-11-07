@@ -13,6 +13,9 @@ theme:
       version: material/source-branch
       pitfall: material/alert-octagon-outline
       recap: material/check-all
+      evidence: material/magnify
+      unknown: material/help-rhombus-outline
+      freshness: material/clock-outline
   font:
     text: Inter
     code: JetBrains Mono
@@ -38,6 +41,7 @@ theme:
 extra_css:
   - stylesheets/extra.css
   - stylesheets/widgets.css
+  - stylesheets/series.css
 
 extra_javascript:
   - javascripts/widgets.js
@@ -100,6 +104,23 @@ nav:
       - '35 · Enterprise Storage: iSCSI, Multipath and NVMe-oF': 35-enterprise-storage.md
       - '36 · Time: chrony, NTS and PTP': 36-time-synchronization.md
       - '37 · Real-Time and Low-Latency Rocky': 37-real-time-and-low-latency.md
+  - 'How Rocky Gets Built':
+      - 'Start here: how Rocky gets built': series-how-rocky-gets-built.md
+      - 'Lab kits': lab-kits.md
+      - '40 · How an OS Gets Built': 40-how-an-os-gets-built.md
+      - '41 · Anatomy of a Package': 41-anatomy-of-a-package.md
+      - '42 · What Is Inside an OS': 42-what-is-inside-an-os.md
+      - '43 · Installer and Install Media': 43-installer-and-install-media.md
+      - '44 · Images: Cloud, Container and bootc': 44-images-cloud-container-bootc.md
+      - "45 · Rocky's Pipeline I: From Source to Build": 45-pipeline-source-to-build.md
+      - "46 · Rocky's Pipeline II: Compose to Your Server": 46-pipeline-compose-to-your-server.md
+      - '47 · Trust I: Signatures and Keys': 47-trust-signatures-and-keys.md
+      - '48 · Trust II: Secure Boot, Module Signing, Reproducibility': 48-trust-secure-boot-and-reproducibility.md
+      - '49 · Build Your Own Packages and Repository': 49-build-your-own-packages-and-repo.md
+      - '50 · Build Your Own Koji': 50-build-your-own-koji.md
+      - '51 · Build Your Own Install Media': 51-build-your-own-install-media.md
+      - '52 · Capstone: MyOrg Lab': 52-capstone-myorg-lab.md
+      - '53 · Field Exam': 53-field-exam.md
 
 markdown_extensions:
   - tables
