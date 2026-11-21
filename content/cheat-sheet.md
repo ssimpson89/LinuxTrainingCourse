@@ -484,6 +484,17 @@ $ journalctl -u sshd | grep -i 'invalid user' | wc -l
 | `sudo cyclictest -m -S -p95 -i200 -D 60 -q` | Measure scheduling latency on every CPU | [37](37-real-time-and-low-latency.md) |
 | `sudo hwlatdetect --duration=60 --threshold=10` | Detect firmware or hypervisor stalls | [37](37-real-time-and-low-latency.md) |
 
+## Deep cuts: sandboxing and microVMs
+
+| Command | What it does | Module |
+|---------|--------------|--------|
+| `sysctl kernel.io_uring_disabled user.max_user_namespaces` | Check two attack-surface switches | [38](38-sandboxing-and-microvms.md) |
+| `grep Seccomp /proc/PID/status` | Is a seccomp filter active (`2`) on a process? | [38](38-sandboxing-and-microvms.md) |
+| `podman info --format '{{.Host.OCIRuntime.Name}}'` | Which OCI runtime Podman uses | [38](38-sandboxing-and-microvms.md) |
+| `podman run --runtime NAME …` | Run a container with a different OCI runtime | [38](38-sandboxing-and-microvms.md) |
+| `/usr/libexec/qemu-kvm -machine help` | List the machine types this QEMU build offers | [38](38-sandboxing-and-microvms.md) |
+| `firecracker --api-sock SOCK --config-file FILE` | Boot a Firecracker microVM from a JSON config | [38](38-sandboxing-and-microvms.md) |
+
 ## How Rocky gets built
 
 Commands from the "How Rocky Gets Built" series, [start here](series-how-rocky-gets-built.md). Most are read-only and work against Rocky's public services.

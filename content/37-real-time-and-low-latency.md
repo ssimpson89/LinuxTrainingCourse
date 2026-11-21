@@ -1103,4 +1103,4 @@ They're managed IRQs: the driver and kernel own their affinity. Use `isolcpus=ma
 - [Kernel docs: NO_HZ, reducing scheduling-clock ticks](https://docs.kernel.org/timers/no_hz.html) and [Hardware Latency Detector](https://docs.kernel.org/trace/hwlat_detector.html).
 - [Rocky Linux repositories](https://docs.rockylinux.org/10/teams/rel_eng/repo/): every repo id, including `rt` and `nfv`.
 
-**Next:** you've reached the end of the electives. Head back to the [course home](index.md).
+**Next:** [38 · Sandboxing and MicroVMs](38-sandboxing-and-microvms.md)

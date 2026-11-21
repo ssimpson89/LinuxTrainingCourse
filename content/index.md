@@ -289,6 +289,11 @@ The topics most Linux guides skip. Take them after the core track, in any order.
     <span class="syllabus-card__title">Real-Time and Low Latency</span>
     <span class="syllabus-card__description">kernel-rt, CPU isolation, IRQ affinity, tuned profiles, and measuring jitter.</span>
   </a>
+  <a class="syllabus-card syllabus-card--elective" href="38-sandboxing-and-microvms/">
+    <span class="syllabus-card__index">38</span>
+    <span class="syllabus-card__title">Sandboxing and MicroVMs</span>
+    <span class="syllabus-card__description">io_uring, unprivileged user namespaces, gVisor, Kata and krun, and Firecracker microVMs for untrusted workloads.</span>
+  </a>
 </div>
 
 ## How Rocky gets built (a series) { #how-rocky-gets-built }
