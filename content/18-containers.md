@@ -29,6 +29,8 @@ exactly the same thing, only faster and more safely.
     - Run rootless containers with Podman and explain how user namespaces,
       `/etc/subuid` and overlayfs layers make that safe.
     - Fix SELinux volume denials with `:Z` and group containers into pods.
+    - Say why a shared kernel limits container isolation, and when to reach
+      for the stronger runtimes in [module 38](38-sandboxing-and-microvms.md).
     - Run a container as a proper systemd service with a Quadlet `.container` file.
     - Build an image from a `Containerfile` and copy images with `skopeo`.
 
@@ -1031,6 +1033,43 @@ Ports are published on the pod, not on individual containers.
 `podman kube generate blog > blog.yaml` writes the pod as Kubernetes YAML, and
 `podman kube play blog.yaml` recreates it.
 
+### When a shared kernel isn't enough (in brief)
+
+Every container on a host makes its system calls into the same kernel. So a
+container escape is usually a kernel bug that the attacker can reach from
+inside the container. SELinux, seccomp and capabilities make that harder, but
+they cannot fix a bug in the kernel itself.
+
+Two facts every Rocky admin should know:
+
+- **io_uring is locked twice.** io_uring is a fast asynchronous I/O interface
+  that has been a rich source of kernel bugs. Rocky follows RHEL and disables
+  it by default with `kernel.io_uring_disabled = 2`, and Podman's default
+  seccomp profile doesn't allow the io_uring system calls either. On the host
+  the kernel's refusal is `EPERM`; inside a container the seccomp refusal is
+  `ENOSYS` ("Function not implemented").
+- **Rootless Podman depends on unprivileged user namespaces.** Being "root" in
+  your own user namespace also lets an ordinary user reach kernel code that
+  once needed real root, so hardening guides sometimes set
+  `user.max_user_namespaces = 0`. Don't do it blindly: it breaks rootless
+  Podman, Flatpak and browser sandboxes. Rootful containers keep working.
+
+For code you genuinely don't trust, stop sharing the kernel. Podman hands
+the real work to an **OCI runtime** (crun on Rocky), and other runtimes put
+more between the workload and the host kernel:
+
+| Runtime | What isolates the workload |
+|---|---|
+| crun (the default) | The host kernel's namespaces, cgroups, SELinux and seccomp |
+| gVisor (`runsc`) | A user-space kernel that answers most system calls itself |
+| microVM runtimes (Kata, krun) | A small KVM virtual machine with its own guest kernel per container |
+| Full VM (KVM and libvirt) | Its own kernel, OS and full virtual hardware |
+
+Each step down costs more startup time, memory or compatibility, and on Rocky
+10 only crun is in the base repositories. [Module 38](38-sandboxing-and-microvms.md)
+covers the threat model, the attack-surface sysctls and every runtime in depth,
+with labs.
+
 ## Quadlet: containers as systemd services
 
 ### The problem
@@ -1460,7 +1499,8 @@ to stay in the foreground.
 !!! pitfall "Treating a container as a security boundary like a VM"
     Containers share the host kernel. A kernel exploit inside one container
     reaches the host. Keep SELinux enforcing, prefer rootless, never use
-    `--privileged` casually, and use a VM when you must run untrusted code.
+    `--privileged` casually, and use a VM or microVM when you must run
+    untrusted code (see [module 38](38-sandboxing-and-microvms.md)).
 
 ## Cheat sheet
 

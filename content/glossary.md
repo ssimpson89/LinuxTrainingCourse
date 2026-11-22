@@ -285,6 +285,9 @@ This glossary has 344 terms.
 **Fingerprint (key)**
 :   The full 40-hex-digit identity of an OpenPGP v4 key. It is the thing to compare, as opposed to the short key ID. See [module 47](47-trust-signatures-and-keys.md).
 
+**Firecracker**
+:   A minimal virtual machine monitor written in Rust by AWS for Lambda and Fargate. It runs microVMs with a handful of virtio devices and no firmware. See [module 38](38-sandboxing-and-microvms.md).
+
 **firewalld**
 :   Rocky's firewall service. It organises rules into zones and services and programs the kernel's nftables underneath. See [module 12](12-firewalld.md).
 
@@ -316,6 +319,9 @@ This glossary has 344 terms.
 
 **GRUB2**
 :   The boot loader on Rocky. It shows the boot menu, loads the kernel and initramfs, and passes kernel arguments. See [module 14](14-the-boot-process.md).
+
+**gVisor**
+:   A sandbox runtime (`runsc`) that runs a user-space kernel between a container and the host kernel, answering most system calls itself. See [module 38](38-sandboxing-and-microvms.md).
 
 ## H
 
@@ -372,6 +378,9 @@ This glossary has 344 terms.
 **I/O scheduler**
 :   The kernel layer that orders and merges block requests before they reach a device: `none`, `mq-deadline`, `kyber` or `bfq`, set per device in `/sys/block/DEV/queue/scheduler`. See [module 35](35-enterprise-storage.md).
 
+**io_uring**
+:   A fast asynchronous I/O interface built on two ring buffers shared between a process and the kernel. It has been a major source of kernel exploits, so Rocky disables it by default with `kernel.io_uring_disabled`. See [module 38](38-sandboxing-and-microvms.md).
+
 **IQN (iSCSI Qualified Name)**
 :   The unique name of an iSCSI initiator or target, such as `iqn.2026-10.test.lab:storage1`. See [module 35](35-enterprise-storage.md).
 
@@ -393,6 +402,9 @@ This glossary has 344 terms.
 
 **kABI**
 :   The list of kernel symbols that modules may depend on, kept stable within a release so third-party modules keep loading. See [module 29](29-secure-boot-and-drivers.md) and [module 42](42-what-is-inside-an-os.md).
+
+**Kata Containers**
+:   An OCI runtime that starts each container or pod inside its own lightweight virtual machine with its own kernel. See [module 38](38-sandboxing-and-microvms.md).
 
 **KDC (Key Distribution Center)**
 :   The Kerberos server that checks your password once and issues tickets. FreeIPA servers and AD domain controllers are KDCs. See [module 26](26-centralized-identity.md).
@@ -456,6 +468,9 @@ This glossary has 344 terms.
 **Leap second**
 :   An extra second occasionally inserted into UTC. chrony can step, slew or "smear" it; a mismatched approach across machines causes brief clock disagreements. See [module 36](36-time-synchronization.md).
 
+**libkrun**
+:   A library that runs a process inside a tiny KVM virtual machine; the `krun` OCI runtime uses it to run containers in microVMs. See [module 38](38-sandboxing-and-microvms.md).
+
 **libvirt**
 :   The management layer for KVM virtual machines: it stores VM definitions as XML, starts QEMU, sets up networks and storage, and applies SELinux labels and cgroups. `virsh`, `virt-install`, `virt-manager` and Cockpit all use it. See [module 27](27-virtualization-kvm.md).
 
@@ -505,6 +520,9 @@ This glossary has 344 terms.
 
 **MCS (Multi-Category Security)**
 :   The category part of an SELinux label (`s0:c214,c739`). Podman gives each container different categories so containers cannot read each other's files. See [module 18](18-containers.md).
+
+**MicroVM**
+:   A KVM virtual machine with almost all PC hardware removed (no firmware, few devices), so it boots in a fraction of a second with a few MiB of overhead. See [module 38](38-sandboxing-and-microvms.md).
 
 **Mirrorlist and metalink**
 :   Two services that answer `dnf` for your location. A mirrorlist returns plain mirror URLs. A metalink returns XML with the expected hash, size and timestamp of `repomd.xml` plus mirror URLs. See [module 46](46-pipeline-compose-to-your-server.md).
@@ -590,6 +608,9 @@ This glossary has 344 terms.
 
 **OCI image**
 :   The standard container image format: layers plus a manifest, named by a SHA-256 digest. A manifest list holds one image per architecture. See [module 44](44-images-cloud-container-bootc.md).
+
+**OCI runtime**
+:   The low-level program (crun on Rocky) that Podman calls to actually create a container's namespaces, cgroups and security settings. Others, like gVisor or krun, isolate more strongly. See [module 38](38-sandboxing-and-microvms.md).
 
 **OOM killer**
 :   The kernel mechanism that kills a process when memory runs out completely, leaving an `Out of memory: Killed process` message in the kernel log. See [module 25](25-memory-deep-dive.md).
@@ -1049,11 +1070,17 @@ This glossary has 344 terms.
 **vmcore**
 :   The memory dump of a crashed kernel saved by kdump under `/var/crash/`, analysed with the `crash` tool. See [module 24](24-debugging-crashes.md).
 
+**VMM (virtual machine monitor)**
+:   The user-space program that holds a KVM virtual machine and emulates its devices, such as QEMU or Firecracker. See [module 27](27-virtualization-kvm.md) and [module 38](38-sandboxing-and-microvms.md).
+
 **Volume group (VG)**
 :   An LVM pool made from one or more physical volumes, from which logical volumes are allocated. See [module 10](10-lvm-raid-and-encryption.md).
 
 **Volume ID (ISO label)**
 :   The short name stored in an ISO. GRUB (`search -l`) and the installer (`inst.stage2=hd:LABEL=`, `inst.ks=hd:LABEL=`) both find the media by it, so every one must match. See [module 43](43-installer-and-install-media.md) and [module 51](51-build-your-own-install-media.md).
+
+**vsock (AF_VSOCK)**
+:   A socket type for talking between a virtual machine and its host without any network configuration. See [module 38](38-sandboxing-and-microvms.md).
 
 ## W
 

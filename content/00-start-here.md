@@ -99,7 +99,7 @@ Correct. Minor releases (10.0 → 10.1 → 10.2) are delivered as ordinary packa
 
 ## How this course works
 
-The course has 38 modules: a **core track** of 21 modules in five parts, where each part builds on the one before it, plus 17 **Deep Cuts** electives that go further than almost any other Linux course. A separate series of 14 modules, [How Rocky Gets Built](series-how-rocky-gets-built.md) (modules 40 to 53), explains how the distribution you are learning is itself built, signed and shipped, and lets you build a small one of your own.
+The course has 39 modules: a **core track** of 21 modules in five parts, where each part builds on the one before it, plus 18 **Deep Cuts** electives that go further than almost any other Linux course. A separate series of 14 modules, [How Rocky Gets Built](series-how-rocky-gets-built.md) (modules 40 to 53), explains how the distribution you are learning is itself built, signed and shipped, and lets you build a small one of your own.
 
 ```mermaid
 flowchart TB
@@ -107,7 +107,7 @@ flowchart TB
     B --> C["Storage and networking<br/>09–13"]
     C --> D["Under the hood<br/>14–19"]
     D --> E["Putting it together<br/>20 + reference"]
-    E --> F["Deep Cuts electives<br/>21–37, any order"]
+    E --> F["Deep Cuts electives<br/>21–38, any order"]
 ```
 
 Every module has the same shape, so you always know where you are:
@@ -141,9 +141,9 @@ Interactive diagrams look like this. Click a layer:
 
 <div class="layers" data-hint="Click a part of the course to see what it covers." markdown>
 
-<div class="layer" data-label="Deep Cuts (electives)" data-tag="21–37" markdown>
+<div class="layer" data-label="Deep Cuts (electives)" data-tag="21–38" markdown>
 
-The topics most guides skip: how Rocky itself is built and signed, RPM packaging, Kickstart and PXE, crash dumps, memory internals, FreeIPA, KVM, Pacemaker, Secure Boot and drivers, Clevis/Tang, disaster recovery, Ansible, TLS and post-quantum crypto, nftables, SAN storage, time sync, and real-time tuning.
+The topics most guides skip: how Rocky itself is built and signed, RPM packaging, Kickstart and PXE, crash dumps, memory internals, FreeIPA, KVM, Pacemaker, Secure Boot and drivers, Clevis/Tang, disaster recovery, Ansible, TLS and post-quantum crypto, nftables, SAN storage, time sync, real-time tuning, and sandboxing with microVMs.
 
 </div>
 

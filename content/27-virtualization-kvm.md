@@ -998,6 +998,25 @@ The same `qemu+ssh://` URI works with `virsh -c` from any machine, which is hand
 ??? question "Under the hood: what a remote `qemu+ssh://` connection really does"
     There is no libvirt network port to open. The client runs `ssh user@host` and, on the far side, starts a small helper (`virt-ssh-helper` on current libvirt) that connects to the local libvirt UNIX socket in `/run/libvirt/`. Your SSH session *is* the transport. So the remote user needs SSH access plus membership in the `libvirt` group (or polkit rules) on the host, and nothing else. If remote connections hang, test the pieces separately: `ssh host true`, then on the host `virsh -c qemu:///system list` as that same user.
 
+## MicroVMs: VMs that boot like containers { #microvms }
+
+Everything so far has been a full virtual PC: firmware, a chipset, USB controllers, a graphics card, all emulated so that any operating system feels at home. That generality costs seconds of boot time and tens of MiB per VM, which matters for a platform that starts a fresh, isolated machine for every function call or CI job.
+
+> **A microVM is a real KVM virtual machine with almost all of the PC hardware thrown away, so it boots in a fraction of a second and costs a few MiB, giving container-like speed with VM-grade isolation.**
+
+The guest still runs its own kernel on the real CPU through KVM. What changes is the VMM, the user-space program that holds the VM: instead of `qemu-kvm` with hundreds of device models, a small purpose-built program such as **Firecracker** offers a handful of virtio devices and nothing else. What gets thrown away:
+
+- **No firmware.** No BIOS or UEFI, no bootloader: the VMM loads the guest kernel straight into memory (**direct kernel boot**).
+- **No legacy or PC-only devices.** No USB, graphics, sound, IDE or SATA controller, or emulated e1000 NIC.
+- **Often no PCI bus.** Devices are announced through **virtio-mmio** instead.
+- **A tiny device set.** Typically virtio-net, virtio-block, vsock and a serial console.
+
+The best-known numbers come from Firecracker, which AWS built for Lambda and Fargate. Its published specification promises at most 125 ms from the "start" API call to the guest's `/sbin/init`, and at most 5 MiB of memory overhead per microVM (on AWS bare-metal hosts with a minimal guest). Treat these as the project's own benchmark figures: a nested lab VM will be slower, but still in a different class from a q35 guest.
+
+On Rocky 10, Firecracker is not in the repos: it ships as static release binaries (`firecracker`, `jailer`) on GitHub. Rocky's `qemu-kvm` uses RHEL's trimmed device list, which leaves QEMU's `microvm` machine type out. `libkrun` is built for CentOS Stream 10 and RHEL 10.2, but the `crun-krun` handler is a Fedora package whose RHEL 10 status is changing; check `dnf info libkrun crun-krun` on your release.
+
+[Module 38](38-sandboxing-and-microvms.md#microvms) covers microVMs in full (the building blocks, the jailer and its two walls, the landscape of VMMs, when not to use one) and has a lab that boots a Firecracker microVM by hand.
+
 ## Practice
 
 <div class="terminal-sim" data-title="Inspect a hypervisor" data-prompt="[alex@kvmhost ~]$ " markdown>
